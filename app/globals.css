@@ -1,0 +1,125 @@
+@import url('https://fonts.googleapis.com/css2?family=Alexandria:wght@300;400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Easing curves */
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  }
+
+  html {
+    font-family: 'Alexandria', system-ui, sans-serif;
+    color: #023047;
+    background: #fafafa;
+  }
+
+  /* Tabular numerals everywhere data is rendered */
+  table, code, pre, kbd, [data-tabnum] {
+    font-feature-settings: "tnum" on, "lnum" on;
+  }
+
+  h1, h2, h3, h4 {
+    color: #023047;
+    letter-spacing: -0.01em;
+    font-weight: 700;
+    text-wrap: balance; /* avoids single-word last lines on headings */
+  }
+
+  h1 { letter-spacing: -0.02em; }
+
+  p {
+    text-wrap: pretty; /* avoids orphans in body copy */
+  }
+
+  hr {
+    border: 0;
+    border-top: 1px solid #F2F4F7; /* ink-200 — predictable across browsers */
+  }
+
+  /* Reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+      transition-property: opacity, color, background-color, border-color !important;
+    }
+  }
+}
+
+@layer components {
+  /* Brand wordmark — used in the header */
+  .brand-wordmark {
+    @apply font-sans font-bold text-brand;
+    letter-spacing: -0.04em;
+    text-transform: lowercase;
+  }
+
+  /* Reusable button styles */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 min-h-10
+           rounded-md border border-ink-300 bg-white px-3.5 py-2
+           text-sm font-medium text-midnight
+           transition-[transform,background-color,border-color,color]
+           hover:border-brand hover:text-brand
+           active:scale-[0.97]
+           focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand
+           disabled:opacity-50 disabled:pointer-events-none;
+    transition-timing-function: var(--ease-out);
+    transition-duration: 140ms;
+  }
+  .btn-primary {
+    @apply bg-brand border-brand text-white font-semibold
+           hover:bg-brand-dark hover:border-brand-dark hover:text-white;
+  }
+  .btn-ghost {
+    @apply bg-transparent border-transparent text-ink-600
+           hover:bg-ink-100 hover:text-midnight hover:border-transparent;
+  }
+
+  /* Card */
+  .card {
+    @apply bg-white border border-ink-200 rounded-lg p-5
+           transition-colors;
+  }
+  .card-hover {
+    @apply hover:border-brand;
+  }
+
+  /* Metric card */
+  .metric {
+    @apply card flex flex-col gap-1;
+  }
+  .metric-label {
+    @apply text-xs font-medium text-ink-500;
+  }
+  .metric-value {
+    @apply text-2xl font-bold text-midnight leading-tight;
+    font-feature-settings: "tnum" on, "lnum" on;
+  }
+
+  /* Form input */
+  .input {
+    @apply w-full px-3 py-2 rounded-md border border-ink-300
+           bg-white text-sm text-midnight placeholder:text-ink-400
+           focus-visible:border-brand focus-visible:ring-1 focus-visible:ring-brand focus-visible:outline-none
+           transition-colors;
+    font-feature-settings: "tnum" on, "lnum" on;
+  }
+
+  /* Sidebar nav button — high-frequency target, no animation */
+  .nav-btn {
+    @apply w-full flex items-center justify-start gap-2 px-3 py-2
+           text-sm font-medium text-midnight rounded-md
+           border border-transparent
+           hover:bg-white hover:border-ink-200
+           focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand;
+  }
+  .nav-btn-active {
+    @apply bg-brand text-white border-brand
+           hover:bg-brand-dark hover:border-brand-dark hover:text-white;
+  }
+}

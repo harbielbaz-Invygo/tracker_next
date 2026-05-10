@@ -1,0 +1,25 @@
+node_modules/
+.next/
+out/
+
+# All env files — never commit secrets. .env.example is OK to commit.
+.env
+.env.local
+.env.production
+.env*.local
+
+# Local SQLite DB and WAL artifacts. Vercel uses Turso instead.
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.db-journal
+data/user_settings.json
+
+# Build / IDE / OS noise
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
+.vercel
+
+# Drizzle migration cache (generated locally; we use db:push for now)
+drizzle/

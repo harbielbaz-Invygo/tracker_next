@@ -1,0 +1,461 @@
+/**
+ * Dashboard data layer.
+ *
+ * Server-side queries + display-row computation for the Dashboard view.
+ * Mirrors `tracker_v1/dashboard.py:_batch_table_row` and `_classify_status`,
+ * but pre-flattened so the table component can render without re-querying.
+ */
+import { db } from "@/lib/db";
+import {
+  batches, dealers, batchActions, actionTypes, departments, stakeholders,
+} from "@/lib/db/schema";
+import { eq, desc, and, asc } from "drizzle-orm";
+
+// ──────────────────────────────────────────────────────────────────
+// Display types
+// ──────────────────────────────────────────────────────────────────
+
+/** Status bucket used both for the table chip and the status filter. */
+export type StatusBucket = "on_track" | "ahead" | "delayed" | "delivered";
+
+/** One row in the requests table. All values are pre-formatted for display. */
+export interface DashboardRow {
+  /* Identity */
+  batchCode: string;
+  poNumber: string | null;
+
+  /* Vehicle */
+  dealerName: string;
+  modelYear: string;          // e.g. "Sonata 2026" or "—"
+  quantity: number;
+  colors: string;             // raw text or ""
+
+  /* Dates */
+  requestedAt: string;        // ISO
+  promisedDate: string;       // ISO
+
+  /* Stage / lifecycle */
+  stage: string;              // raw stage code
+  stageDisplay: string;       // titleized
+
+  /* Status presentation */
+  poStatusLabel: string;      // "✅ 2025-04-12" / "⚠️ Overdue 3d" / "🟢 due in 5d" / "—"
+  deliveryStatusLabel: string;
+  status: StatusBucket;
+  statusLabel: string;        // "🟢 On track" etc.
+  delayDays: number;          // signed; positive = late
+
+  /* Risk + confidence */
+  risk: number;
+  confidenceLabel: string;    // "60% / 45%"
+}
+
+/** Plan-vs-Reality timeline data — used by the SVG renderer. */
+export interface TimelineData {
+  batchCode: string;
+  modelYear: string;
+  dealerName: string;
+  quantity: number;
+  stageDisplay: string;
+
+  /* Plan track */
+  planRequested: string;
+  planExpectedPo: string | null;
+  planPromised: string;
+
+  /**
+   * Date the dealer issued the PO (parsed from the PDF). Drawn as a
+   * tick on the Reality track BEFORE Submitted when there's a
+   * pre-tracking gap. `null` when no PO date is known (e.g. Pre-PO bets).
+   */
+  poIssuedDate: string | null;
+  /**
+   * Days lost between PO issuance and our upload. 0 when poDate >= requestedAt
+   * (we uploaded same-day or anticipated). Positive when there was lag.
+   */
+  preTrackingGapDays: number;
+
+  /* Reality track */
+  realityRequested: string;
+  realityActualPo: string | null;
+  /**
+   * The end-of-Reality marker.
+   *   - When the batch is closed → `closedAt` (the Actual Availability Date).
+   *     Label is "Actual Availability Date" (delivered) or "Cancelled".
+   *   - When the batch is open → today's projection. Label "Projected".
+   *   - When neither is available → null.
+   */
+  realityDelivery: string | null;
+  realityDeliveryLabel: "Actual Availability Date" | "Cancelled" | "Projected" | null;
+  /**
+   * Every completed batch_action becomes a tick on the Reality track,
+   * sourced from `batch_actions.completedAt` (date-only). Sorted ascending.
+   * The `Delivery` action is excluded — it's the canonical "Delivered"
+   * marker, rendered separately as `realityDelivery`.
+   *
+   * `delayDays` = completed − expected (signed). 0 when on time or when
+   * the action had no `expectedDate` set.
+   */
+  realityActions: { date: string; label: string; delayDays: number }[];
+
+  /* Delay measurements (signed; positive = late) */
+  poDelayDays: number | null;
+  deliveryDelayDays: number | null;
+
+  /* Header chips */
+  poStatusLabel: string;
+  deliveryStatusLabel: string;
+  overallStatusLabel: string;
+
+  /**
+   * Full activity list — every batch_action on this batch with its
+   * owner, planned date (`expectedDate`), actual completion, and signed
+   * delay. Drives the activity table shown under the Plan vs Reality
+   * SVG. Sorted chronologically by expected date (null expected last,
+   * with skipped at the very end).
+   */
+  activity: TimelineActivity[];
+}
+
+/** One row in the activity table under the Plan vs Reality SVG. */
+export interface TimelineActivity {
+  /** Stable action_types.name — the canonical key (e.g. "VIN"). */
+  actionTypeName: string;
+  /** Display label, swapped to done_label when status === "done". */
+  actionLabel: string;
+  status: "waiting" | "blocked" | "done" | "skipped";
+  /** Department that owns the action, or null when unassigned. */
+  departmentName: string | null;
+  /** Specific stakeholder picked for the action, or null. */
+  stakeholderName: string | null;
+  /** ISO yyyy-mm-dd planned date. Null when no expected date is set. */
+  expectedDate: string | null;
+  /** ISO yyyy-mm-dd actual completion date. Null when still open. */
+  completedAt: string | null;
+  /**
+   * Signed delay in days vs the expected date.
+   *   - `done` action with both dates → completedAt − expectedDate.
+   *   - `waiting`/`blocked` action with expectedDate in the past → today − expectedDate (positive).
+   *   - Otherwise → null (no delay calculable).
+   */
+  delayDays: number | null;
+  notes: string | null;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function daysBetween(a: string | null | undefined, b: string | null | undefined): number {
+  if (!a || !b) return 0;
+  return Math.round((new Date(a).getTime() - new Date(b).getTime()) / DAY_MS);
+}
+
+function daysFromToday(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((new Date(iso).getTime() - today.getTime()) / DAY_MS);
+}
+
+function stageDisplay(code: string | null | undefined): string {
+  if (!code) return "—";
+  return code
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Public queries
+// ──────────────────────────────────────────────────────────────────
+
+/**
+ * Return one DashboardRow per batch, ordered most-recently-requested first.
+ *
+ * Sources the "Delivered" date from the canonical `Delivery` action's
+ * `completed_at`. Falls back to scanning every completed batch_action
+ * with the canonical name "Delivery" — the seed/Settings always uses
+ * that name as the action_type identity for the final hand-off.
+ */
+export async function getDashboardRows(): Promise<DashboardRow[]> {
+  const rows = await db
+    .select({
+      b: batches,
+      dealerName: dealers.name,
+    })
+    .from(batches)
+    .leftJoin(dealers, eq(batches.dealerId, dealers.id))
+    .orderBy(desc(batches.requestedAt));
+
+  // Pull every completed Delivery action — one row per delivered batch.
+  const delivered = await db
+    .select({
+      batchId:     batchActions.batchId,
+      completedAt: batchActions.completedAt,
+    })
+    .from(batchActions)
+    .innerJoin(actionTypes, eq(batchActions.actionTypeId, actionTypes.id))
+    .where(and(
+      eq(batchActions.status, "done"),
+      eq(actionTypes.name, "Delivery"),
+    ));
+  const deliveredByBatch = new Map<number, string>();
+  for (const m of delivered) {
+    if (m.completedAt) deliveredByBatch.set(m.batchId, m.completedAt.slice(0, 10));
+  }
+
+  return rows.map(({ b, dealerName }) => buildRow(b, dealerName, deliveredByBatch.get(b.id)));
+}
+
+/**
+ * Hydrate a single batch's timeline data for the drawer.
+ * Returns null when the code doesn't match.
+ *
+ * Reality track is built from `batch_actions`:
+ *   - Every completed action becomes a tick on the Reality track at its
+ *     `completed_at` date, labelled with the action_type's `done_label`.
+ *   - The canonical `Delivery` action drives the dedicated `realityDelivery`
+ *     field (and the delivery delay bracket), and is omitted from the
+ *     generic `realityActions` list to avoid a duplicate tick.
+ */
+export async function getTimelineData(batchCode: string): Promise<TimelineData | null> {
+  const row = await db
+    .select({ b: batches, dealerName: dealers.name })
+    .from(batches)
+    .leftJoin(dealers, eq(batches.dealerId, dealers.id))
+    .where(eq(batches.batchCode, batchCode))
+    .limit(1);
+
+  if (row.length === 0) return null;
+  const { b, dealerName } = row[0];
+
+  // Every batch_action on this batch — used for both the Reality SVG
+  // ticks (filter to done) and the activity table (full set).
+  const allActions = await db
+    .select({
+      id:             batchActions.id,
+      status:         batchActions.status,
+      completedAt:    batchActions.completedAt,
+      expectedDate:   batchActions.expectedDate,
+      notes:          batchActions.notes,
+      actionTypeName: actionTypes.name,
+      waitingLabel:   actionTypes.waitingLabel,
+      doneLabel:      actionTypes.doneLabel,
+      sortOrder:      actionTypes.sortOrder,
+      departmentName: departments.name,
+      stakeholderName: stakeholders.name,
+    })
+    .from(batchActions)
+    .innerJoin(actionTypes,    eq(batchActions.actionTypeId, actionTypes.id))
+    .leftJoin(departments,     eq(batchActions.departmentId, departments.id))
+    .leftJoin(stakeholders,    eq(batchActions.assignedStakeholderId, stakeholders.id))
+    .where(eq(batchActions.batchId, b.id))
+    .orderBy(asc(actionTypes.sortOrder));
+
+  const completedActions = allActions.filter((a) => a.status === "done");
+
+  const deliveryAction = completedActions.find((a) => a.actionTypeName === "Delivery");
+  const deliveredAt = deliveryAction?.completedAt
+    ? deliveryAction.completedAt.slice(0, 10)
+    : null;
+
+  // ── Activity table rows — every batch_action with owner + delay ──
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const activity: TimelineActivity[] = allActions.map((a) => {
+    const completedIso = a.completedAt ? a.completedAt.slice(0, 10) : null;
+    let delayDays: number | null = null;
+    if (a.status === "done" && completedIso && a.expectedDate) {
+      delayDays = daysBetween(completedIso, a.expectedDate);
+    } else if ((a.status === "waiting" || a.status === "blocked") && a.expectedDate && todayIso > a.expectedDate) {
+      // Past-due open action — surface how late it already is.
+      delayDays = daysBetween(todayIso, a.expectedDate);
+    }
+    return {
+      actionTypeName: a.actionTypeName,
+      actionLabel: a.status === "done" ? a.doneLabel : a.waitingLabel,
+      status: a.status,
+      departmentName: a.departmentName ?? null,
+      stakeholderName: a.stakeholderName ?? null,
+      expectedDate: a.expectedDate ?? null,
+      completedAt: completedIso,
+      delayDays,
+      notes: a.notes ?? null,
+    };
+  });
+
+  // Sort the activity narrative chronologically: skipped go to the
+  // bottom; done/waiting/blocked sort by expectedDate (or completedAt
+  // when no plan), with rows missing both dates pushed last.
+  activity.sort((a, b) => {
+    const aSkip = a.status === "skipped" ? 1 : 0;
+    const bSkip = b.status === "skipped" ? 1 : 0;
+    if (aSkip !== bSkip) return aSkip - bSkip;
+    const aKey = a.expectedDate ?? a.completedAt ?? "9999-12-31";
+    const bKey = b.expectedDate ?? b.completedAt ?? "9999-12-31";
+    return aKey.localeCompare(bKey);
+  });
+
+  // Every completed action except Delivery → Reality ticks.
+  // delayDays = completed − expected (signed). 0 when no expectedDate or on time.
+  const realityActions = completedActions
+    .filter((a) => a.actionTypeName !== "Delivery" && a.completedAt)
+    .map((a) => {
+      const completedIso = a.completedAt!.slice(0, 10);
+      const delayDays = a.expectedDate ? daysBetween(completedIso, a.expectedDate) : 0;
+      return {
+        date:  completedIso,
+        label: a.doneLabel,
+        delayDays,
+      };
+    });
+
+  const built = buildRow(b, dealerName, deliveredAt ?? undefined);
+
+  /**
+   * Reality end-of-track. Three sources, in priority order:
+   *   1. Closed batch → `closedAt` (the Actual Availability Date). Label
+   *      varies by `closureReason`: "Actual Availability Date" or "Cancelled".
+   *   2. Delivered action complete (legacy/edge case for batches that
+   *      somehow didn't get auto-closed) → its completedAt.
+   *   3. Open batch with a projection → currentProjectedDeliveryDate.
+   */
+  let realityDelivery: string | null = null;
+  let realityDeliveryLabel: "Actual Availability Date" | "Cancelled" | "Projected" | null = null;
+  if (b.closedAt) {
+    realityDelivery = b.closedAt;
+    realityDeliveryLabel = b.closureReason === "cancelled"
+      ? "Cancelled"
+      : "Actual Availability Date";
+  } else if (deliveredAt) {
+    realityDelivery = deliveredAt;
+    realityDeliveryLabel = "Actual Availability Date";
+  } else if (b.currentProjectedDeliveryDate) {
+    realityDelivery = b.currentProjectedDeliveryDate;
+    realityDeliveryLabel = "Projected";
+  }
+
+  const poDelayDays =
+    b.actualPoDate && b.expectedPoDate
+      ? daysBetween(b.actualPoDate, b.expectedPoDate)
+      : null;
+
+  const deliveryDelayDays = realityDelivery
+    ? daysBetween(realityDelivery, b.dealerPromisedDeliveryDate)
+    : null;
+
+  return {
+    batchCode: b.batchCode,
+    modelYear: built.modelYear,
+    dealerName: built.dealerName,
+    quantity: b.requestedQuantity,
+    stageDisplay: stageDisplay(b.currentStage),
+
+    planRequested: b.requestedAt,
+    planExpectedPo: b.expectedPoDate ?? null,
+    planPromised: b.dealerPromisedDeliveryDate,
+
+    poIssuedDate: b.actualPoDate ?? null,
+    preTrackingGapDays: b.actualPoDate
+      ? Math.max(0, daysBetween(b.requestedAt, b.actualPoDate))
+      : 0,
+
+    realityRequested: b.requestedAt,
+    realityActualPo: b.actualPoDate ?? null,
+    realityDelivery,
+    realityDeliveryLabel,
+    realityActions,
+
+    poDelayDays,
+    deliveryDelayDays,
+
+    poStatusLabel: built.poStatusLabel,
+    deliveryStatusLabel: built.deliveryStatusLabel,
+    overallStatusLabel: built.statusLabel,
+
+    activity,
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Row builder (pure — easy to unit-test later)
+// ──────────────────────────────────────────────────────────────────
+
+function buildRow(
+  b: typeof batches.$inferSelect,
+  dealerName: string | null,
+  deliveredAt?: string,
+): DashboardRow {
+  // PO status
+  let poStatusLabel = "—";
+  if (b.actualPoDate) {
+    poStatusLabel = `✅ ${b.actualPoDate}`;
+  } else if (b.targetPoDate) {
+    const daysLeft = daysFromToday(b.targetPoDate) ?? 0;
+    poStatusLabel = daysLeft < 0 ? `⚠️ Overdue ${-daysLeft}d` : `🟢 due in ${daysLeft}d`;
+  }
+
+  // Delivery status
+  let deliveryStatusLabel = "—";
+  if (deliveredAt) {
+    deliveryStatusLabel = `🎉 ${deliveredAt}`;
+  } else if (b.currentProjectedDeliveryDate) {
+    deliveryStatusLabel = `🔮 ${b.currentProjectedDeliveryDate}`;
+  }
+
+  // Delay vs promise
+  const delayDays =
+    b.currentProjectedDeliveryDate && b.dealerPromisedDeliveryDate
+      ? daysBetween(b.currentProjectedDeliveryDate, b.dealerPromisedDeliveryDate)
+      : 0;
+
+  // Status bucket + label
+  let status: StatusBucket;
+  let statusLabel: string;
+  if (b.currentStage === "delivered") {
+    status = "delivered";
+    statusLabel = "🎉 Delivered";
+  } else if (delayDays > 0) {
+    status = "delayed";
+    statusLabel = `🔴 Delayed +${delayDays}d`;
+  } else if (delayDays < 0) {
+    status = "ahead";
+    statusLabel = `🔵 Ahead ${-delayDays}d`;
+  } else {
+    status = "on_track";
+    statusLabel = "🟢 On track";
+  }
+
+  const modelYear = [b.model, b.year].filter(Boolean).join(" ") || "—";
+
+  return {
+    batchCode: b.batchCode,
+    poNumber: b.poNumber ?? null,
+    dealerName: dealerName ?? "—",
+    modelYear,
+    quantity: b.requestedQuantity,
+    colors: b.colorSummary ?? "",
+    requestedAt: b.requestedAt,
+    promisedDate: b.dealerPromisedDeliveryDate,
+    stage: b.currentStage ?? "request_submitted",
+    stageDisplay: stageDisplay(b.currentStage),
+    poStatusLabel,
+    deliveryStatusLabel,
+    status,
+    statusLabel,
+    delayDays,
+    risk: Math.round(b.riskScore ?? 0),
+    confidenceLabel: `${Math.round(b.partnershipConfidence ?? 0)}% / ${Math.round(b.operationsConfidence ?? 0)}%`,
+  };
+}
+
+/** Aggregate metrics for the top of the dashboard. */
+export function summarize(rows: DashboardRow[]) {
+  const total = rows.length;
+  const delivered = rows.filter((r) => r.status === "delivered").length;
+  const active = total - delivered;
+  const delayed = rows.filter((r) => r.status === "delayed").length;
+  const onTrack = rows.filter((r) => r.status === "on_track").length;
+  return { total, active, delivered, delayed, onTrack };
+}

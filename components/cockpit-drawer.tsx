@@ -1,0 +1,829 @@
+"use client";
+
+/**
+ * Cockpit per-batch drawer.
+ *
+ * Two interactive surfaces:
+ *
+ *  1. Ops confidence — slider 0-100. First save locks
+ *     `operations_confidence_at_lock` (immutable snapshot for the
+ *     "did Ops know?" analytic). Subsequent saves only update the live
+ *     value.
+ *
+ *  2. Action list — grouped by status (Waiting / Blocked / Done / Skipped).
+ *     "Mark done" flips status, stamps `completed_at`, and triggers the
+ *     auto-unblock cascade on the server. The drawer re-fetches once on
+ *     each successful mutation to reflect any cascade promotions.
+ */
+import { useEffect, useState, useTransition } from "react";
+import type { ActionDetail, DrawerData } from "@/lib/cockpit-data";
+import { cn } from "@/lib/utils";
+
+interface Props {
+  /** Selected batchCode — when this changes, the drawer re-fetches. */
+  batchCode: string;
+  /** Called whenever the user makes a change that the parent table should reflect. */
+  onMutation?: () => void;
+  /**
+   * `vertical` (default) — action groups stacked top-to-bottom, used in the
+   * Stacked Cockpit view where the drawer takes the full width.
+   * `kanban` — Waiting / Blocked / Done in three columns side-by-side, used
+   * in the Side-by-side Cockpit view where horizontal space is plentiful.
+   */
+  layout?: "vertical" | "kanban";
+}
+
+export default function CockpitDrawer({ batchCode, onMutation, layout = "vertical" }: Props) {
+  const [data, setData] = useState<DrawerData | null>(null);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refresh() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/cockpit-drawer?code=${encodeURIComponent(batchCode)}`);
+      if (!res.ok) throw new Error(await res.text());
+      setData((await res.json()) as DrawerData);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    setData(null);
+    refresh().finally(() => {
+      if (cancelled) return;
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchCode]);
+
+  if (busy && !data) {
+    return <div className="card text-sm text-ink-500">Loading batch…</div>;
+  }
+  if (error) {
+    return (
+      <div className="card !bg-flame-pale !border-flame" role="alert">
+        <p className="text-sm text-flame-dark">Could not load batch: {error}</p>
+      </div>
+    );
+  }
+  if (!data) return null;
+
+  return (
+    <div className="card">
+      <DrawerHeader data={data} onClosed={() => { refresh(); onMutation?.(); }} />
+      {data.closedAt && data.closureReason ? (
+        <ClosedBanner data={data} />
+      ) : null}
+      <ConfidenceRow data={data} onSaved={() => { refresh(); onMutation?.(); }} disabled={!!data.closedAt} />
+      <ActionsList
+        data={data}
+        layout={layout}
+        onMutated={() => { refresh(); onMutation?.(); }}
+        disabled={!!data.closedAt}
+      />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Closed banner
+// ──────────────────────────────────────────────────────────────────
+
+function ClosedBanner({ data }: { data: DrawerData }) {
+  const isCancelled = data.closureReason === "cancelled";
+  return (
+    <div
+      role="status"
+      className={cn(
+        "mb-5 rounded-md border-2 px-4 py-3",
+        isCancelled
+          ? "bg-flame-pale border-flame text-flame-dark"
+          : "bg-green-pale border-green text-green-dark",
+      )}
+    >
+      <p className="font-bold text-base">
+        {isCancelled ? "🚫 Cancelled" : "✅ Delivered & Closed"}
+        <span className="font-medium ml-2 tabular-nums text-sm">
+          on {data.closedAt}
+        </span>
+      </p>
+      {isCancelled && data.cancellationNote && (
+        <p className="text-xs mt-1 text-midnight">
+          <span className="font-medium">Reason:</span> {data.cancellationNote}
+        </p>
+      )}
+      <p className="text-[0.7rem] mt-1 text-ink-600">
+        Action statuses are locked. To resume work, restore the batch via the database (no in-app reopen yet).
+      </p>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Header
+// ──────────────────────────────────────────────────────────────────
+
+function DrawerHeader({
+  data, onClosed,
+}: {
+  data: DrawerData;
+  onClosed: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const isClosed = !!data.closedAt;
+
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-3 mb-4">
+      <div>
+        <h2 className="text-lg font-bold text-midnight">
+          🛠️ {data.modelYear}
+          <code className="ml-2 text-sm font-mono font-medium text-ink-600">{data.batchCode}</code>
+        </h2>
+        <p className="text-xs text-ink-500 mt-0.5">
+          <span className="tabular-nums">{data.quantity}×</span>
+          <Sep />
+          <span>{data.dealerName}</span>
+          <Sep />
+          <span className="uppercase tracking-wide">
+            {data.lifecycleState === "pre_po" ? "Pre-PO" : "Post-PO"}
+          </span>
+        </p>
+      </div>
+      {!isClosed && (
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          className="text-xs font-medium px-3 py-1.5 rounded-md border border-flame text-flame-dark
+                     bg-white hover:bg-flame-pale transition-colors"
+          title="Cancel this batch — Ops can no longer update its actions"
+        >
+          🚫 Cancel batch
+        </button>
+      )}
+      {confirming && (
+        <CancelModal
+          data={data}
+          onClose={() => setConfirming(false)}
+          onCancelled={() => {
+            setConfirming(false);
+            onClosed();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Big-red cancel confirmation modal. Inline, no third-party deps —
+ * simple fixed-position overlay. The dialog warns the operator clearly
+ * and requires a deliberate action; an optional reason note goes onto
+ * the batch for audit / Slack status checks.
+ */
+function CancelModal({
+  data, onClose, onCancelled,
+}: {
+  data: DrawerData;
+  onClose: () => void;
+  onCancelled: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function confirmCancel() {
+    setPending(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/batch-close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batchId: data.batchId, reason: "cancelled", note: note.trim() || null }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onCancelled();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cancel-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center px-4
+                 bg-midnight/60 backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-md bg-white rounded-lg shadow-2xl border-2 border-flame">
+        {/* Big red header */}
+        <div className="bg-flame-pale border-b-2 border-flame px-5 py-3 rounded-t-md">
+          <h3 id="cancel-modal-title" className="text-xl font-bold text-flame-dark">
+            🚫 Cancel this batch?
+          </h3>
+        </div>
+
+        <div className="px-5 py-4 space-y-3">
+          <p className="text-sm text-midnight">
+            You&apos;re about to cancel{" "}
+            <code className="font-mono text-xs bg-ink-100 px-1.5 py-0.5 rounded">{data.batchCode}</code>{" "}
+            ({data.quantity}× {data.modelYear}, {data.dealerName}).
+          </p>
+          <p className="text-sm text-midnight">
+            <span className="font-semibold text-flame-dark">This is a hard stop.</span>{" "}
+            All action statuses will be locked. The batch will be marked
+            <span className="font-semibold"> 🚫 Cancelled</span> on
+            the dashboard and timeline. There is no in-app reopen.
+          </p>
+          <label className="block">
+            <span className="block text-xs font-medium text-ink-600 mb-1">
+              Reason (optional, shown in Slack status checks)
+            </span>
+            <textarea
+              className="input min-h-[70px]"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="e.g. Dealer cancelled the PO. Replacement order TBD."
+            />
+          </label>
+          {error && (
+            <p role="alert" className="text-sm text-flame-dark">{error}</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-3 bg-ink-50 rounded-b-md border-t border-ink-200">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={pending}
+            className="btn text-sm"
+          >
+            Keep batch
+          </button>
+          <button
+            type="button"
+            onClick={confirmCancel}
+            disabled={pending}
+            className="text-sm font-semibold px-4 py-2 rounded-md text-white
+                       bg-flame-dark hover:bg-flame disabled:opacity-50
+                       border border-flame-dark"
+          >
+            {pending ? "Cancelling…" : "Yes, cancel batch"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Confidence row
+// ──────────────────────────────────────────────────────────────────
+
+function ConfidenceRow({
+  data, onSaved, disabled = false,
+}: {
+  data: DrawerData;
+  onSaved: () => void;
+  disabled?: boolean;
+}) {
+  const [draft, setDraft] = useState<number>(data.operationsConfidence ?? 50);
+  const [pending, startTransition] = useTransition();
+  const [savedNow, setSavedNow] = useState(false);
+
+  // Reset slider when the drawer switches to a new batch.
+  useEffect(() => {
+    setDraft(data.operationsConfidence ?? 50);
+  }, [data.batchId, data.operationsConfidence]);
+
+  function save() {
+    startTransition(async () => {
+      try {
+        const res = await fetch("/api/batch-confidence", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ batchId: data.batchId, value: draft }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        setSavedNow(true);
+        setTimeout(() => setSavedNow(false), 1400);
+        onSaved();
+      } catch (e) {
+        alert(`Could not save confidence: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
+  }
+
+  const dirty = draft !== (data.operationsConfidence ?? 50);
+  const lockedAt = data.operationsConfidenceAtLock;
+  const partnership = data.partnershipConfidence;
+  const partnershipLock = data.partnershipConfidenceAtLock;
+
+  return (
+    <div className="bg-ink-50 border border-ink-200 rounded-md p-3 mb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+        <p className="text-xs font-medium text-ink-600 uppercase tracking-wide">
+          Ops Confidence
+        </p>
+        {lockedAt != null && (
+          <p className="text-[0.7rem] text-ink-500">
+            🔒 Locked at <span className="tabular-nums font-medium text-midnight">{Math.round(lockedAt)}%</span>
+          </p>
+        )}
+      </div>
+      <div className="flex items-center gap-3">
+        <input
+          type="range" min={0} max={100} step={5}
+          value={draft}
+          onChange={(e) => setDraft(parseInt(e.target.value, 10))}
+          aria-label="Ops confidence"
+          className="flex-1 accent-brand"
+          disabled={disabled}
+        />
+        <span className={cn(
+          "tabular-nums font-bold text-sm w-12 text-right",
+          draft >= 70 ? "text-green-dark" : draft >= 40 ? "text-gold-dark" : "text-flame-dark",
+        )}>
+          {draft}%
+        </span>
+        <button
+          type="button"
+          onClick={save}
+          disabled={!dirty || pending || disabled}
+          className="btn btn-primary text-xs px-3"
+          aria-live="polite"
+        >
+          {savedNow ? "✓ Saved" : pending ? "Saving…" : lockedAt == null ? "Lock & save" : "Save"}
+        </button>
+      </div>
+      {partnership != null && (
+        <p className="text-[0.7rem] text-ink-500 mt-2">
+          Partnership confidence: <span className="font-medium text-midnight tabular-nums">{Math.round(partnership)}%</span>
+          {partnershipLock != null && (
+            <> · locked at <span className="tabular-nums">{Math.round(partnershipLock)}%</span></>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Actions list
+// ──────────────────────────────────────────────────────────────────
+
+function ActionsList({
+  data, onMutated, layout, disabled = false,
+}: {
+  data: DrawerData;
+  onMutated: () => void;
+  layout: "vertical" | "kanban";
+  /** When true (e.g. batch is closed), every status mutation is disabled. */
+  disabled?: boolean;
+}) {
+  if (data.actions.length === 0) {
+    return (
+      <p className="text-sm text-ink-500 italic">
+        No actions yet. {data.lifecycleState === "pre_po"
+          ? "This batch is a Pre-PO bet — actions are picked at Intake when the PO arrives."
+          : "Pick actions at Intake."}
+      </p>
+    );
+  }
+
+  const groups = {
+    waiting: data.actions.filter((a) => a.status === "waiting"),
+    blocked: data.actions.filter((a) => a.status === "blocked"),
+    done:    data.actions.filter((a) => a.status === "done"),
+    skipped: data.actions.filter((a) => a.status === "skipped"),
+  };
+
+  // ── Kanban layout — three columns side-by-side, action cards stacked.
+  if (layout === "kanban") {
+    return (
+      <div className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
+          <KanbanColumn
+            title="Waiting" tone="waiting" actions={groups.waiting} onMutated={onMutated} disabled={disabled}
+          />
+          <KanbanColumn
+            title="Blocked" tone="blocked" actions={groups.blocked} onMutated={onMutated} disabled={disabled}
+          />
+          <KanbanColumn
+            title="Done"    tone="done"    actions={groups.done}    onMutated={onMutated} disabled={disabled}
+          />
+        </div>
+        {groups.skipped.length > 0 && (
+          <ActionGroup
+            title="Skipped" tone="skipped"
+            actions={groups.skipped}
+            onMutated={onMutated}
+            disabled={disabled}
+            collapsibleByDefault
+          />
+        )}
+      </div>
+    );
+  }
+
+  // ── Vertical layout (default) — groups stacked top to bottom.
+  return (
+    <div className="space-y-4">
+      {groups.waiting.length > 0 && (
+        <ActionGroup
+          title="Waiting" tone="waiting" actions={groups.waiting} onMutated={onMutated} disabled={disabled}
+        />
+      )}
+      {groups.blocked.length > 0 && (
+        <ActionGroup
+          title="Blocked" tone="blocked" actions={groups.blocked} onMutated={onMutated} disabled={disabled}
+        />
+      )}
+      {groups.done.length > 0 && (
+        <ActionGroup
+          title="Done" tone="done" actions={groups.done} onMutated={onMutated} disabled={disabled} collapsibleByDefault
+        />
+      )}
+      {groups.skipped.length > 0 && (
+        <ActionGroup
+          title="Skipped" tone="skipped" actions={groups.skipped} onMutated={onMutated} disabled={disabled} collapsibleByDefault
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Kanban column — header (always visible) + stacked action cards.
+ * Columns are independent in height; the parent grid lets each grow as
+ * needed, and the side-by-side pane scrolls vertically as a whole.
+ */
+function KanbanColumn({
+  title, tone, actions, onMutated, disabled = false,
+}: {
+  title: string;
+  tone: "waiting" | "blocked" | "done" | "skipped";
+  actions: ActionDetail[];
+  onMutated: () => void;
+  disabled?: boolean;
+}) {
+  const headerTone = {
+    waiting: "text-brand-dark",
+    blocked: "text-flame-dark",
+    done:    "text-green-dark",
+    skipped: "text-ink-500",
+  }[tone];
+  return (
+    <section aria-label={`${title} actions`}>
+      <header className="flex items-baseline gap-2 mb-2">
+        <h4 className={cn("text-xs font-medium uppercase tracking-wide", headerTone)}>
+          {title}
+        </h4>
+        <span className="tabular-nums text-ink-400 text-xs">({actions.length})</span>
+      </header>
+      {actions.length === 0 ? (
+        <p className="text-[0.7rem] text-ink-400 italic px-2 py-3 text-center
+                      border border-dashed border-ink-200 rounded-md">
+          none
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {actions.map((a) => (
+            <li key={a.id}>
+              <ActionRow action={a} tone={tone} onMutated={onMutated} compact disabled={disabled} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function ActionGroup({
+  title, tone, actions, onMutated, collapsibleByDefault = false, disabled = false,
+}: {
+  title: string;
+  tone: "waiting" | "blocked" | "done" | "skipped";
+  actions: ActionDetail[];
+  onMutated: () => void;
+  collapsibleByDefault?: boolean;
+  disabled?: boolean;
+}) {
+  const [collapsed, setCollapsed] = useState(collapsibleByDefault);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setCollapsed((v) => !v)}
+        className="flex items-center gap-2 text-xs font-medium text-ink-600 uppercase tracking-wide mb-2 hover:text-midnight"
+        aria-expanded={!collapsed}
+      >
+        <span aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
+        <span>{title} <span className="tabular-nums text-ink-400">({actions.length})</span></span>
+      </button>
+      {!collapsed && (
+        <ul className="space-y-2">
+          {actions.map((a) => (
+            <li key={a.id}>
+              <ActionRow action={a} tone={tone} onMutated={onMutated} disabled={disabled} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ActionRow({
+  action, tone, onMutated, compact = false, disabled = false,
+}: {
+  action: ActionDetail;
+  tone: "waiting" | "blocked" | "done" | "skipped";
+  onMutated: () => void;
+  /** Compact mode (kanban): buttons drop below the meta line so the
+   *  card fits a narrow column without truncating. */
+  compact?: boolean;
+  /** Closed-batch mode: every status mutation button is disabled. */
+  disabled?: boolean;
+}) {
+  const [pending, setPending] = useState(false);
+
+  async function setStatus(newStatus: ActionDetail["status"]) {
+    setPending(true);
+    try {
+      const res = await fetch("/api/batch-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batchActionId: action.id, newStatus }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onMutated();
+    } catch (e) {
+      alert(`Could not update: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  const labelText = tone === "done" ? action.doneLabel : action.waitingLabel;
+  const borderTone = {
+    waiting: "border-ink-200",
+    blocked: "border-ink-200 opacity-75",
+    done:    "border-green",
+    skipped: "border-ink-200 opacity-60",
+  }[tone];
+
+  const allDisabled = disabled || pending;
+  const Buttons = (
+    <div className={cn("flex items-center gap-1", compact ? "flex-wrap" : "")}>
+      {tone !== "done" && (
+        <button
+          type="button"
+          disabled={allDisabled || tone === "blocked"}
+          onClick={() => setStatus("done")}
+          className="btn btn-primary text-xs"
+          title={
+            disabled ? "Batch is closed — actions are locked"
+            : tone === "blocked" ? "Cannot complete while blocked by parent actions"
+            : "Mark this action done"
+          }
+        >
+          ✓ Mark done
+        </button>
+      )}
+      {tone !== "skipped" && tone !== "done" && (
+        <button
+          type="button"
+          disabled={allDisabled}
+          onClick={() => setStatus("skipped")}
+          className="btn text-xs"
+        >
+          Skip
+        </button>
+      )}
+      {tone === "done" && (
+        <button
+          type="button"
+          disabled={allDisabled}
+          onClick={() => {
+            if (!confirm("Revert this action to waiting? Dependents won't be re-blocked automatically.")) return;
+            setStatus("waiting");
+          }}
+          className="btn text-xs"
+        >
+          Revert
+        </button>
+      )}
+      {tone === "skipped" && (
+        <button
+          type="button"
+          disabled={allDisabled}
+          onClick={() => setStatus("waiting")}
+          className="btn text-xs"
+        >
+          Reopen
+        </button>
+      )}
+    </div>
+  );
+
+  const ownerLabel = action.assignedStakeholderName
+    ? `@${action.assignedStakeholderName}${action.departmentName ? ` · ${action.departmentName}` : ""}`
+    : action.departmentName
+      ? action.departmentName
+      : "— unassigned —";
+
+  // Compute delay (if any) — only meaningful when an expectedDate exists
+  // and the action has either landed (compare to completedAt) or is still
+  // pending past its expected date.
+  const today = new Date().toISOString().slice(0, 10);
+  const actualDate = action.completedAt ? action.completedAt.slice(0, 10) : null;
+  const compareTo = actualDate ?? today;
+  const delayDays = action.expectedDate
+    ? Math.round((new Date(compareTo).getTime() - new Date(action.expectedDate).getTime()) / 86_400_000)
+    : 0;
+  const showDelay = action.expectedDate && (
+    (action.status === "done" && delayDays !== 0) ||
+    (tone !== "done" && tone !== "skipped" && delayDays > 0)
+  );
+
+  const Meta = (
+    <p className="text-[0.7rem] text-ink-500 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+      <span className={action.assignedStakeholderName ? "text-midnight font-medium" : ""}>
+        {ownerLabel}
+      </span>
+      <Sep />
+      <ExpectedDateInlineEditor
+        actionId={action.id}
+        value={action.expectedDate}
+        disabled={disabled}
+        onSaved={onMutated}
+      />
+      {actualDate && (
+        <>
+          <Sep />
+          <span className="tabular-nums">✓ {actualDate}</span>
+        </>
+      )}
+      {showDelay && (
+        <>
+          <Sep />
+          <span className={cn(
+            "tabular-nums font-medium px-1 rounded",
+            delayDays > 0 ? "text-flame-dark bg-flame-pale"
+                          : "text-green-dark bg-green-pale",
+          )}>
+            {delayDays > 0 ? `+${delayDays}d` : `${delayDays}d`}
+          </span>
+        </>
+      )}
+      {tone === "blocked" && action.blockedBy.length > 0 && (
+        <>
+          <Sep />
+          <span>waiting on <span className="font-medium text-midnight">{action.blockedBy.join(", ")}</span></span>
+        </>
+      )}
+    </p>
+  );
+
+  if (compact) {
+    // Kanban card: meta + buttons stacked vertically so a narrow column fits.
+    return (
+      <div className={cn("rounded-md border bg-white px-3 py-2", borderTone)}>
+        <p className="text-sm font-medium text-midnight">{labelText}</p>
+        {Meta}
+        <div className="mt-2">{Buttons}</div>
+      </div>
+    );
+  }
+
+  // Vertical (default): meta + buttons side by side, wrap on narrow.
+  return (
+    <div className={cn("flex flex-wrap items-center gap-3 px-3 py-2 rounded-md border bg-white", borderTone)}>
+      <div className="flex-1 min-w-[10rem]">
+        <p className="text-sm font-medium text-midnight">{labelText}</p>
+        {Meta}
+      </div>
+      {Buttons}
+    </div>
+  );
+}
+
+function Sep() {
+  return <span aria-hidden="true" className="text-ink-300">·</span>;
+}
+
+/**
+ * Click-to-edit chip for an action's planned `expectedDate`.
+ *
+ * View mode  — `📅 2026-04-30` (or `📅 set date` when null).
+ * Edit mode  — narrow `<input type="date">`; saves on Enter or blur,
+ *              cancels on Escape.
+ *
+ * When the parent batch is closed (`disabled`) the chip degrades to a
+ * read-only span with no click affordance. Clearing the input and saving
+ * persists `null`.
+ *
+ * Phase 1's auto-shift on VIN-done overwrites these dates for "from-vin"
+ * actions; manual edits made before VIN is marked done will be lost when
+ * VIN flips. Edit after VIN-done if Ops needs a non-default date.
+ */
+function ExpectedDateInlineEditor({
+  actionId, value, disabled = false, onSaved,
+}: {
+  actionId: number;
+  value: string | null;
+  disabled?: boolean;
+  onSaved: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value ?? "");
+  const [pending, setPending] = useState(false);
+
+  // Keep draft in sync if the parent reloads with a new value.
+  useEffect(() => {
+    if (!editing) setDraft(value ?? "");
+  }, [value, editing]);
+
+  async function save(next: string) {
+    const normalised = next || null;
+    // No-op when unchanged.
+    if (normalised === (value ?? null)) {
+      setEditing(false);
+      return;
+    }
+    setPending(true);
+    try {
+      const res = await fetch("/api/batch-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchActionId: actionId,
+          newExpectedDate: normalised,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setEditing(false);
+      onSaved();
+    } catch (e) {
+      alert(`Could not save expected date: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  if (disabled) {
+    return value
+      ? <span className="tabular-nums">📅 {value}</span>
+      : <span className="text-ink-400">📅 —</span>;
+  }
+
+  if (editing) {
+    return (
+      <input
+        type="date"
+        autoFocus
+        value={draft}
+        disabled={pending}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            save(draft);
+          } else if (e.key === "Escape") {
+            setDraft(value ?? "");
+            setEditing(false);
+          }
+        }}
+        onBlur={() => save(draft)}
+        className="text-[0.7rem] tabular-nums px-1 py-0 border border-brand rounded bg-white"
+        aria-label="Edit expected date"
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      title="Click to edit expected date"
+      className={cn(
+        "tabular-nums hover:text-brand-dark hover:underline cursor-text",
+        !value && "text-ink-400",
+      )}
+    >
+      📅 {value ?? "set date"}
+    </button>
+  );
+}
