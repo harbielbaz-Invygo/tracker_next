@@ -1,167 +1,210 @@
-# invygo · Uploading Vehicles Tracker — Next.js scaffold
+# invygo · Vehicles Onboarding Tracker
 
-A scaffolded port of the Streamlit prototype (`../tracker_v1/`) onto **Next.js 15 + TypeScript + Tailwind + Drizzle + Auth.js**.
+Internal app for tracking subscription vehicles from partner-submission → PO → operational fulfilment → delivery. Built on **Next.js 15 (App Router) + TypeScript + Drizzle + Turso (libSQL) + Auth.js v5**.
 
-Status: **scaffold ready** — every page renders, auth works, the PO parser is fully ported. The form/timeline UI for restricted views are placeholders pointing at their Python counterparts.
+Live: https://project-n2y2q.vercel.app
+
+> Originally scaffolded from the Streamlit prototype in `../tracker_v1/`. That code is the historical reference for business rules; this Next.js codebase is the production source of truth.
 
 ---
 
 ## Stack
 
-| Layer | Choice | Why |
-|---|---|---|
-| Framework | **Next.js 15** (App Router) | Server components, edge-compatible, deploys to Vercel |
-| Language | **TypeScript** | Type-safety across DB → server → UI |
-| Styling | **Tailwind CSS** + custom `globals.css` | Brand tokens map cleanly via `tailwind.config.ts` |
-| Database | **SQLite** (better-sqlite3) via **Drizzle ORM** | One schema file, swap to Postgres in one config change |
-| Auth | **Auth.js v5** (Credentials provider) | Same username/password model as Streamlit version |
-| PDF | **pdf-parse** + custom regex | Same logic as `po_parser.py`, line-for-line |
-| Hosting | **Vercel** (recommended) | Native Next.js, zero config |
+| Layer | Choice | Notes |
+| --- | --- | --- |
+| Framework | **Next.js 15** (App Router) | Server components everywhere; Edge-safe middleware for auth gating |
+| Language | **TypeScript** (strict) | DB → server → UI fully typed via Drizzle inference |
+| Database | **Turso** / **libSQL** via **Drizzle ORM** | SQLite dialect; local dev uses `file:./data/tracker.db` |
+| Auth | **Auth.js v5** (Credentials provider) | bcrypt-hashed passwords stored in `users` table |
+| Styling | **Tailwind** + custom `globals.css` + `lib/brand.ts` tokens | Single source of truth for brand colours |
+| PDF parsing | **pdf-parse** + custom regex (`lib/po-parser.ts`) | Server-only; routes that touch it set `runtime = "nodejs"` |
+| Hosting | **Vercel** | GitHub → main triggers production deploy |
 
 ---
 
-## Setup
+## Local setup
 
 ```bash
-cd "tracker_next"
+cd tracker_next
 
 # 1. Install
 npm install
 
-# 2. Environment
-cp .env.example .env
-# then edit .env — set AUTH_SECRET (run `openssl rand -base64 32` to generate)
+# 2. Environment — copy and fill in
+cp .env.example .env.local
+#   - DATABASE_URL: file:./data/tracker.db (local) or a libsql:// URL (Turso)
+#   - TURSO_AUTH_TOKEN: required only for libsql:// URLs
+#   - NEXTAUTH_SECRET: openssl rand -base64 32
+#   - NEXTAUTH_URL: http://localhost:3000
 
-# 3. Create the database tables
+# 3. Create the database tables (local SQLite or remote Turso)
 npm run db:push
 
-# 4. Seed users + dealers
+# 4. Seed 8 demo scenarios + 2 users
 npm run db:seed
 
-# 5. Run the dev server
+# 5. Dev server
 npm run dev
-# open http://localhost:3000
+# → http://localhost:3000
 ```
 
-### Demo accounts
+### Demo accounts (seed)
 
-| Username | Password | Role |
-|---|---|---|
-| `admin` | `admin123` | Admin (all views) |
-| `partner1` | `partner123` | Partnership |
-| `ops1` | `ops123` | Operations |
+| Username | Password   | Role  |
+| -------- | ---------- | ----- |
+| `admin`  | `admin123` | admin |
+| `ops1`   | `ops123`   | ops   |
+
+⚠️ **The seed passwords are public in `scripts/seed.ts`. Rotate them immediately in production** — either via Settings → Users (admin only) or by running `scripts/rotate-passwords.ts` with `NEW_ADMIN_PW` / `NEW_OPS_PW` set in the env.
 
 ---
 
-## What's included
+## What's in the box
 
 ```
 tracker_next/
 ├── app/
-│   ├── layout.tsx                         Root layout (Alexandria font, session provider)
-│   ├── page.tsx                           Redirect to /dashboard
-│   ├── login/page.tsx                     Inline login card
-│   ├── (authed)/
-│   │   ├── layout.tsx                     Sidebar + brand header
-│   │   ├── dashboard/page.tsx             ⚠ placeholder (port view_dashboard here)
-│   │   ├── pre-po/page.tsx                ⚠ placeholder (port view_new_request)
-│   │   ├── vehicles-upload/page.tsx       ✅ working — PDF upload + parser + Slack
-│   │   ├── ops-follow-up/page.tsx         ⚠ placeholder
-│   │   └── settings/page.tsx              ⚠ placeholder (port view_settings)
-│   └── api/
-│       ├── auth/[...nextauth]/route.ts    Auth.js routes
-│       └── po-parse/route.ts              ✅ working — POST a PDF, get ParsedPO
+│   ├── (authed)/                Layout + sidebar + role-gated routes
+│   │   ├── dashboard/page.tsx       Plan-vs-Reality timeline + activity table
+│   │   ├── forecast/page.tsx        Pre-PO bets (Partnership confidence)
+│   │   ├── intake/page.tsx          PDF drop → form → batch creation
+│   │   ├── cockpit/page.tsx         Action status board (Ops daily surface)
+│   │   ├── reports/page.tsx         Departments + stakeholders performance
+│   │   └── settings/page.tsx        Admin config: 5 collapsible sections
+│   ├── api/
+│   │   ├── auth/                    Auth.js handlers
+│   │   ├── batch-action/route.ts    Action status flips + auto-shift + auto-close
+│   │   ├── batch-close/route.ts     Manual deliver / cancel
+│   │   ├── health/route.ts          Public liveness probe
+│   │   ├── intake/create/route.ts   Submit a PO → N batches
+│   │   ├── po-parse/route.ts        Upload a PDF → ParsedPO JSON
+│   │   ├── settings/route.ts        Consolidated admin mutations
+│   │   └── timeline/route.ts        Per-batch timeline payload
+│   └── login/page.tsx               Inline login card
+├── components/                   Server + client UI building blocks
+│   ├── intake-form.tsx              The big Intake state machine
+│   ├── settings-shell.tsx           5 collapsible editors
+│   ├── settings-batches.tsx         Per-batch admin override
+│   ├── timeline-svg.tsx             Plan vs Reality SVG (port of Python)
+│   ├── dashboard-shell.tsx          Table + drawer + activity table
+│   ├── cockpit-shell.tsx            Stacked / side-by-side toggle
+│   └── …
 ├── lib/
-│   ├── auth.ts                            Auth config + role/access helpers
-│   ├── auth/handlers.ts                   Auth handler re-export
-│   ├── brand.ts                           invygo brand tokens (in TS)
-│   ├── db/
-│   │   ├── schema.ts                      ✅ Full port of data_model.py
-│   │   └── index.ts                       Drizzle client
-│   ├── po-parser.ts                       ✅ Full port of po_parser.py + Slack formatter
-│   └── utils.ts                           cn(), makeBatchCode(), isoDate()
-├── components/
-│   ├── brand-header.tsx                   invygo wordmark
-│   ├── sidebar.tsx                        Grouped nav with access badges
-│   └── access-gate.tsx                    Wrap restricted pages
-├── scripts/seed.ts                        npm run db:seed
-├── tailwind.config.ts                     Brand colours
-├── drizzle.config.ts                      Drizzle CLI config
-└── middleware.ts                          Route guard
+│   ├── access.ts                    Pure role rules (admin / ops / guest)
+│   ├── api-auth.ts                  requireAuth(["role"]) helper for routes
+│   ├── auth.ts / auth.config.ts     NextAuth v5 (Node + Edge configs)
+│   ├── brand.ts                     Brand tokens for TS callers
+│   ├── cockpit-data.ts              Cockpit + drawer queries
+│   ├── dashboard-data.ts            Dashboard table + per-batch timeline
+│   ├── db/                          schema.ts + libsql client
+│   ├── env.ts                       Zod-validated env, hard-fails in prod
+│   ├── expected-date.ts             Pure offset+anchor → expectedDate
+│   ├── intake-data.ts               Intake form options payload
+│   ├── po-parser.ts                 Parser + Slack formatter (no fs imports)
+│   ├── po-parser-server.ts          Node-only PDF wrapper
+│   ├── reports-data.ts              Departments + stakeholders aggregation
+│   ├── rules.ts                     Key/value rules (Pre PO Ops Lead Time)
+│   ├── settings-data.ts             Settings page payload
+│   └── utils.ts                     cn(), makeBatchCode(), isoDate()
+├── docs/
+│   ├── DEPLOYMENT.md                Production runbook
+│   └── seed-data-backup-…md         Snapshot of the prior demo data
+├── scripts/
+│   ├── seed.ts                      8-scenario synthetic seed
+│   ├── verify-login.ts              Diagnostic: bcrypt + DB reachability
+│   └── rotate-passwords.ts          Maintenance: rotate admin/ops1 hashes
+└── middleware.ts                    Public/authed route guard (Edge runtime)
 ```
 
-### Already working
+---
 
-- ✅ **Auth flow** — login form, JWT session, sign-out, role on session
-- ✅ **Sidebar nav** with grouped items (Partnership / Operations / Admin) and access badges (🌐 / ✅ / 🔒)
-- ✅ **Dashboard route** is public; restricted routes show inline sign-in card via `<AccessGate />`
-- ✅ **PO PDF parser** — upload a PDF in `/vehicles-upload`, see all fields extracted + a Slack-ready announcement with copy button. Works against PO-0109 (multi-item) and PO-0114 (with discount column).
+## Key concepts
 
-### Placeholders to port
+### One Batch = one (PO item × delivery split)
 
-For each placeholder, the Python source code is small and well-tested. Roughly:
+Matches the Python model. Item-level fields (model, year, contract, colours) and split-level fields (qty, city, dates) cohabitate on the same row. Multiple batches share a `poNumber` when one PO has multiple splits.
 
-| Page | Port from Python |
-|---|---|
-| Dashboard | `tracker_v1/dashboard.py` → `view_dashboard` (table + filters + SVG timeline) |
-| Pre PO Upload | `tracker_v1/dashboard.py` → `view_new_request` (3-section form) |
-| Vehicles Upload (form) | `view_new_vehicles_upload_request` (the hierarchical Items × Splits form) |
-| Ops Follow Up | (pending design) |
-| Settings | `view_settings` (3 tabs: Rules / Stage Names / Data Editor) |
+### PO Availability is locked; Ops Expected is auto-floored
+
+At Intake the form shows two dates per split:
+
+- **PO Availability date** — the dealer-promised date from the PO. Read-only. Drives Partnership Confidence + Reliability metrics.
+- **Ops Expected Delivery** — Ops's own commitment. Auto-defaults to `max(POAvailability, today + leadTimeDays)` so it always satisfies the operational floor. Editable. Drives Ops Confidence.
+
+When `OpsExpected > POAvailability` for any split, the batch is marked `feasibility_status = at_risk`, the Intake form shows a "Ops ETA past dealer promise" caution, and the Slack announcement leads with **⚠️ OPS BEHIND PROMISE — {model → city: Ops ETA +Nd past dealer promise}**.
+
+Pre PO Ops Lead Time defaults to **21 days**; admin tunes it in Settings → Rules.
+
+### Actions, not stages
+
+The Streamlit version had 19 hard-coded stages. The Next.js version replaces them with admin-configured **action types** (Specs / Pricing / SKU / VIN / Plate / Customs Card / Inspection / App Listing / Delivery) and a **dependency DAG** between them. Each batch picks a subset of actions at Intake; statuses flip in Cockpit; downstream actions auto-unblock when parents are done; post-VIN expected dates auto-shift when VIN slips.
+
+### Departments + stakeholders
+
+Replaces the per-action "owner" string from the Python version. Action types route to a default department (configurable). At Intake, Ops picks one stakeholder per department to own all that department's actions on this batch.
+
+### Roles
+
+| Role  | Access |
+| ----- | ------ |
+| admin | Everything, including Settings + Users + Batches editor |
+| ops   | Forecast, Intake, Cockpit, Reports — read & mutate batches and actions but not configuration |
+| guest | Dashboard only (public read view) |
 
 ---
 
-## Key design decisions
+## Production deployment
 
-### One Batch = one (Item × Split)
-Matches the Python schema. Batch fields like `model`, `year`, `buyBackRate`, `colorSummary` come from the **PO item**; `requestedQuantity`, `dealerReceivingCity`, `dealerPromisedDeliveryDate` come from the **delivery split**. Multiple batches sharing one PO link via `poNumber`.
-
-### Stage codes match
-Same 19 stage codes as Python (`request_submitted` → `delivered`). The Plan vs Reality timeline logic is portable verbatim — just rewrite the SVG generation as a React component that returns `<svg>` markup.
-
-### Database driver swap
-SQLite for local dev (zero setup). Move to **Neon** or **Supabase** Postgres for production:
-
-1. Replace `better-sqlite3` with `postgres` + `drizzle-orm/postgres-js`
-2. Update `lib/db/index.ts` to use the postgres-js adapter
-3. Update `drizzle.config.ts` dialect to `"postgresql"`
-
-That's it — schema definitions stay identical.
-
-### Brand consistency
-The Tailwind config exposes every invygo brand colour by name (`bg-brand`, `text-midnight`, `border-flame`, etc.) and the same tokens are available as TypeScript constants (`Brand.BLUE`, `Brand.MIDNIGHT`, ...) for charts and inline styles. Single source of truth: `lib/brand.ts` + `tailwind.config.ts`.
-
----
-
-## Deploy to Vercel
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full runbook covering Turso provisioning, Vercel env var setup, secret rotation, and post-deploy smoke tests. Short version:
 
 ```bash
-# 1. Push this folder to GitHub
-git init && git add . && git commit -m "Initial scaffold"
-git remote add origin <your-github-url>
-git push -u origin main
+# 1. Push code
+git push origin <feature-branch>     # opens PR → review → merge to main
+                                     # Vercel auto-deploys on merge to main
 
-# 2. In Vercel dashboard:
-#    - "New Project" → import the repo
-#    - Add the AUTH_SECRET env var
-#    - For DATABASE_URL, point at a Neon/Supabase Postgres URL
-#      (and complete the driver swap noted above)
-#    - Deploy
+# 2. First-time only — push schema to Turso + seed
+DATABASE_URL=libsql://… TURSO_AUTH_TOKEN=… npm run db:push
+DATABASE_URL=libsql://… TURSO_AUTH_TOKEN=… npm run db:seed
+
+# 3. First-time only — set Vercel env vars (Settings → Environment Variables)
+#    DATABASE_URL, TURSO_AUTH_TOKEN, NEXTAUTH_SECRET, NEXTAUTH_URL
 ```
 
-Vercel auto-detects Next.js. ~2-minute deploys.
+### Health check
+
+```
+GET https://project-n2y2q.vercel.app/api/health
+→ 200 {"ok":true,"ts":"…"}
+```
+
+`ok:false` + 503 means the deployment can't reach the database — check `DATABASE_URL` and `TURSO_AUTH_TOKEN` in Vercel.
 
 ---
 
-## Migration from `tracker_v1` (the Python version)
+## Scripts
 
-Both codebases can coexist. The Streamlit version is the **source of truth for business logic**; this Next.js version mirrors it. When porting a feature:
+| Command | Purpose |
+| --- | --- |
+| `npm run dev`       | Dev server (`http://localhost:3000`) |
+| `npm run build`     | Production build (Vercel runs this automatically) |
+| `npm run start`     | Run the production build locally |
+| `npm run db:push`   | Push schema to the configured `DATABASE_URL` |
+| `npm run db:seed`   | Wipe + reseed with the 8 demo scenarios |
+| `npm run lint`      | ESLint over the codebase |
+| `npx tsc --noEmit`  | Type-check everything |
 
-1. Open the Python function (e.g., `view_new_request` in `dashboard.py`)
-2. Read the logic top-to-bottom
-3. Build the equivalent React/TS in the matching `app/...` route
-4. Use **server actions** for mutations (no separate API routes needed)
-5. Use **`<AccessGate view="…">`** to enforce role-based access
-6. Reuse `lib/po-parser.ts`, `lib/brand.ts`, `lib/utils.ts` everywhere
+Ad-hoc scripts (run with `npx tsx scripts/<name>.ts`):
 
-The `lib/po-parser.ts` test bench against `PO-0109` and `PO-0114` is the same fixture the Python version was verified on — extraction is identical to the byte.
+- `verify-login.ts` — bcrypt round-trip diagnostic; useful right after deploy or password rotation.
+- `rotate-passwords.ts` — rewrite admin/ops1 password hashes from env vars; verifies the round-trip before exiting.
+
+---
+
+## Migration history
+
+The Plan-vs-Reality timeline, PO parser regex, batch-code shape, and dealer/lead-time rules are line-for-line ports of the Streamlit version at `../tracker_v1/`. Two cosmetic changes from the original:
+
+1. **Stages → Actions** — admin-configurable instead of hard-coded.
+2. **PO Availability + Ops Expected** are now two separate dates with two separate confidence metrics, replacing the old single "promised date".
+
+Both changes are documented in `docs/seed-data-backup-2026-05-10.md`.
