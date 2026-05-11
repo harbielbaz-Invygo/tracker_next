@@ -1,12 +1,13 @@
 "use client";
 
 /**
- * Settings page — four collapsible editors, all collapsed by default:
+ * Settings page — five collapsible editors, all collapsed by default:
  *
- *   1. Departments        (CRUD)
+ *   1. Departments        (CRUD + inline stakeholders)
  *   2. Action Types       (CRUD + per-row dependency editor)
  *   3. Rules              (single tunable: Pre PO Ops Lead Time days)
- *   4. Batches            (admin override, in settings-batches.tsx)
+ *   4. Users              (CRUD + password reset; self-actions guarded)
+ *   5. Batches            (admin override, in settings-batches.tsx)
  *
  * Mutations all flow through the consolidated `/api/settings` endpoint;
  * after each successful mutation we router.refresh() so the server-rendered
@@ -14,20 +15,27 @@
  */
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import type { SettingsData } from "@/lib/settings-data";
+import type { SettingsData, SettingsUser } from "@/lib/settings-data";
 import SettingsBatches from "./settings-batches";
 import { cn } from "@/lib/utils";
 
 interface Props {
   data: SettingsData;
+  /**
+   * Numeric id of the currently signed-in admin. Used to disable
+   * self-destructive actions in the Users editor (delete self, demote
+   * self). Server enforces the same checks; this is purely UX.
+   */
+  currentUserId: number | null;
 }
 
-export default function SettingsShell({ data }: Props) {
+export default function SettingsShell({ data, currentUserId }: Props) {
   return (
     <div className="space-y-3">
       <DepartmentsEditor data={data} />
       <ActionTypesEditor data={data} />
       <RulesEditor data={data} />
+      <UsersEditor users={data.users} currentUserId={currentUserId} />
       <SettingsBatches data={data} />
     </div>
   );
@@ -707,13 +715,320 @@ function RulesEditor({ data }: { data: SettingsData }) {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// 4 · Users (accounts + roles + passwords)
+// ──────────────────────────────────────────────────────────────────
+
+const MIN_PASSWORD_LENGTH = 8;
+
+function UsersEditor({
+  users, currentUserId,
+}: {
+  users: SettingsUser[];
+  currentUserId: number | null;
+}) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  // Per-row metadata drafts (username/name/email/role).
+  type Draft = { username: string; name: string; email: string; role: "admin" | "ops" };
+  const [drafts, setDrafts] = useState<Record<number, Draft>>({});
+  // Per-row password-reset drafts. Empty / undefined when the panel
+  // isn't expanded for that row.
+  const [pwDrafts, setPwDrafts] = useState<Record<number, string>>({});
+  // Which rows have the reset-password panel open.
+  const [pwOpen, setPwOpen] = useState<Record<number, boolean>>({});
+
+  // New-user form state.
+  const [creating, setCreating] = useState<Draft & { password: string }>({
+    username: "", name: "", email: "", role: "ops", password: "",
+  });
+
+  // Last admin? Used to disable the "demote self" / "delete last admin"
+  // controls in the UI; server enforces the same.
+  const adminCount = users.filter((u) => u.role === "admin").length;
+
+  function fallbackFor(u: SettingsUser): Draft {
+    return {
+      username: u.username,
+      name:     u.name  ?? "",
+      email:    u.email ?? "",
+      role:     u.role,
+    };
+  }
+  function getDraft(u: SettingsUser): Draft {
+    return drafts[u.id] ?? fallbackFor(u);
+  }
+  function setDraft(id: number, patch: Partial<Draft>) {
+    setDrafts((d) => ({ ...d, [id]: { ...(d[id] ?? fallbackFor(users.find((x) => x.id === id)!)), ...patch } }));
+  }
+  function clearDraft(id: number) {
+    setDrafts((d) => { const n = { ...d }; delete n[id]; return n; });
+  }
+
+  function run(promise: Promise<void>) {
+    startTransition(async () => {
+      try { await promise; setError(null); router.refresh(); }
+      catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    });
+  }
+
+  return (
+    <CollapsibleCard
+      title="Users"
+      description="Application accounts. Admin can do everything; Ops can read and update batches/actions but can't change Settings. Passwords are bcrypt-hashed server-side."
+    >
+      {users.length === 0 ? (
+        <p className="text-sm text-ink-500 text-center py-4">
+          No users yet — add one below so someone can sign in.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {users.map((u) => {
+            const draft = getDraft(u);
+            const isSelf = currentUserId === u.id;
+            const lastAdmin = u.role === "admin" && adminCount === 1;
+            const dirty =
+              draft.username !== u.username ||
+              draft.name     !== (u.name ?? "") ||
+              draft.email    !== (u.email ?? "") ||
+              draft.role     !== u.role;
+            const showPwPanel = !!pwOpen[u.id];
+            const pwDraft = pwDrafts[u.id] ?? "";
+            const pwValid = pwDraft.length >= MIN_PASSWORD_LENGTH;
+
+            return (
+              <div key={u.id} className="border border-ink-200 rounded-md p-3 bg-white">
+                <div className="grid grid-cols-1 md:grid-cols-[1fr,1fr,1.5fr,7rem,auto] gap-3 items-end">
+                  <Field label={
+                    <span>
+                      Username
+                      {isSelf && (
+                        <span className="ml-2 text-[0.65rem] uppercase tracking-wide font-medium text-brand-dark bg-brand-pastel border border-brand px-1.5 py-0.5 rounded">
+                          you
+                        </span>
+                      )}
+                    </span>
+                  }>
+                    <input
+                      className="input"
+                      value={draft.username}
+                      autoComplete="off"
+                      onChange={(e) => setDraft(u.id, { username: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Name">
+                    <input
+                      className="input"
+                      value={draft.name}
+                      placeholder="Display name"
+                      onChange={(e) => setDraft(u.id, { name: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Email">
+                    <input
+                      className="input"
+                      type="email"
+                      value={draft.email}
+                      placeholder="user@invygo.com"
+                      onChange={(e) => setDraft(u.id, { email: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Role">
+                    <select
+                      className="input"
+                      value={draft.role}
+                      disabled={isSelf || lastAdmin}
+                      title={
+                        isSelf    ? "You can't change your own role." :
+                        lastAdmin ? "This is the only admin — create another admin before demoting." :
+                        undefined
+                      }
+                      onChange={(e) => setDraft(u.id, { role: e.target.value as "admin" | "ops" })}
+                    >
+                      <option value="admin">admin</option>
+                      <option value="ops">ops</option>
+                    </select>
+                  </Field>
+                  <div className="inline-flex gap-1.5">
+                    <button
+                      type="button"
+                      disabled={!dirty || pending}
+                      className="btn btn-primary text-xs"
+                      onClick={() => run((async () => {
+                        await callApi({
+                          resource: "user", op: "update",
+                          id: u.id,
+                          username: draft.username.trim(),
+                          name:  draft.name.trim()  || null,
+                          email: draft.email.trim() || null,
+                          role:  draft.role,
+                        });
+                        clearDraft(u.id);
+                      })())}
+                    >Save</button>
+                    <button
+                      type="button"
+                      disabled={pending || isSelf || lastAdmin}
+                      className="btn text-xs"
+                      title={
+                        isSelf    ? "You can't delete your own account." :
+                        lastAdmin ? "Can't delete the only admin — create another admin first." :
+                        undefined
+                      }
+                      onClick={() => {
+                        if (!confirm(`Delete user "${u.username}"? They will lose access immediately. This can't be undone.`)) return;
+                        run(callApi({ resource: "user", op: "delete", id: u.id }));
+                      }}
+                    >Delete</button>
+                  </div>
+                </div>
+
+                {/* Reset password — collapsed by default, click to expand */}
+                <div className="mt-3 pt-3 border-t border-ink-200">
+                  {!showPwPanel ? (
+                    <button
+                      type="button"
+                      className="btn text-xs"
+                      onClick={() => setPwOpen((s) => ({ ...s, [u.id]: true }))}
+                    >🔑 Reset password</button>
+                  ) : (
+                    <div className="flex flex-wrap items-end gap-2">
+                      <label className="block flex-1 min-w-[14rem]">
+                        <span className="block text-xs font-medium text-ink-600 mb-1">
+                          New password for <code className="text-midnight">{u.username}</code>
+                          <span className="text-ink-400 ml-2 font-normal">
+                            · min {MIN_PASSWORD_LENGTH} chars
+                          </span>
+                        </span>
+                        <input
+                          className="input"
+                          type="text"
+                          value={pwDraft}
+                          autoComplete="new-password"
+                          placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`}
+                          onChange={(e) => setPwDrafts((s) => ({ ...s, [u.id]: e.target.value }))}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={!pwValid || pending}
+                        className="btn btn-primary text-xs"
+                        onClick={() => run((async () => {
+                          await callApi({
+                            resource: "user", op: "reset-password",
+                            id: u.id, password: pwDraft,
+                          });
+                          setPwDrafts((s) => { const n = { ...s }; delete n[u.id]; return n; });
+                          setPwOpen((s) => { const n = { ...s }; delete n[u.id]; return n; });
+                        })())}
+                      >Set password</button>
+                      <button
+                        type="button"
+                        className="btn text-xs"
+                        onClick={() => {
+                          setPwDrafts((s) => { const n = { ...s }; delete n[u.id]; return n; });
+                          setPwOpen((s) => { const n = { ...s }; delete n[u.id]; return n; });
+                        }}
+                      >Cancel</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Create new user */}
+      <div className="mt-5 border-t border-ink-200 pt-4">
+        <p className="text-xs font-medium text-ink-600 mb-2 uppercase tracking-wide">
+          Add new user
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-[1fr,1fr,1.5fr,7rem,1fr,auto] gap-3 items-end">
+          <Field label="Username">
+            <input
+              className="input"
+              value={creating.username}
+              autoComplete="off"
+              placeholder="harbi"
+              onChange={(e) => setCreating((c) => ({ ...c, username: e.target.value }))}
+            />
+          </Field>
+          <Field label="Name">
+            <input
+              className="input"
+              value={creating.name}
+              placeholder="Harbi Elbaz"
+              onChange={(e) => setCreating((c) => ({ ...c, name: e.target.value }))}
+            />
+          </Field>
+          <Field label="Email">
+            <input
+              className="input"
+              type="email"
+              value={creating.email}
+              placeholder="harbi@invygo.com"
+              onChange={(e) => setCreating((c) => ({ ...c, email: e.target.value }))}
+            />
+          </Field>
+          <Field label="Role">
+            <select
+              className="input"
+              value={creating.role}
+              onChange={(e) => setCreating((c) => ({ ...c, role: e.target.value as "admin" | "ops" }))}
+            >
+              <option value="ops">ops</option>
+              <option value="admin">admin</option>
+            </select>
+          </Field>
+          <Field label={`Password (≥ ${MIN_PASSWORD_LENGTH} chars)`}>
+            <input
+              className="input"
+              type="text"
+              value={creating.password}
+              autoComplete="new-password"
+              placeholder="Strong password"
+              onChange={(e) => setCreating((c) => ({ ...c, password: e.target.value }))}
+            />
+          </Field>
+          <button
+            type="button"
+            disabled={
+              pending ||
+              creating.username.trim().length < 2 ||
+              creating.password.length < MIN_PASSWORD_LENGTH
+            }
+            className="btn btn-primary"
+            onClick={() => run((async () => {
+              await callApi({
+                resource: "user", op: "create",
+                username: creating.username.trim(),
+                name:     creating.name.trim()  || null,
+                email:    creating.email.trim() || null,
+                role:     creating.role,
+                password: creating.password,
+              });
+              setCreating({ username: "", name: "", email: "", role: "ops", password: "" });
+            })())}
+          >+ Add</button>
+        </div>
+      </div>
+
+      {error && <p className="mt-3 text-sm text-flame-dark" role="alert">{error}</p>}
+    </CollapsibleCard>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
 // Tiny helpers
 // ──────────────────────────────────────────────────────────────────
 
 function Field({
   label, colSpan = 1, children,
 }: {
-  label: string;
+  /** String or a JSX node — Users editor passes a "you" badge inline. */
+  label: React.ReactNode;
   colSpan?: 1 | 2 | 3;
   children: React.ReactNode;
 }) {
