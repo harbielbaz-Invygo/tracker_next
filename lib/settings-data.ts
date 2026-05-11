@@ -12,7 +12,7 @@ import { asc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   departments, stakeholders, actionTypes, actionDependencies,
-  dealers, batches, batchActions,
+  dealers, batches, batchActions, users,
 } from "@/lib/db/schema";
 import { getAllRules } from "@/lib/rules";
 
@@ -39,6 +39,22 @@ export interface SettingsData {
   rules: {
     prePoOpsLeadTimeDays: number;
   };
+  /**
+   * Application users. Password hashes are deliberately omitted — only
+   * the metadata Settings → Users needs is exposed. To set or rotate a
+   * password, the editor sends a `user` mutation with `password` set;
+   * the server bcrypt-hashes it and updates `passwordHash`.
+   */
+  users: SettingsUser[];
+}
+
+export interface SettingsUser {
+  id: number;
+  username: string;
+  name: string | null;
+  email: string | null;
+  role: "admin" | "ops";
+  createdAt: string | null;
 }
 
 /** Full editable shape of a batch + a compact action summary. */
@@ -117,7 +133,7 @@ export interface BatchEditRow {
 
 export async function getSettingsData(): Promise<SettingsData> {
   const [
-    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules,
+    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw,
   ] = await Promise.all([
     db.select().from(departments).orderBy(asc(departments.sortOrder)),
     db.select().from(stakeholders).orderBy(asc(stakeholders.sortOrder)),
@@ -143,6 +159,16 @@ export async function getSettingsData(): Promise<SettingsData> {
       .leftJoin(departments,  eq(batchActions.departmentId,  departments.id))
       .orderBy(asc(actionTypes.sortOrder)),
     getAllRules(),
+    // Users — explicit column selection so the password hash never
+    // leaves the server. Sorted by role (admins first), then username.
+    db.select({
+      id:        users.id,
+      username:  users.username,
+      name:      users.name,
+      email:     users.email,
+      role:      users.role,
+      createdAt: users.createdAt,
+    }).from(users).orderBy(asc(users.role), asc(users.username)),
   ]);
 
   // Group stakeholders by department for inline rendering.
@@ -264,5 +290,13 @@ export async function getSettingsData(): Promise<SettingsData> {
     })),
     batches: batchesList,
     rules,
+    users: usersRaw.map((u) => ({
+      id:        u.id,
+      username:  u.username,
+      name:      u.name,
+      email:     u.email,
+      role:      u.role as "admin" | "ops",
+      createdAt: u.createdAt,
+    })),
   };
 }

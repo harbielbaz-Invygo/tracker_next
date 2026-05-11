@@ -13,14 +13,17 @@
  * relies on that gate. (Phase: re-check role here once role propagates
  * to the request handler context.)
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
+import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import {
-  departments, stakeholders, actionTypes, actionDependencies, batchActions, batches,
+  departments, stakeholders, actionTypes, actionDependencies, batchActions, batches, users,
 } from "@/lib/db/schema";
 import { setRuleNumber, RULE_KEYS, getLeadTimeDays } from "@/lib/rules";
 import { requireAuth } from "@/lib/api-auth";
+
+const MIN_PASSWORD_LENGTH = 8;
 
 export const runtime = "nodejs";
 
@@ -38,7 +41,11 @@ type Body =
   | { resource: "batch";       op: "delete"; id: number }
   | { resource: "stakeholder"; op: "create"; departmentId: number; name: string; sortOrder?: number }
   | { resource: "stakeholder"; op: "update"; id: number; name?: string; sortOrder?: number }
-  | { resource: "stakeholder"; op: "delete"; id: number };
+  | { resource: "stakeholder"; op: "delete"; id: number }
+  | { resource: "user"; op: "create"; username: string; password: string; name?: string | null; email?: string | null; role: "admin" | "ops" }
+  | { resource: "user"; op: "update"; id: number; username?: string; name?: string | null; email?: string | null; role?: "admin" | "ops" }
+  | { resource: "user"; op: "reset-password"; id: number; password: string }
+  | { resource: "user"; op: "delete"; id: number };
 
 export async function POST(req: NextRequest) {
   // Settings are admin-only — no other role can mutate departments,
@@ -61,6 +68,7 @@ export async function POST(req: NextRequest) {
       case "rule":         return await handleRule(body);
       case "batch":        return await handleBatch(body);
       case "stakeholder":  return await handleStakeholder(body);
+      case "user":         return await handleUser(body, Number(gate.user.id));
       default:
         return NextResponse.json({ error: "Unknown resource" }, { status: 400 });
     }
@@ -424,5 +432,141 @@ async function handleStakeholder(b: Extract<Body, { resource: "stakeholder" }>) 
     await db.delete(stakeholders).where(eq(stakeholders.id, b.id));
     return NextResponse.json({ ok: true });
   }
+  return NextResponse.json({ error: "Unknown op" }, { status: 400 });
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Users
+// ──────────────────────────────────────────────────────────────────
+//
+// Safeguards (server-enforced; the UI mirrors them for UX):
+//   - You can't delete your own user row.
+//   - You can't change your own role out of admin (would lock you out).
+//   - You can't delete the last admin in the table (anyone would).
+//   - You can't demote the last admin.
+//   - Passwords must be ≥ 8 chars when set; never stored plaintext.
+
+async function handleUser(b: Extract<Body, { resource: "user" }>, callerId: number) {
+  if (b.op === "create") {
+    const username = (b.username ?? "").trim();
+    const password = b.password ?? "";
+    if (username.length < 2) {
+      return NextResponse.json({ error: "username must be at least 2 characters" }, { status: 400 });
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      return NextResponse.json(
+        { error: `password must be at least ${MIN_PASSWORD_LENGTH} characters` },
+        { status: 400 },
+      );
+    }
+    if (b.role !== "admin" && b.role !== "ops") {
+      return NextResponse.json({ error: "role must be 'admin' or 'ops'" }, { status: 400 });
+    }
+    const passwordHash = await bcrypt.hash(password, 10);
+    const [row] = await db.insert(users).values({
+      username,
+      name:  b.name?.trim() || null,
+      email: b.email?.trim() || null,
+      role:  b.role,
+      passwordHash,
+    }).returning({
+      id: users.id, username: users.username, name: users.name,
+      email: users.email, role: users.role, createdAt: users.createdAt,
+    });
+    return NextResponse.json({ ok: true, row });
+  }
+
+  if (b.op === "update") {
+    // Pull current row first so we can compare roles + identity for safeguards.
+    const [current] = await db.select().from(users).where(eq(users.id, b.id));
+    if (!current) {
+      return NextResponse.json({ error: "user not found" }, { status: 404 });
+    }
+    const updates: Partial<typeof users.$inferInsert> = {};
+    if (b.username !== undefined) {
+      const u = b.username.trim();
+      if (u.length < 2) {
+        return NextResponse.json({ error: "username must be at least 2 characters" }, { status: 400 });
+      }
+      updates.username = u;
+    }
+    if (b.name  !== undefined) updates.name  = b.name?.trim()  || null;
+    if (b.email !== undefined) updates.email = b.email?.trim() || null;
+    if (b.role  !== undefined) {
+      if (b.role !== "admin" && b.role !== "ops") {
+        return NextResponse.json({ error: "role must be 'admin' or 'ops'" }, { status: 400 });
+      }
+      // Caller cannot demote themselves — would lock them out on next refresh.
+      if (b.id === callerId && b.role !== "admin") {
+        return NextResponse.json(
+          { error: "You can't demote your own account out of admin. Ask another admin to do it." },
+          { status: 400 },
+        );
+      }
+      // Cannot demote the last remaining admin (regardless of who's asking).
+      if (current.role === "admin" && b.role !== "admin") {
+        const otherAdmins = await db.select({ id: users.id })
+          .from(users)
+          .where(and(eq(users.role, "admin"), ne(users.id, b.id)))
+          .limit(1);
+        if (otherAdmins.length === 0) {
+          return NextResponse.json(
+            { error: "Can't demote: this is the only admin. Create another admin first." },
+            { status: 409 },
+          );
+        }
+      }
+      updates.role = b.role;
+    }
+    if (Object.keys(updates).length === 0) {
+      return NextResponse.json({ error: "no fields to update" }, { status: 400 });
+    }
+    await db.update(users).set(updates).where(eq(users.id, b.id));
+    return NextResponse.json({ ok: true });
+  }
+
+  if (b.op === "reset-password") {
+    if (!b.password || b.password.length < MIN_PASSWORD_LENGTH) {
+      return NextResponse.json(
+        { error: `password must be at least ${MIN_PASSWORD_LENGTH} characters` },
+        { status: 400 },
+      );
+    }
+    const [current] = await db.select({ id: users.id }).from(users).where(eq(users.id, b.id));
+    if (!current) {
+      return NextResponse.json({ error: "user not found" }, { status: 404 });
+    }
+    const passwordHash = await bcrypt.hash(b.password, 10);
+    await db.update(users).set({ passwordHash }).where(eq(users.id, b.id));
+    return NextResponse.json({ ok: true });
+  }
+
+  if (b.op === "delete") {
+    if (b.id === callerId) {
+      return NextResponse.json(
+        { error: "You can't delete your own account. Ask another admin to do it." },
+        { status: 400 },
+      );
+    }
+    const [current] = await db.select().from(users).where(eq(users.id, b.id));
+    if (!current) {
+      return NextResponse.json({ error: "user not found" }, { status: 404 });
+    }
+    if (current.role === "admin") {
+      const otherAdmins = await db.select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.role, "admin"), ne(users.id, b.id)))
+        .limit(1);
+      if (otherAdmins.length === 0) {
+        return NextResponse.json(
+          { error: "Can't delete: this is the only admin. Create another admin first." },
+          { status: 409 },
+        );
+      }
+    }
+    await db.delete(users).where(eq(users.id, b.id));
+    return NextResponse.json({ ok: true });
+  }
+
   return NextResponse.json({ error: "Unknown op" }, { status: 400 });
 }
