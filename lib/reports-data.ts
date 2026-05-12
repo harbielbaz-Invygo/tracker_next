@@ -112,6 +112,70 @@ export interface DealerReliabilityRow {
   cancellationRate: number | null;
 }
 
+/**
+ * One batch's contribution to customer impact. We include batches that
+ * are late OR projected-late — both hurt customer experience, just on
+ * different timelines.
+ */
+export interface CustomerImpactBatch {
+  batchId: number;
+  batchCode: string;
+  dealerName: string;
+  modelYear: string;
+  /** How many vehicles in this batch — multiplier for impact. */
+  quantity: number;
+
+  /** The PO-locked promise date (the customer expectation). */
+  promisedDate: string;
+  /**
+   * The realised or expected availability date.
+   *   - Delivered batches → closedAt.
+   *   - Open batches      → currentProjectedDeliveryDate.
+   */
+  effectiveDate: string;
+
+  /** Days late: effectiveDate − promisedDate (always > 0 for affected batches). */
+  delayDays: number;
+
+  /** quantity × delayDays — the headline customer-impact measure. */
+  customerDaysImpact: number;
+
+  /** Whether the impact is already realised or still projected. */
+  state: "delivered_late" | "projected_late";
+
+  /** How many times this batch's projection has shifted (trust erosion). */
+  revisionCount: number;
+
+  /** Bucket for the distribution chart. */
+  severity: "mild" | "moderate" | "severe";
+}
+
+export interface CustomerImpactReport {
+  /** Affected batches, sorted by customerDaysImpact descending. */
+  batches: CustomerImpactBatch[];
+  totals: {
+    /** Distinct batches that are late or projected-late. */
+    affectedBatches: number;
+    /** Sum of `quantity` across affected batches (customers feeling the slip). */
+    affectedCustomers: number;
+    /** Sum of `customerDaysImpact` — total customer-days lost / will lose. */
+    customerDaysLost: number;
+    /** Mean delayDays across affected batches. Null when none. */
+    avgDelayDays: number | null;
+    /** Sum of revisionCount across affected batches — total re-promises issued. */
+    totalRePromises: number;
+
+    /** Distribution by severity tier (counts of batches). */
+    mild: number;     // 1–7 days late
+    moderate: number; // 8–21 days late
+    severe: number;   // > 21 days late
+
+    /** Split by realisation state. */
+    deliveredLateCount: number;
+    projectedLateCount: number;
+  };
+}
+
 export interface PerformanceReport {
   generatedAt: string;
   totals: {
@@ -129,6 +193,8 @@ export interface PerformanceReport {
   stakeholders: StakeholderRow[];
   /** Per-dealer trust metrics — the four PO reliability dimensions. */
   dealerReliability: DealerReliabilityRow[];
+  /** Customer impact from availability date shifts (item 4). */
+  customerImpact: CustomerImpactReport;
 }
 
 interface AggregateAccumulator {
@@ -304,16 +370,27 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
   }
 
   // ── Batch totals + dealer reliability data (one extra round-trip) ─────
+  // Customer-impact analysis (item 4) needs a wider projection: batchCode,
+  // model/year for display, projectedDate to score open batches, and the
+  // revisionCount to measure trust erosion from repeated re-promises.
   const [allBatches, allDealers, colorMatrixRows] = await Promise.all([
     db.select({
       id:            batches.id,
+      batchCode:     batches.batchCode,
       dealerId:      batches.dealerId,
+      dealerName:    dealers.name,
+      model:         batches.model,
+      year:          batches.year,
       closedAt:      batches.closedAt,
       closureReason: batches.closureReason,
       promisedDate:  batches.dealerPromisedDeliveryDate,
+      projectedDate: batches.currentProjectedDeliveryDate,
       requestedQty:  batches.requestedQuantity,
       deliveredQty:  batches.deliveredQuantity,
-    }).from(batches),
+      revisionCount: batches.deliveryDateRevisionCount,
+    })
+    .from(batches)
+    .leftJoin(dealers, eq(batches.dealerId, dealers.id)),
     db.select().from(dealers).orderBy(asc(dealers.name)),
     // Color matrix for color reliability per dealer.
     db.select({
@@ -445,6 +522,102 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
   // Sort: dealers with most batches first (most relevant at top).
   dealerReliability.sort((a, b) => b.totalBatches - a.totalBatches);
 
+  // ── Customer impact (item 4) ───────────────────────────────────────
+  // A batch is "affected" when its effective availability date lands
+  // after the dealer-promised date. We evaluate both delivered batches
+  // (truth — closedAt) and open batches (forecast — projectedDate).
+  // Cancelled batches are excluded; cancellation is its own trust signal
+  // already covered by `dealerReliability.cancellationRate`.
+  const impactBatches: CustomerImpactBatch[] = [];
+  for (const b of allBatches) {
+    if (b.closureReason === "cancelled") continue;
+
+    let effectiveDate: string | null = null;
+    let state: CustomerImpactBatch["state"] | null = null;
+
+    if (b.closedAt && b.closureReason === "delivered") {
+      effectiveDate = b.closedAt;
+      state = "delivered_late";
+    } else if (!b.closedAt && b.projectedDate) {
+      effectiveDate = b.projectedDate;
+      state = "projected_late";
+    } else {
+      // Open batch with no projection — nothing to measure.
+      continue;
+    }
+
+    const delayDays = daysBetween(effectiveDate, b.promisedDate);
+    if (delayDays <= 0) continue; // on time or early — no customer impact
+
+    const qty = b.requestedQty ?? 0;
+    const customerDaysImpact = qty * delayDays;
+
+    const severity: CustomerImpactBatch["severity"] =
+      delayDays > 21 ? "severe"
+      : delayDays > 7 ? "moderate"
+      : "mild";
+
+    const modelYear = [b.model, b.year].filter(Boolean).join(" ") || "—";
+
+    impactBatches.push({
+      batchId:       b.id,
+      batchCode:     b.batchCode,
+      dealerName:    b.dealerName ?? "—",
+      modelYear,
+      quantity:      qty,
+      promisedDate:  b.promisedDate,
+      effectiveDate,
+      delayDays,
+      customerDaysImpact,
+      state,
+      revisionCount: b.revisionCount ?? 0,
+      severity,
+    });
+  }
+
+  // Highest customer-days impact first — that's where ops attention pays
+  // off most. Ties broken by raw delay days (longer slip wins).
+  impactBatches.sort((a, b) => {
+    if (b.customerDaysImpact !== a.customerDaysImpact)
+      return b.customerDaysImpact - a.customerDaysImpact;
+    return b.delayDays - a.delayDays;
+  });
+
+  let mild = 0, moderate = 0, severe = 0;
+  let deliveredLateCount = 0, projectedLateCount = 0;
+  let affectedCustomers = 0, customerDaysLost = 0, totalRePromises = 0;
+  let delaySum = 0;
+  for (const b of impactBatches) {
+    if (b.severity === "mild")     mild++;
+    if (b.severity === "moderate") moderate++;
+    if (b.severity === "severe")   severe++;
+    if (b.state === "delivered_late") deliveredLateCount++;
+    if (b.state === "projected_late") projectedLateCount++;
+    affectedCustomers += b.quantity;
+    customerDaysLost += b.customerDaysImpact;
+    totalRePromises  += b.revisionCount;
+    delaySum         += b.delayDays;
+  }
+  const avgDelayDays = impactBatches.length > 0
+    ? Math.round((delaySum / impactBatches.length) * 10) / 10
+    : null;
+
+  const customerImpact: CustomerImpactReport = {
+    batches: impactBatches,
+    totals: {
+      affectedBatches: impactBatches.length,
+      affectedCustomers,
+      customerDaysLost,
+      avgDelayDays,
+      totalRePromises,
+      mild,
+      moderate,
+      severe,
+      deliveredLateCount,
+      projectedLateCount,
+    },
+  };
+
   return {
     generatedAt: new Date().toISOString(),
     totals: {
@@ -457,5 +630,6 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
     departments: rankBy(departmentsList),
     stakeholders: rankBy(stakeholdersList),
     dealerReliability,
+    customerImpact,
   };
 }
