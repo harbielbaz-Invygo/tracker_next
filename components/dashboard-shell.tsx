@@ -361,7 +361,12 @@ function ActivityTable({ activity }: { activity: TimelineActivity[] }) {
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">
                   {a.completedAt
-                    ? <span className="text-midnight">{a.completedAt}</span>
+                    ? <span
+                        className="text-midnight"
+                        title={`Completed ${a.completedAt} (server time, ISO)`}
+                      >
+                        {fmtLocalDateTime(a.completedAt)}
+                      </span>
                     : <span className="text-ink-400">—</span>}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">
@@ -433,4 +438,16 @@ function Sep() {
 
 function unique<T>(xs: T[]): T[] {
   return Array.from(new Set(xs.filter((v) => v != null && v !== "")));
+}
+
+/**
+ * Render an ISO datetime as `YYYY-MM-DD HH:MM` in the viewer's local
+ * timezone. The DB stores ISO UTC; the team reading the dashboard
+ * thinks in wall-clock time.
+ */
+function fmtLocalDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

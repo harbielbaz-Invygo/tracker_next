@@ -117,19 +117,10 @@ function DepartmentsEditor({ data }: { data: SettingsData }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
-  // local in-progress drafts for each row, keyed by id
-  const [drafts, setDrafts] = useState<Record<number, { name: string; sortOrder: number }>>({});
+  // Per-row name draft (sortOrder is handled by the up/down arrow
+  // buttons; no draft state required for it).
+  const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [newName, setNewName] = useState("");
-
-  function getDraft(id: number, fallback: { name: string; sortOrder: number }) {
-    return drafts[id] ?? fallback;
-  }
-  function setDraft(id: number, patch: Partial<{ name: string; sortOrder: number }>) {
-    setDrafts((d) => ({ ...d, [id]: { ...getDraft(id, { name: "", sortOrder: 0 }), ...patch } }));
-  }
-  function clearDraft(id: number) {
-    setDrafts((d) => { const next = { ...d }; delete next[id]; return next; });
-  }
 
   function refresh() { router.refresh(); }
 
@@ -140,35 +131,70 @@ function DepartmentsEditor({ data }: { data: SettingsData }) {
     });
   }
 
+  /**
+   * Move a department up or down in the order. Two updates are issued —
+   * one swaps the current row's sortOrder with the neighbour's. Cheaper
+   * than introducing a dedicated "move" API op; sortOrder isn't unique
+   * so transient ties during the swap don't cause constraint failures.
+   */
+  function move(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= data.departments.length) return;
+    const here = data.departments[index];
+    const there = data.departments[target];
+    run((async () => {
+      await callApi({
+        resource: "department", op: "update",
+        id: here.id, sortOrder: there.sortOrder,
+      });
+      await callApi({
+        resource: "department", op: "update",
+        id: there.id, sortOrder: here.sortOrder,
+      });
+    })());
+  }
+
   return (
     <CollapsibleCard
       title="Departments"
-      description="Stakeholder groups that get assigned to actions. Add stakeholders inside each department — Ops picks one of them at Intake to own the work."
+      description="Stakeholder groups that get assigned to actions. Add stakeholders inside each department — Ops picks one of them at Intake to own the work. Use ▲/▼ to reorder."
     >
       {/* Existing departments — one card each, with stakeholders inline. */}
       <div className="space-y-3">
-        {data.departments.map((d) => {
-          const draft = getDraft(d.id, { name: d.name, sortOrder: d.sortOrder });
-          const dirty = draft.name !== d.name || draft.sortOrder !== d.sortOrder;
+        {data.departments.map((d, idx) => {
+          const draftName = drafts[d.id] ?? d.name;
+          const dirty = draftName !== d.name;
+          const isFirst = idx === 0;
+          const isLast  = idx === data.departments.length - 1;
           return (
             <div key={d.id} className="border border-ink-200 rounded-md p-3 bg-white">
               {/* Department header row */}
-              <div className="grid grid-cols-1 md:grid-cols-[1fr,7rem,auto] gap-3 items-end">
+              <div className="grid grid-cols-1 md:grid-cols-[auto,1fr,auto] gap-3 items-end">
+                {/* Reorder column — up/down arrows replace the old numeric sort input. */}
+                <div className="flex flex-col gap-1">
+                  <button
+                    type="button"
+                    disabled={isFirst || pending}
+                    className="btn text-xs px-2 py-0.5"
+                    onClick={() => move(idx, -1)}
+                    aria-label={`Move ${d.name} up`}
+                    title="Move up"
+                  >▲</button>
+                  <button
+                    type="button"
+                    disabled={isLast || pending}
+                    className="btn text-xs px-2 py-0.5"
+                    onClick={() => move(idx, 1)}
+                    aria-label={`Move ${d.name} down`}
+                    title="Move down"
+                  >▼</button>
+                </div>
                 <label className="block">
                   <span className="block text-xs font-medium text-ink-600 mb-1">Name</span>
                   <input
                     className="input"
-                    value={draft.name}
-                    onChange={(e) => setDraft(d.id, { name: e.target.value })}
-                  />
-                </label>
-                <label className="block">
-                  <span className="block text-xs font-medium text-ink-600 mb-1">Sort</span>
-                  <input
-                    type="number"
-                    className="input tabular-nums"
-                    value={draft.sortOrder}
-                    onChange={(e) => setDraft(d.id, { sortOrder: parseInt(e.target.value, 10) || 0 })}
+                    value={draftName}
+                    onChange={(e) => setDrafts((s) => ({ ...s, [d.id]: e.target.value }))}
                   />
                 </label>
                 <div className="inline-flex gap-1.5">
@@ -179,9 +205,9 @@ function DepartmentsEditor({ data }: { data: SettingsData }) {
                     onClick={() => run((async () => {
                       await callApi({
                         resource: "department", op: "update",
-                        id: d.id, name: draft.name.trim(), sortOrder: draft.sortOrder,
+                        id: d.id, name: draftName.trim(),
                       });
-                      clearDraft(d.id);
+                      setDrafts((s) => { const n = { ...s }; delete n[d.id]; return n; });
                     })())}
                   >Save</button>
                   <button
@@ -371,12 +397,11 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
     waitingLabel: string;
     doneLabel: string;
     defaultDepartmentId: number | null;
-    sortOrder: number;
   };
   const [drafts, setDrafts] = useState<Record<number, Draft>>({});
   const [creating, setCreating] = useState<Draft>({
     name: "", waitingLabel: "", doneLabel: "",
-    defaultDepartmentId: null, sortOrder: (data.actionTypes.at(-1)?.sortOrder ?? 0) + 1,
+    defaultDepartmentId: null,
   });
 
   function getDraft(id: number, fallback: Draft) { return drafts[id] ?? fallback; }
@@ -390,7 +415,6 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
       waitingLabel: t?.waitingLabel ?? "",
       doneLabel: t?.doneLabel ?? "",
       defaultDepartmentId: t?.defaultDepartmentId ?? null,
-      sortOrder: t?.sortOrder ?? 0,
     };
   }
   function clearDraft(id: number) {
@@ -404,56 +428,63 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
     });
   }
 
+  /** Swap two action types' sortOrder values; one update per row, two calls total. */
+  function move(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= data.actionTypes.length) return;
+    const here = data.actionTypes[index];
+    const there = data.actionTypes[target];
+    run((async () => {
+      await callApi({ resource: "action-type", op: "update", id: here.id,  sortOrder: there.sortOrder });
+      await callApi({ resource: "action-type", op: "update", id: there.id, sortOrder: here.sortOrder });
+    })());
+  }
+
   return (
     <CollapsibleCard
       title="Action Types"
-      description="The master catalog Ops picks from at Intake. Each action has a default department, two display labels (waiting / done), and optional dependencies on other actions."
+      description="The master catalog Ops picks from at Intake. Each action has a default department, two display labels (waiting / done), and optional dependencies on other actions. Use ▲/▼ to reorder; cards are laid out two-per-row on wide screens."
     >
-      <div className="space-y-4">
-        {data.actionTypes.map((t) => {
+      {/* Two-column grid on wide screens — was a vertical stack of full-width rows. */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+        {data.actionTypes.map((t, idx) => {
           const fb = fallbackForId(t.id);
           const draft = getDraft(t.id, fb);
           const dirty = JSON.stringify(draft) !== JSON.stringify(fb);
+          const isFirst = idx === 0;
+          const isLast  = idx === data.actionTypes.length - 1;
           return (
-            <div key={t.id} className="border border-ink-200 rounded-md p-3 bg-white">
-              <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-                <Field label="Name" colSpan={1}>
+            <div key={t.id} className="border border-ink-200 rounded-md p-3 bg-white flex flex-col gap-3">
+              {/* Header: reorder arrows · name · save/delete */}
+              <div className="grid grid-cols-[auto,1fr,auto] gap-2 items-end">
+                <div className="flex flex-col gap-1">
+                  <button
+                    type="button"
+                    disabled={isFirst || pending}
+                    className="btn text-xs px-2 py-0.5"
+                    onClick={() => move(idx, -1)}
+                    aria-label={`Move ${t.name} up`}
+                    title="Move up"
+                  >▲</button>
+                  <button
+                    type="button"
+                    disabled={isLast || pending}
+                    className="btn text-xs px-2 py-0.5"
+                    onClick={() => move(idx, 1)}
+                    aria-label={`Move ${t.name} down`}
+                    title="Move down"
+                  >▼</button>
+                </div>
+                <Field label="Name">
                   <input className="input"
                          value={draft.name}
                          onChange={(e) => setDraft(t.id, { name: e.target.value })} />
                 </Field>
-                <Field label="Waiting label" colSpan={1}>
-                  <input className="input"
-                         value={draft.waitingLabel}
-                         onChange={(e) => setDraft(t.id, { waitingLabel: e.target.value })} />
-                </Field>
-                <Field label="Done label" colSpan={1}>
-                  <input className="input"
-                         value={draft.doneLabel}
-                         onChange={(e) => setDraft(t.id, { doneLabel: e.target.value })} />
-                </Field>
-                <Field label="Default dept" colSpan={1}>
-                  <select className="input"
-                          value={draft.defaultDepartmentId ?? ""}
-                          onChange={(e) => setDraft(t.id, {
-                            defaultDepartmentId: e.target.value ? parseInt(e.target.value, 10) : null,
-                          })}>
-                    <option value="">— none —</option>
-                    {data.departments.map((d) => (
-                      <option key={d.id} value={d.id}>{d.name}</option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="Sort" colSpan={1}>
-                  <input type="number" className="input tabular-nums"
-                         value={draft.sortOrder}
-                         onChange={(e) => setDraft(t.id, { sortOrder: parseInt(e.target.value, 10) || 0 })} />
-                </Field>
-                <div className="flex items-end gap-1.5">
+                <div className="inline-flex gap-1.5 self-end">
                   <button
                     type="button"
                     disabled={!dirty || pending}
-                    className="btn btn-primary text-xs flex-1"
+                    className="btn btn-primary text-xs"
                     onClick={() => run((async () => {
                       await callApi({
                         resource: "action-type", op: "update",
@@ -462,7 +493,6 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
                         waitingLabel: draft.waitingLabel.trim(),
                         doneLabel: draft.doneLabel.trim(),
                         defaultDepartmentId: draft.defaultDepartmentId,
-                        sortOrder: draft.sortOrder,
                       });
                       clearDraft(t.id);
                     })())}
@@ -478,6 +508,34 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
                   >Delete</button>
                 </div>
               </div>
+
+              {/* Labels — two side-by-side */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Field label="Waiting label">
+                  <input className="input"
+                         value={draft.waitingLabel}
+                         onChange={(e) => setDraft(t.id, { waitingLabel: e.target.value })} />
+                </Field>
+                <Field label="Done label">
+                  <input className="input"
+                         value={draft.doneLabel}
+                         onChange={(e) => setDraft(t.id, { doneLabel: e.target.value })} />
+                </Field>
+              </div>
+
+              {/* Default department — full width */}
+              <Field label="Default department">
+                <select className="input"
+                        value={draft.defaultDepartmentId ?? ""}
+                        onChange={(e) => setDraft(t.id, {
+                          defaultDepartmentId: e.target.value ? parseInt(e.target.value, 10) : null,
+                        })}>
+                  <option value="">— none —</option>
+                  {data.departments.map((d) => (
+                    <option key={d.id} value={d.id}>{d.name}</option>
+                  ))}
+                </select>
+              </Field>
 
               {/* Dependencies */}
               <DependencyEditor
@@ -496,23 +554,13 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
         <p className="text-xs font-medium text-ink-600 mb-2 uppercase tracking-wide">
           Add new action type
         </p>
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-          <Field label="Name" colSpan={1}>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="Name">
             <input className="input" placeholder="e.g. Inspection"
                    value={creating.name}
                    onChange={(e) => setCreating((c) => ({ ...c, name: e.target.value }))} />
           </Field>
-          <Field label="Waiting label" colSpan={1}>
-            <input className="input" placeholder="Waiting Inspection"
-                   value={creating.waitingLabel}
-                   onChange={(e) => setCreating((c) => ({ ...c, waitingLabel: e.target.value }))} />
-          </Field>
-          <Field label="Done label" colSpan={1}>
-            <input className="input" placeholder="Inspection Done"
-                   value={creating.doneLabel}
-                   onChange={(e) => setCreating((c) => ({ ...c, doneLabel: e.target.value }))} />
-          </Field>
-          <Field label="Default dept" colSpan={1}>
+          <Field label="Default department">
             <select className="input"
                     value={creating.defaultDepartmentId ?? ""}
                     onChange={(e) => setCreating((c) => ({
@@ -524,33 +572,40 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
               ))}
             </select>
           </Field>
-          <Field label="Sort" colSpan={1}>
-            <input type="number" className="input tabular-nums"
-                   value={creating.sortOrder}
-                   onChange={(e) => setCreating((c) => ({ ...c, sortOrder: parseInt(e.target.value, 10) || 0 }))} />
+          <Field label="Waiting label">
+            <input className="input" placeholder="Waiting Inspection"
+                   value={creating.waitingLabel}
+                   onChange={(e) => setCreating((c) => ({ ...c, waitingLabel: e.target.value }))} />
           </Field>
-          <div className="flex items-end">
-            <button
-              type="button"
-              disabled={pending || !creating.name.trim() || !creating.waitingLabel.trim() || !creating.doneLabel.trim()}
-              className="btn btn-primary w-full"
-              onClick={() => run((async () => {
-                await callApi({
-                  resource: "action-type", op: "create",
-                  name: creating.name.trim(),
-                  waitingLabel: creating.waitingLabel.trim(),
-                  doneLabel: creating.doneLabel.trim(),
-                  defaultDepartmentId: creating.defaultDepartmentId,
-                  sortOrder: creating.sortOrder,
-                });
-                setCreating({
-                  name: "", waitingLabel: "", doneLabel: "",
-                  defaultDepartmentId: null,
-                  sortOrder: creating.sortOrder + 1,
-                });
-              })())}
-            >+ Add</button>
-          </div>
+          <Field label="Done label">
+            <input className="input" placeholder="Inspection Done"
+                   value={creating.doneLabel}
+                   onChange={(e) => setCreating((c) => ({ ...c, doneLabel: e.target.value }))} />
+          </Field>
+        </div>
+        <div className="flex justify-end mt-3">
+          <button
+            type="button"
+            disabled={pending || !creating.name.trim() || !creating.waitingLabel.trim() || !creating.doneLabel.trim()}
+            className="btn btn-primary"
+            onClick={() => run((async () => {
+              // New action types land at the end of the order. Sort
+              // adjustments happen post-create via the ▲/▼ arrows.
+              const nextSort = (data.actionTypes.at(-1)?.sortOrder ?? 0) + 1;
+              await callApi({
+                resource: "action-type", op: "create",
+                name: creating.name.trim(),
+                waitingLabel: creating.waitingLabel.trim(),
+                doneLabel: creating.doneLabel.trim(),
+                defaultDepartmentId: creating.defaultDepartmentId,
+                sortOrder: nextSort,
+              });
+              setCreating({
+                name: "", waitingLabel: "", doneLabel: "",
+                defaultDepartmentId: null,
+              });
+            })())}
+          >+ Add action type</button>
         </div>
       </div>
 
