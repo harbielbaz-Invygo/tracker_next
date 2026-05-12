@@ -132,25 +132,22 @@ function DepartmentsEditor({ data }: { data: SettingsData }) {
   }
 
   /**
-   * Move a department up or down in the order. Two updates are issued —
-   * one swaps the current row's sortOrder with the neighbour's. Cheaper
-   * than introducing a dedicated "move" API op; sortOrder isn't unique
-   * so transient ties during the swap don't cause constraint failures.
+   * Move a department up or down. Renumbers every department to 1..N
+   * in the new display order — N parallel updates. This is dumber than
+   * a two-row swap, but a swap is a silent no-op when neighbours have
+   * the same sort_order (a tie), which is how Partnership + Pricing
+   * both ended up at 0 historically. Renumbering eliminates ties as a
+   * side effect; values are guaranteed unique 1..N after every move.
    */
   function move(index: number, direction: -1 | 1) {
     const target = index + direction;
     if (target < 0 || target >= data.departments.length) return;
-    const here = data.departments[index];
-    const there = data.departments[target];
+    const next = [...data.departments];
+    [next[index], next[target]] = [next[target], next[index]];
     run((async () => {
-      await callApi({
-        resource: "department", op: "update",
-        id: here.id, sortOrder: there.sortOrder,
-      });
-      await callApi({
-        resource: "department", op: "update",
-        id: there.id, sortOrder: here.sortOrder,
-      });
+      await Promise.all(next.map((d, i) =>
+        callApi({ resource: "department", op: "update", id: d.id, sortOrder: i + 1 }),
+      ));
     })());
   }
 
@@ -437,15 +434,22 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
     });
   }
 
-  /** Swap two action types' sortOrder values; one update per row, two calls total. */
+  /**
+   * Move an action type up or down. Renumbers every action type to
+   * 1..N in the new display order — N parallel updates. A two-row
+   * swap is a silent no-op when neighbours share the same sort_order
+   * (a tie), so we renumber every move to guarantee uniqueness 1..N.
+   * Matches the DepartmentsEditor implementation.
+   */
   function move(index: number, direction: -1 | 1) {
     const target = index + direction;
     if (target < 0 || target >= data.actionTypes.length) return;
-    const here = data.actionTypes[index];
-    const there = data.actionTypes[target];
+    const next = [...data.actionTypes];
+    [next[index], next[target]] = [next[target], next[index]];
     run((async () => {
-      await callApi({ resource: "action-type", op: "update", id: here.id,  sortOrder: there.sortOrder });
-      await callApi({ resource: "action-type", op: "update", id: there.id, sortOrder: here.sortOrder });
+      await Promise.all(next.map((t, i) =>
+        callApi({ resource: "action-type", op: "update", id: t.id, sortOrder: i + 1 }),
+      ));
     })());
   }
 
