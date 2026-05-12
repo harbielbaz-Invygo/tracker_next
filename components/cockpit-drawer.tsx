@@ -80,6 +80,9 @@ export default function CockpitDrawer({ batchCode, onMutation, layout = "vertica
       {data.closedAt && data.closureReason ? (
         <ClosedBanner data={data} />
       ) : null}
+      {data.alerts.length > 0 && (
+        <AlertsSection alerts={data.alerts} onAcknowledged={refresh} />
+      )}
       <ConfidenceRow data={data} onSaved={() => { refresh(); onMutation?.(); }} disabled={!!data.closedAt} />
       <ActionsList
         data={data}
@@ -87,6 +90,89 @@ export default function CockpitDrawer({ batchCode, onMutation, layout = "vertica
         onMutated={() => { refresh(); onMutation?.(); }}
         disabled={!!data.closedAt}
       />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Alerts section
+// ──────────────────────────────────────────────────────────────────
+
+import type { ActiveAlert } from "@/lib/alert-engine";
+
+function AlertsSection({
+  alerts, onAcknowledged,
+}: {
+  alerts: ActiveAlert[];
+  onAcknowledged: () => void;
+}) {
+  const [pending, setPending] = useState<number | null>(null);
+
+  async function acknowledge(alertId: number) {
+    setPending(alertId);
+    try {
+      const res = await fetch("/api/alerts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "acknowledge", alertId }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onAcknowledged();
+    } catch (e) {
+      alert(`Could not acknowledge: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPending(null);
+    }
+  }
+
+  return (
+    <div className="mb-5">
+      <p className="text-[0.7rem] font-medium text-ink-600 uppercase tracking-wide mb-2">
+        Active Alerts ({alerts.length})
+      </p>
+      <ul className="space-y-1.5">
+        {alerts.map((a) => (
+          <li
+            key={a.id}
+            className={cn(
+              "flex items-start gap-3 px-3 py-2 rounded-md border text-xs",
+              a.severity === "critical" ? "bg-flame-dark/10 border-flame text-flame-dark"
+              : a.severity === "high"   ? "bg-flame-pale border-flame text-flame-dark"
+              : a.severity === "medium" ? "bg-gold-pale border-gold text-gold-dark"
+              :                           "bg-ink-50 border-ink-200 text-ink-600",
+              a.acknowledged && "opacity-60",
+            )}
+          >
+            <span aria-hidden="true" className="mt-px text-sm shrink-0">
+              {a.severity === "critical" ? "🚨"
+               : a.severity === "high"   ? "⚠️"
+               : a.severity === "medium" ? "⚡"
+               :                           "ℹ️"}
+            </span>
+            <div className="flex-1 min-w-0">
+              <p className="font-medium leading-snug">{a.message}</p>
+              <p className="text-[0.65rem] mt-0.5 text-inherit opacity-70">
+                Raised {a.raisedAt.slice(0, 10)}
+                {a.acknowledged && a.acknowledgedBy && (
+                  <> · Acknowledged by <span className="font-medium">{a.acknowledgedBy}</span></>
+                )}
+              </p>
+            </div>
+            {!a.acknowledged && (
+              <button
+                type="button"
+                disabled={pending === a.id}
+                onClick={() => acknowledge(a.id)}
+                className="shrink-0 text-[0.65rem] font-medium px-2 py-0.5 rounded border
+                           border-current bg-white/60 hover:bg-white transition-colors"
+                title="Acknowledge — mark that you've seen this alert"
+              >
+                {pending === a.id ? "…" : "Ack"}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

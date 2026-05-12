@@ -274,6 +274,34 @@ export const alerts = sqliteTable("alerts", {
 }));
 
 // ─────────────────────────────────────────────────────────
+// Alert rules — admin-configured thresholds for the alert engine.
+// Each rule defines when an alert should fire on an open batch.
+// The engine runs on every Cockpit page load, creates new alerts
+// (fingerprint-deduped) and auto-resolves ones whose condition cleared.
+// ─────────────────────────────────────────────────────────
+export const alertRules = sqliteTable("alert_rules", {
+  id:            integer("id").primaryKey({ autoIncrement: true }),
+  name:          text("name").notNull(),
+  /**
+   * Trigger logic:
+   *  no_vin_before_avail         — VIN action not done, ≤ thresholdDays to availability date
+   *  action_overdue              — any waiting/blocked action is past its expectedDate
+   *  action_pending_before_avail — a specific actionTypeId not done, ≤ thresholdDays to availability date
+   */
+  triggerType:   text("trigger_type", {
+                   enum: ["no_vin_before_avail", "action_overdue", "action_pending_before_avail"],
+                 }).notNull(),
+  /** Days before availability date (or days overdue) at which to fire. */
+  thresholdDays: integer("threshold_days").notNull().default(7),
+  /** Only for action_pending_before_avail — which action type must be done. */
+  actionTypeId:  integer("action_type_id").references(() => actionTypes.id, { onDelete: "set null" }),
+  severity:      text("severity", { enum: ["critical", "high", "medium", "info"] })
+                   .notNull().default("high"),
+  isActive:      integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt:     text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
+});
+
+// ─────────────────────────────────────────────────────────
 // Settings — single-row key/value (mirrors user_settings.json)
 // ─────────────────────────────────────────────────────────
 export const settings = sqliteTable("settings", {
@@ -409,6 +437,7 @@ export type Batch             = typeof batches.$inferSelect;
 export type Vehicle           = typeof vehicles.$inferSelect;
 export type Milestone         = typeof milestones.$inferSelect;
 export type Alert             = typeof alerts.$inferSelect;
+export type AlertRule         = typeof alertRules.$inferSelect;
 export type Department        = typeof departments.$inferSelect;
 export type Stakeholder       = typeof stakeholders.$inferSelect;
 export type ActionType        = typeof actionTypes.$inferSelect;

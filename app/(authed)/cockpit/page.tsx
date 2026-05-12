@@ -16,11 +16,15 @@
 import AccessGate from "@/components/access-gate";
 import CockpitShell from "@/components/cockpit-shell";
 import { getCockpitRows, summarizeCockpit } from "@/lib/cockpit-data";
+import { runAlertEngine } from "@/lib/alert-engine";
 
 export const dynamic = "force-dynamic";
 
 export default async function CockpitPage() {
-  const rows = await getCockpitRows();
+  // Run the alert engine first — creates/resolves alerts in DB so the table
+  // rows below reflect the current alert state.
+  const alertsByBatch = await runAlertEngine();
+  const rows   = await getCockpitRows(alertsByBatch);
   const totals = summarizeCockpit(rows);
 
   if (rows.length === 0) {
