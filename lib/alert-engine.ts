@@ -70,12 +70,36 @@ function fp(ruleId: number, batchId: number, suffix?: string): string {
 // Main engine
 // ──────────────────────────────────────────────────────────────────
 
+/**
+ * Detect "no such table" errors from libSQL / SQLite. We use a string
+ * match because the libSQL client wraps the error in a generic `LibsqlError`
+ * with a `code` of `SQLITE_UNKNOWN` — the most reliable signal is the message.
+ */
+function isMissingTableError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no such table/i.test(msg);
+}
+
 export async function runAlertEngine(): Promise<AlertsByBatch> {
   // 1. Load active rules — bail early if none configured.
-  const rules = await db
-    .select()
-    .from(alertRules)
-    .where(eq(alertRules.isActive, true));
+  // Defensive: if the `alert_rules` table hasn't been migrated yet (e.g. a
+  // production DB that pre-dates the alert engine), don't crash the page —
+  // log and return no alerts. Run `npm run db:push` to enable the engine.
+  let rules: (typeof alertRules.$inferSelect)[] = [];
+  try {
+    rules = await db
+      .select()
+      .from(alertRules)
+      .where(eq(alertRules.isActive, true));
+  } catch (err) {
+    if (isMissingTableError(err)) {
+      // eslint-disable-next-line no-console
+      console.warn("[alert-engine] alert_rules table missing — skipping. Run `npm run db:push` to enable.");
+      return new Map();
+    }
+    throw err;
+  }
 
   if (rules.length === 0) return new Map();
 
