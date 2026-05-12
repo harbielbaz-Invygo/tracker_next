@@ -135,8 +135,11 @@ export default function IntakeForm({ options }: Props) {
 
   /**
    * Group action types by their Settings-configured department, ordered
-   * by department.sortOrder. Unassigned actions (no default department)
-   * land in a final column tagged for admin attention.
+   * by department.sortOrder. Every configured department gets a column
+   * — even ones with no action types pointing at them yet — so the
+   * operator can see the full org structure at intake time. Unassigned
+   * actions (no default department) land in a final column tagged for
+   * admin attention.
    *
    * Each column carries the department's stakeholder list so the column
    * header can render a stakeholder dropdown.
@@ -155,16 +158,15 @@ export default function IntakeForm({ options }: Props) {
       byDept.set(t.defaultDepartmentId, arr);
     }
     const stakeholdersByDept = new Map(options.departments.map((d) => [d.id, d.stakeholders]));
-    const ordered: Col[] = [];
-    for (const d of options.departments) {
-      const arr = byDept.get(d.id);
-      if (arr && arr.length > 0) ordered.push({
-        deptId: d.id,
-        deptName: d.name,
-        actions: arr,
-        stakeholders: stakeholdersByDept.get(d.id) ?? [],
-      });
-    }
+    // Include every configured department, including empty ones. Each
+    // shows up as a column so the operator knows the dept exists even
+    // when no action_type defaults to it.
+    const ordered: Col[] = options.departments.map((d) => ({
+      deptId: d.id,
+      deptName: d.name,
+      actions: byDept.get(d.id) ?? [],
+      stakeholders: stakeholdersByDept.get(d.id) ?? [],
+    }));
     const unassigned = byDept.get(null);
     if (unassigned && unassigned.length > 0) {
       ordered.push({ deptId: null, deptName: "Unassigned", actions: unassigned, stakeholders: [] });
@@ -380,74 +382,23 @@ export default function IntakeForm({ options }: Props) {
   }
 
   /**
-   * Live risk assessment — recomputes whenever dates change.
-   *
-   * New model (after locking availability + auto-padding Ops):
-   *   - **Behind promise** when `opsExpectedDate > availability` for any
-   *     split. Surfaced as a caution; submission is always allowed since
-   *     Ops has already committed to the later date.
-   *   - **PO date gap** = `today − poDate`. Pre-tracking delay we caused
-   *     ourselves before uploading; informational, never blocks.
-   *
-   * The old hard "lead time floor" block + override checkbox is gone:
-   * the lead time is now folded into the Ops Expected default, so it's
-   * impossible to commit to less than the floor.
+   * Submit gate — kept intentionally minimal while the team is still
+   * learning the tool. Only blocks when something would crash batch
+   * creation outright (missing PO number, missing dealer, no items, or
+   * a split with no date / no positive quantity — the DB columns for
+   * those are NOT NULL). Action selection is now optional: empty-action
+   * batches are allowed.
    */
-  const riskAssessment = useMemo(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayMs = today.getTime();
-    const DAY_MS = 24 * 60 * 60 * 1000;
-
-    type SplitRisk = {
-      itemIndex: number; splitIndex: number;
-      itemModel: string; splitCity: string;
-      /** Days Ops's commitment trails the dealer-promised availability. 0 = on promise. */
-      behindDays: number;
-      level: "ok" | "behind";
-    };
-    const perSplit: SplitRisk[] = [];
-    let hasBehind = false;
-
-    for (const [i, it] of items.entries()) {
-      for (const [j, s] of it.splits.entries()) {
-        if (!s.date || !s.opsExpectedDate) continue;
-        const behindDays = Math.max(
-          0,
-          Math.round((new Date(s.opsExpectedDate).getTime() - new Date(s.date).getTime()) / DAY_MS),
-        );
-        const level: "ok" | "behind" = behindDays > 0 ? "behind" : "ok";
-        if (level === "behind") hasBehind = true;
-        perSplit.push({
-          itemIndex: i, splitIndex: j,
-          itemModel: it.model, splitCity: s.city,
-          behindDays, level,
-        });
-      }
-    }
-
-    // Pre-tracking gap (PO issued vs uploaded today).
-    let poGapDays = 0;
-    if (poDate) {
-      poGapDays = Math.round((todayMs - new Date(poDate).getTime()) / DAY_MS);
-      if (poGapDays < 0) poGapDays = 0;   // future PO date doesn't count as a gap
-    }
-
-    return { perSplit, hasBehind, poGapDays };
-  }, [items, poDate]);
-
-  // ── Derived: validity gate for submit button
   const canSubmit = useMemo(() => {
-    if (!poNumber.trim() || !poDate) return false;
+    if (!poNumber.trim()) return false;
     if (!dealerId && !dealerName.trim()) return false;
     if (items.length === 0) return false;
-    if (items.some((it) => !it.model.trim() || !it.year || it.splits.length === 0)) return false;
+    if (items.some((it) => it.splits.length === 0)) return false;
     if (items.some((it) => it.splits.some((s) =>
-      !s.city.trim() || !s.date || !s.opsExpectedDate || !(s.quantity > 0)
+      !s.date || !(s.quantity > 0)
     ))) return false;
-    if (!actions.some((a) => a.selected)) return false;
     return true;
-  }, [poNumber, poDate, dealerId, dealerName, items, actions]);
+  }, [poNumber, dealerId, dealerName, items]);
 
   // Map each checked action to its Slack-ready shape (label + dept + stakeholder).
   // Lookups are O(1) via two pre-built indices.
@@ -474,22 +425,11 @@ export default function IntakeForm({ options }: Props) {
       });
   }, [actions, options.actionTypes, options.departments, pickedStakeholders]);
 
-  // Slack-message risk header — emitted only when Ops's commitment is
-  // behind the dealer-promised availability on at least one split. The
-  // reason summarises the worst-behind split so partnership knows which
-  // delivery is at risk.
-  const slackRisk = useMemo<SlackRisk | undefined>(() => {
-    if (!riskAssessment.hasBehind) return undefined;
-    const worst = riskAssessment.perSplit
-      .filter((r) => r.level === "behind")
-      .sort((a, b) => b.behindDays - a.behindDays)[0];
-    return {
-      level: "caution",
-      reason: worst
-        ? `${worst.itemModel} → ${worst.splitCity}: Ops ETA +${worst.behindDays}d past dealer promise`
-        : "Ops ETA past dealer-promised availability",
-    };
-  }, [riskAssessment]);
+  // Risk surface is muted for now (see Step 5 comment). The Slack
+  // announcement no longer includes a risk header; if Ops trails the
+  // dealer date the team will catch it from the per-split "Ops ETA"
+  // line in the Slack message itself.
+  const slackRisk: SlackRisk | undefined = undefined;
 
   // Snapshot the form's current items (with the new opsExpectedDate)
   // so the Slack message reflects what Ops actually entered, including
@@ -607,7 +547,6 @@ export default function IntakeForm({ options }: Props) {
                   key={i}
                   index={i}
                   item={it}
-                  splitRisks={riskAssessment.perSplit.filter((r) => r.itemIndex === i)}
                   leadTimeDays={options.leadTimeDays}
                   onChange={(partial) => updateItem(i, partial)}
                   onSplitChange={(j, partial) => updateSplit(i, j, partial)}
@@ -657,44 +596,10 @@ export default function IntakeForm({ options }: Props) {
           <div className="card">
             <h2 className="text-base font-bold mb-3">📝 Step 5 · Submit</h2>
 
-            {/* PO-issued vs uploaded gap — informational only. */}
-            {riskAssessment.poGapDays > 0 && (
-              <p className="text-xs px-3 py-2 mb-3 rounded-md bg-ink-100 border border-ink-200 text-midnight leading-snug">
-                ℹ️ <strong>Pre-tracking gap +{riskAssessment.poGapDays}d</strong> —
-                this PO was issued on {poDate}, uploaded today. The dashboard
-                timeline will show this as time lost before tracking began.
-              </p>
-            )}
-
-            {/* Ops-behind-dealer caution. No override needed — Ops's
-                commitment was already auto-floored to today + {leadTimeDays}d,
-                which is later than the dealer's promised date. Submitting
-                marks the batch feasibility=at_risk so dashboards flag it. */}
-            {riskAssessment.hasBehind && (
-              <div role="status"
-                   className="rounded-md border border-gold bg-gold-pale px-3 py-3 mb-3">
-                <p className="font-bold text-sm text-midnight mb-1">
-                  ⚠️ Ops ETA is behind the dealer promise
-                </p>
-                <p className="text-xs text-midnight leading-snug">
-                  At least one split has the dealer-promised availability inside
-                  the {options.leadTimeDays}-day Pre PO Ops Lead Time window, so
-                  Ops Expected Delivery has been auto-pushed to today +
-                  {" "}{options.leadTimeDays}d. Partnership will see this as Ops
-                  trailing the promise — the Slack message includes a callout.
-                </p>
-                <ul className="mt-2 text-xs text-midnight leading-snug space-y-0.5">
-                  {riskAssessment.perSplit
-                    .filter((r) => r.level === "behind")
-                    .map((r) => (
-                      <li key={`${r.itemIndex}-${r.splitIndex}`}>
-                        • <strong>{r.itemModel || "(item)"}</strong> → {r.splitCity || "—"}
-                        : Ops <span className="tabular-nums">+{r.behindDays}d</span> past dealer promise.
-                      </li>
-                    ))}
-                </ul>
-              </div>
-            )}
+            {/* Risk surface (PO-tracking gap, Ops-behind-promise) intentionally
+                removed for now — the team needs friction-free batch creation
+                while learning the tool. Risk signalling will be reintroduced
+                once the production behaviour is fully understood. */}
 
             <FormField label="Notes (optional)">
               <textarea className="input min-h-[80px]" value={notes}
@@ -817,12 +722,11 @@ function DealerSelect({
 }
 
 function ItemEditor({
-  index, item, splitRisks, leadTimeDays,
+  index, item, leadTimeDays,
   onChange, onSplitChange, onAddSplit, onRemoveSplit, onRemove, removable,
 }: {
   index: number;
   item: ItemDraft;
-  splitRisks: { splitIndex: number; behindDays: number; level: "ok" | "behind" }[];
   leadTimeDays: number;
   onChange: (partial: Partial<ItemDraft>) => void;
   onSplitChange: (j: number, partial: Partial<SplitDraft>) => void;
@@ -903,45 +807,32 @@ function ItemEditor({
           <span></span>
         </div>
         <div className="space-y-3">
-          {item.splits.map((s, j) => {
-            const risk = splitRisks.find((r) => r.splitIndex === j);
-            return (
-              <div key={j}>
-                <div className="grid grid-cols-1 md:grid-cols-[5rem,1fr,9rem,9rem,5rem] gap-2">
-                  <input type="number" className="input" placeholder="Qty" value={s.quantity}
-                         aria-label="Quantity"
-                         onChange={(e) => onSplitChange(j, { quantity: parseInt(e.target.value, 10) || 0 })} />
-                  <input className="input" placeholder="City" value={s.city}
-                         aria-label="City"
-                         onChange={(e) => onSplitChange(j, { city: e.target.value })} />
-                  <input
-                    type="date"
-                    className="input bg-ink-50 text-midnight cursor-not-allowed"
-                    value={s.date}
-                    readOnly
-                    aria-label="PO Availability date (locked — set by the PO)"
-                    title="PO Availability date — fixed by partnership. Amend the PO to change."
-                  />
-                  <input type="date" className="input" value={s.opsExpectedDate}
-                         aria-label="Ops expected delivery date"
-                         onChange={(e) => onSplitChange(j, { opsExpectedDate: e.target.value })} />
-                  <button type="button" onClick={() => onRemoveSplit(j)}
-                          disabled={item.splits.length === 1}
-                          className="btn text-xs">Remove</button>
-                </div>
-                {risk?.level === "behind" && (
-                  <p className="text-[0.7rem] mt-1.5 px-2 py-1 rounded-md leading-snug
-                                bg-gold-pale border border-gold text-midnight">
-                    ⚠️ <strong>Ops ETA +{risk.behindDays}d past dealer promise</strong>
-                    {" — "}
-                    PO availability sits inside the {leadTimeDays}d Pre PO Ops Lead Time, so
-                    Ops Expected was auto-floored to today + {leadTimeDays}d.
-                    Adjust the Ops date if you have a tighter commitment.
-                  </p>
-                )}
+          {item.splits.map((s, j) => (
+            <div key={j}>
+              <div className="grid grid-cols-1 md:grid-cols-[5rem,1fr,9rem,9rem,5rem] gap-2">
+                <input type="number" className="input" placeholder="Qty" value={s.quantity}
+                       aria-label="Quantity"
+                       onChange={(e) => onSplitChange(j, { quantity: parseInt(e.target.value, 10) || 0 })} />
+                <input className="input" placeholder="City" value={s.city}
+                       aria-label="City"
+                       onChange={(e) => onSplitChange(j, { city: e.target.value })} />
+                <input
+                  type="date"
+                  className="input bg-ink-50 text-midnight cursor-not-allowed"
+                  value={s.date}
+                  readOnly
+                  aria-label="PO Availability date (locked — set by the PO)"
+                  title="PO Availability date — fixed by partnership. Amend the PO to change."
+                />
+                <input type="date" className="input" value={s.opsExpectedDate}
+                       aria-label="Ops expected delivery date"
+                       onChange={(e) => onSplitChange(j, { opsExpectedDate: e.target.value })} />
+                <button type="button" onClick={() => onRemoveSplit(j)}
+                        disabled={item.splits.length === 1}
+                        className="btn text-xs">Remove</button>
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       </div>
     </div>
@@ -1013,24 +904,31 @@ function ActionDepartmentColumn({
         )}
       </header>
 
-      <ul className="space-y-1.5">
-        {actions.map((t) => {
-          const pick = picks.find((p) => p.actionTypeId === t.id)!;
-          // If the column has stakeholders configured but Ops hasn't picked
-          // one yet, allow the check (stakeholder remains null and the
-          // action is created unassigned). The hint below the column makes
-          // this visible.
-          return (
-            <li key={t.id}>
-              <ActionCheckRow
-                type={t}
-                pick={pick}
-                onToggle={(s) => onToggle(t.id, s)}
-              />
-            </li>
-          );
-        })}
-      </ul>
+      {actions.length === 0 ? (
+        <p className="text-[0.65rem] text-ink-500 italic leading-snug py-2 px-1">
+          No action types are routed to this department yet. Configure in{" "}
+          <span className="font-medium">Settings → Action Types</span>.
+        </p>
+      ) : (
+        <ul className="space-y-1.5">
+          {actions.map((t) => {
+            const pick = picks.find((p) => p.actionTypeId === t.id)!;
+            // If the column has stakeholders configured but Ops hasn't picked
+            // one yet, allow the check (stakeholder remains null and the
+            // action is created unassigned). The hint below the column makes
+            // this visible.
+            return (
+              <li key={t.id}>
+                <ActionCheckRow
+                  type={t}
+                  pick={pick}
+                  onToggle={(s) => onToggle(t.id, s)}
+                />
+              </li>
+            );
+          })}
+        </ul>
+      )}
 
       {checkedCount > 0 && !isUnassigned && stakeholders.length > 0 && pickedStakeholderId == null && (
         <p className="text-[0.65rem] text-flame-dark mt-2 leading-snug">

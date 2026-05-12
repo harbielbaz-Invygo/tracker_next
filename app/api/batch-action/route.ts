@@ -1,17 +1,24 @@
 /**
  * POST /api/batch-action — update a single batch_action's status.
  *
- * Body: { batchActionId: number, newStatus: "waiting"|"done"|"blocked"|"skipped" }
+ * Body: {
+ *   batchActionId: number,
+ *   newStatus?:       "waiting"|"done"|"blocked"|"skipped",
+ *   newExpectedDate?: string|null,   // yyyy-mm-dd, plan date
+ *   newCompletedAt?:  string|null,   // ISO datetime, only honoured when newStatus="done"
+ * }
  *
  * Behaviour:
- *   - status = done   → completed_at = now
+ *   - status = done   → completed_at = newCompletedAt ?? now
  *   - status ≠ done   → completed_at = null
  *   - When flipping to `done`, runs an auto-unblock cascade: every
  *     dependent action (in this batch) whose parents are all `done`
  *     transitions from `blocked` → `waiting`.
- *
- * Reverting `done → waiting` does NOT re-block dependents in v1 — that
- * cascade is intentionally simple. UI surfaces a warning before reverting.
+ *   - When leaving `done` (revert to anything not-done), runs a
+ *     cascade-revert: every transitive dependent on this batch that
+ *     isn't already `skipped` becomes `blocked` with a null completedAt.
+ *     The next time a parent is marked done, the unblock cascade picks
+ *     them back up.
  *
  * Auth: relies on middleware. Cockpit is gated for ops/admin only at the
  * route level; this API is reachable by any authed user. (Phase: tighten
@@ -34,15 +41,16 @@ export async function POST(req: NextRequest) {
   if (!gate.ok) return gate.response;
 
   /**
-   * Body supports two flavours of mutation:
+   * Body supports three flavours of mutation (each combinable with the others):
    *   - Status flip (cascades, auto-close, auto-shift): { batchActionId, newStatus }
-   *   - Plain field patch:                              { batchActionId, newExpectedDate }
-   *   - Both at once:                                   { batchActionId, newStatus, newExpectedDate }
+   *   - Plan date patch:                                { batchActionId, newExpectedDate }
+   *   - Manual completion timestamp:                    { batchActionId, newStatus:"done", newCompletedAt }
    */
   let body: {
     batchActionId?: number;
     newStatus?: Status;
     newExpectedDate?: string | null;
+    newCompletedAt?: string | null;
   };
   try {
     body = await req.json();
@@ -57,6 +65,7 @@ export async function POST(req: NextRequest) {
 
   const hasStatus = body.newStatus != null;
   const hasExpected = body.newExpectedDate !== undefined;
+  const hasCompletedAt = body.newCompletedAt !== undefined;
   if (!hasStatus && !hasExpected) {
     return NextResponse.json(
       { error: "Provide newStatus and/or newExpectedDate" },
@@ -75,8 +84,34 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+  // newCompletedAt: must parse as a valid Date and the request must also
+  // be marking the action done (otherwise the field is ignored — there's
+  // no meaningful completedAt for a non-done status).
+  let manualCompletedAt: string | null = null;
+  if (hasCompletedAt) {
+    if (body.newCompletedAt === null) {
+      manualCompletedAt = null;
+    } else {
+      const t = Date.parse(body.newCompletedAt ?? "");
+      if (!Number.isFinite(t)) {
+        return NextResponse.json(
+          { error: "newCompletedAt must be an ISO datetime or null" },
+          { status: 400 },
+        );
+      }
+      manualCompletedAt = new Date(t).toISOString();
+    }
+    if (body.newStatus !== "done") {
+      return NextResponse.json(
+        { error: "newCompletedAt only applies when newStatus is 'done'" },
+        { status: 400 },
+      );
+    }
+  }
 
   const nowIso = new Date().toISOString();
+  /** The timestamp written to `batch_actions.completed_at` when status = done. */
+  const completedAtIso = manualCompletedAt ?? nowIso;
 
   // Fast path — only expected-date edit, no status change → simple update.
   // Saves a transaction round-trip when Ops is just adjusting plan dates.
@@ -108,7 +143,7 @@ export async function POST(req: NextRequest) {
     await tx.update(batchActions)
       .set({
         status:      newStatus,
-        completedAt: newStatus === "done" ? nowIso : null,
+        completedAt: newStatus === "done" ? completedAtIso : null,
         // If the request also includes a new expected date, fold it into
         // the same UPDATE — keeps the operator's two intents atomic.
         ...(hasExpected ? { expectedDate: body.newExpectedDate } : {}),
@@ -117,8 +152,22 @@ export async function POST(req: NextRequest) {
       .where(eq(batchActions.id, id));
 
     const autoUnblockedIds: number[] = [];
+    const cascadeRevertedIds: number[] = [];
     let autoClosed = false;
-    if (newStatus === "done") {
+    const becameDone   = newStatus === "done";
+    const leftDoneState = current.status === "done" && newStatus !== "done";
+
+    if (leftDoneState) {
+      // Cascade-revert: dependents that were already done (or waiting)
+      // no longer have a satisfied precondition, so push them back to
+      // blocked. Skipped descendants are left alone — the team has
+      // explicitly opted out of those.
+      cascadeRevertedIds.push(
+        ...await cascadeRevertDependents(tx, current.batchId, current.actionTypeId, nowIso),
+      );
+    }
+
+    if (becameDone) {
       autoUnblockedIds.push(...await unblockDependents(tx, current.batchId, current.actionTypeId, nowIso));
 
       // Look up the action type once — used by both auto-close and
@@ -134,12 +183,14 @@ export async function POST(req: NextRequest) {
       // Auto-close: if the action just marked done is the canonical
       // "Delivery" action, the batch is now Delivered. Stamp closedAt +
       // closureReason inside the same transaction so the timeline picks
-      // up the change atomically.
+      // up the change atomically. closedAt uses the date portion of the
+      // (possibly manual) completedAt timestamp so backdated delivery
+      // updates land on the correct day.
       if (type?.name === "Delivery") {
-        const today = nowIso.slice(0, 10);
+        const closedDate = completedAtIso.slice(0, 10);
         await tx.update(batches)
           .set({
-            closedAt:      today,
+            closedAt:      closedDate,
             closureReason: "delivered",
             updatedAt:     nowIso,
           })
@@ -153,10 +204,10 @@ export async function POST(req: NextRequest) {
       // every "from_vin" action's expectedDate slides forward by N days,
       // and the batch's currentProjectedDeliveryDate slips by the same N.
       if (type?.name === "VIN") {
-        await autoShiftFromVin(tx, current.batchId, nowIso.slice(0, 10));
+        await autoShiftFromVin(tx, current.batchId, completedAtIso.slice(0, 10));
       }
     }
-    return { notFound: false as const, autoUnblockedIds, autoClosed };
+    return { notFound: false as const, autoUnblockedIds, cascadeRevertedIds, autoClosed };
   });
 
   if (result.notFound) {
@@ -167,13 +218,68 @@ export async function POST(req: NextRequest) {
     ok: true,
     batchActionId: id,
     newStatus,
-    completedAt: newStatus === "done" ? nowIso : null,
-    autoUnblockedIds: result.autoUnblockedIds,
-    autoClosed: result.autoClosed,
+    completedAt: newStatus === "done" ? completedAtIso : null,
+    autoUnblockedIds:    result.autoUnblockedIds,
+    cascadeRevertedIds:  result.cascadeRevertedIds,
+    autoClosed:          result.autoClosed,
   });
 }
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Cascade-revert: a parent action just left the `done` state, so every
+ * transitive descendant on this batch whose precondition is no longer
+ * satisfied needs to drop back to `blocked` (with completedAt cleared).
+ *
+ * `skipped` descendants are intentionally left alone — the team has
+ * explicitly opted those actions out, so a parent revert shouldn't
+ * un-skip them.
+ *
+ * Returns the ids of every batch_action this cascade touched.
+ */
+async function cascadeRevertDependents(
+  tx: Tx,
+  batchId: number,
+  parentActionTypeId: number,
+  nowIso: string,
+): Promise<number[]> {
+  // BFS through the dependency DAG: collect every action_type that
+  // transitively depends on the reverted parent.
+  const descendants = new Set<number>();
+  const queue: number[] = [parentActionTypeId];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const childDeps = await tx.select()
+      .from(actionDependencies)
+      .where(eq(actionDependencies.dependsOnActionTypeId, current));
+    for (const d of childDeps) {
+      if (!descendants.has(d.actionTypeId)) {
+        descendants.add(d.actionTypeId);
+        queue.push(d.actionTypeId);
+      }
+    }
+  }
+  if (descendants.size === 0) return [];
+
+  // Pull matching batch_action rows for this batch.
+  const rows = await tx.select()
+    .from(batchActions)
+    .where(and(
+      eq(batchActions.batchId, batchId),
+      inArray(batchActions.actionTypeId, Array.from(descendants)),
+    ));
+
+  // Revert anything that isn't already skipped (skipped = team opted out).
+  const toRevert = rows.filter((r) => r.status !== "skipped");
+  if (toRevert.length === 0) return [];
+
+  await tx.update(batchActions)
+    .set({ status: "blocked", completedAt: null, updatedAt: nowIso })
+    .where(inArray(batchActions.id, toRevert.map((r) => r.id)));
+
+  return toRevert.map((r) => r.id);
+}
 
 /**
  * For every action_type that depends on `parentActionTypeId`, check whether

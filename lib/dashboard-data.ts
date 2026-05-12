@@ -130,7 +130,11 @@ export interface TimelineActivity {
   stakeholderName: string | null;
   /** ISO yyyy-mm-dd planned date. Null when no expected date is set. */
   expectedDate: string | null;
-  /** ISO yyyy-mm-dd actual completion date. Null when still open. */
+  /**
+   * Full ISO datetime of actual completion (e.g. `2026-05-11T14:32:00.000Z`).
+   * Null when still open. UI renders in local time. The day-based delay
+   * math uses only the date portion.
+   */
   completedAt: string | null;
   /**
    * Signed delay in days vs the expected date.
@@ -262,12 +266,15 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
     : null;
 
   // ── Activity table rows — every batch_action with owner + delay ──
+  // We pass through the full ISO `completedAt` (date + time + timezone)
+  // rather than truncating to date-only so the UI can render the time too.
+  // Day-based delay math uses just the date portion.
   const todayIso = new Date().toISOString().slice(0, 10);
   const activity: TimelineActivity[] = allActions.map((a) => {
-    const completedIso = a.completedAt ? a.completedAt.slice(0, 10) : null;
+    const completedDateOnly = a.completedAt ? a.completedAt.slice(0, 10) : null;
     let delayDays: number | null = null;
-    if (a.status === "done" && completedIso && a.expectedDate) {
-      delayDays = daysBetween(completedIso, a.expectedDate);
+    if (a.status === "done" && completedDateOnly && a.expectedDate) {
+      delayDays = daysBetween(completedDateOnly, a.expectedDate);
     } else if ((a.status === "waiting" || a.status === "blocked") && a.expectedDate && todayIso > a.expectedDate) {
       // Past-due open action — surface how late it already is.
       delayDays = daysBetween(todayIso, a.expectedDate);
@@ -279,21 +286,22 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
       departmentName: a.departmentName ?? null,
       stakeholderName: a.stakeholderName ?? null,
       expectedDate: a.expectedDate ?? null,
-      completedAt: completedIso,
+      completedAt: a.completedAt ?? null,
       delayDays,
       notes: a.notes ?? null,
     };
   });
 
   // Sort the activity narrative chronologically: skipped go to the
-  // bottom; done/waiting/blocked sort by expectedDate (or completedAt
-  // when no plan), with rows missing both dates pushed last.
+  // bottom; done/waiting/blocked sort by expectedDate (or the date
+  // portion of completedAt when no plan), with rows missing both
+  // dates pushed last.
   activity.sort((a, b) => {
     const aSkip = a.status === "skipped" ? 1 : 0;
     const bSkip = b.status === "skipped" ? 1 : 0;
     if (aSkip !== bSkip) return aSkip - bSkip;
-    const aKey = a.expectedDate ?? a.completedAt ?? "9999-12-31";
-    const bKey = b.expectedDate ?? b.completedAt ?? "9999-12-31";
+    const aKey = a.expectedDate ?? (a.completedAt ? a.completedAt.slice(0, 10) : "9999-12-31");
+    const bKey = b.expectedDate ?? (b.completedAt ? b.completedAt.slice(0, 10) : "9999-12-31");
     return aKey.localeCompare(bKey);
   });
 

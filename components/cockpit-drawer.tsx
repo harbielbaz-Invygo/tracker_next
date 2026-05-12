@@ -558,22 +558,48 @@ function ActionRow({
   disabled?: boolean;
 }) {
   const [pending, setPending] = useState(false);
+  // Manual backdating: when the operator clicks the 🕒 button next to
+  // "Mark done", we expose a datetime-local input pre-filled with now().
+  // Saving uses that timestamp instead of the server-side now().
+  const [backdating, setBackdating] = useState(false);
+  const [customAt, setCustomAt] = useState<string>(""); // datetime-local format
 
-  async function setStatus(newStatus: ActionDetail["status"]) {
+  async function setStatus(
+    newStatus: ActionDetail["status"],
+    newCompletedAt?: string | null,
+  ) {
     setPending(true);
     try {
+      const body: Record<string, unknown> = { batchActionId: action.id, newStatus };
+      if (newCompletedAt !== undefined && newStatus === "done") {
+        // datetime-local input emits "YYYY-MM-DDTHH:MM" in the user's
+        // local timezone with no offset — re-anchor to ISO before sending.
+        body.newCompletedAt = newCompletedAt
+          ? new Date(newCompletedAt).toISOString()
+          : null;
+      }
       const res = await fetch("/api/batch-action", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ batchActionId: action.id, newStatus }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(await res.text());
+      setBackdating(false);
       onMutated();
     } catch (e) {
       alert(`Could not update: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setPending(false);
     }
+  }
+
+  function openBackdate() {
+    // Pre-fill with right-now-local in datetime-local format.
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const local = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    setCustomAt(local);
+    setBackdating(true);
   }
 
   const labelText = tone === "done" ? action.doneLabel : action.waitingLabel;
@@ -585,22 +611,63 @@ function ActionRow({
   }[tone];
 
   const allDisabled = disabled || pending;
-  const Buttons = (
+  const Buttons = backdating ? (
+    // Picker mode — choose the completion datetime, then commit.
+    <div className={cn("flex items-center gap-1 flex-wrap")}>
+      <input
+        type="datetime-local"
+        className="input text-xs py-1"
+        value={customAt}
+        onChange={(e) => setCustomAt(e.target.value)}
+        disabled={allDisabled}
+      />
+      <button
+        type="button"
+        disabled={allDisabled || !customAt}
+        onClick={() => setStatus("done", customAt)}
+        className="btn btn-primary text-xs"
+        title="Mark done with this date + time"
+      >
+        ✓ Save
+      </button>
+      <button
+        type="button"
+        disabled={allDisabled}
+        onClick={() => setBackdating(false)}
+        className="btn text-xs"
+      >
+        Cancel
+      </button>
+    </div>
+  ) : (
     <div className={cn("flex items-center gap-1", compact ? "flex-wrap" : "")}>
       {tone !== "done" && (
-        <button
-          type="button"
-          disabled={allDisabled || tone === "blocked"}
-          onClick={() => setStatus("done")}
-          className="btn btn-primary text-xs"
-          title={
-            disabled ? "Batch is closed — actions are locked"
-            : tone === "blocked" ? "Cannot complete while blocked by parent actions"
-            : "Mark this action done"
-          }
-        >
-          ✓ Mark done
-        </button>
+        <>
+          <button
+            type="button"
+            disabled={allDisabled || tone === "blocked"}
+            onClick={() => setStatus("done")}
+            className="btn btn-primary text-xs"
+            title={
+              disabled ? "Batch is closed — actions are locked"
+              : tone === "blocked" ? "Cannot complete while blocked by parent actions"
+              : "Mark this action done (with the current date + time)"
+            }
+          >
+            ✓ Mark done
+          </button>
+          {/* Backdating affordance — opens a datetime picker pre-filled with now. */}
+          <button
+            type="button"
+            disabled={allDisabled || tone === "blocked"}
+            onClick={openBackdate}
+            className="btn text-xs px-2"
+            title="Mark done at a specific date + time"
+            aria-label="Mark done with a custom date and time"
+          >
+            🕒
+          </button>
+        </>
       )}
       {tone !== "skipped" && tone !== "done" && (
         <button
@@ -617,7 +684,7 @@ function ActionRow({
           type="button"
           disabled={allDisabled}
           onClick={() => {
-            if (!confirm("Revert this action to waiting? Dependents won't be re-blocked automatically.")) return;
+            if (!confirm("Revert this action to waiting? Any dependent actions that are currently done or waiting will be pushed back to blocked.")) return;
             setStatus("waiting");
           }}
           className="btn text-xs"
@@ -646,9 +713,11 @@ function ActionRow({
 
   // Compute delay (if any) — only meaningful when an expectedDate exists
   // and the action has either landed (compare to completedAt) or is still
-  // pending past its expected date.
+  // pending past its expected date. The full completedAt timestamp is
+  // also rendered so the team can see *when* on the day it landed.
   const today = new Date().toISOString().slice(0, 10);
   const actualDate = action.completedAt ? action.completedAt.slice(0, 10) : null;
+  const actualDateTime = action.completedAt ? fmtLocalDateTime(action.completedAt) : null;
   const compareTo = actualDate ?? today;
   const delayDays = action.expectedDate
     ? Math.round((new Date(compareTo).getTime() - new Date(action.expectedDate).getTime()) / 86_400_000)
@@ -670,10 +739,15 @@ function ActionRow({
         disabled={disabled}
         onSaved={onMutated}
       />
-      {actualDate && (
+      {actualDateTime && (
         <>
           <Sep />
-          <span className="tabular-nums">✓ {actualDate}</span>
+          <span
+            className="tabular-nums"
+            title={`Completed at ${actualDateTime} (local time)`}
+          >
+            ✓ {actualDateTime}
+          </span>
         </>
       )}
       {showDelay && (
@@ -722,6 +796,18 @@ function ActionRow({
 
 function Sep() {
   return <span aria-hidden="true" className="text-ink-300">·</span>;
+}
+
+/**
+ * Render an ISO datetime as `YYYY-MM-DD HH:MM` in the viewer's local
+ * timezone. The DB stores ISO UTC; the team reading the Cockpit reads
+ * in their wall-clock time, so we render local.
+ */
+function fmtLocalDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /**
