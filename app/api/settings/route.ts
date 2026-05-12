@@ -18,7 +18,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import {
-  departments, stakeholders, actionTypes, actionDependencies, batchActions, batches, users,
+  departments, stakeholders, actionTypes, actionDependencies, batchActions, batches, users, alertRules,
 } from "@/lib/db/schema";
 import { setRuleNumber, RULE_KEYS, getLeadTimeDays } from "@/lib/rules";
 import { requireAuth } from "@/lib/api-auth";
@@ -45,7 +45,10 @@ type Body =
   | { resource: "user"; op: "create"; username: string; password: string; name?: string | null; email?: string | null; role: "admin" | "ops" }
   | { resource: "user"; op: "update"; id: number; username?: string; name?: string | null; email?: string | null; role?: "admin" | "ops" }
   | { resource: "user"; op: "reset-password"; id: number; password: string }
-  | { resource: "user"; op: "delete"; id: number };
+  | { resource: "user"; op: "delete"; id: number }
+  | { resource: "alert-rule"; op: "create"; name: string; triggerType: string; thresholdDays: number; actionTypeId?: number | null; severity: string }
+  | { resource: "alert-rule"; op: "update"; id: number; name?: string; thresholdDays?: number; actionTypeId?: number | null; severity?: string; isActive?: boolean }
+  | { resource: "alert-rule"; op: "delete"; id: number };
 
 export async function POST(req: NextRequest) {
   // Settings are admin-only — no other role can mutate departments,
@@ -69,6 +72,7 @@ export async function POST(req: NextRequest) {
       case "batch":        return await handleBatch(body);
       case "stakeholder":  return await handleStakeholder(body);
       case "user":         return await handleUser(body, Number(gate.user.id));
+      case "alert-rule":   return await handleAlertRule(body);
       default:
         return NextResponse.json({ error: "Unknown resource" }, { status: 400 });
     }
@@ -565,6 +569,74 @@ async function handleUser(b: Extract<Body, { resource: "user" }>, callerId: numb
       }
     }
     await db.delete(users).where(eq(users.id, b.id));
+    return NextResponse.json({ ok: true });
+  }
+
+  return NextResponse.json({ error: "Unknown op" }, { status: 400 });
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Alert rules
+// ──────────────────────────────────────────────────────────────────
+
+const VALID_TRIGGER_TYPES = ["no_vin_before_avail", "action_overdue", "action_pending_before_avail"] as const;
+const VALID_SEVERITIES    = ["critical", "high", "medium", "info"] as const;
+
+async function handleAlertRule(b: Extract<Body, { resource: "alert-rule" }>) {
+  if (b.op === "create") {
+    if (!b.name?.trim()) {
+      return NextResponse.json({ error: "name required" }, { status: 400 });
+    }
+    if (!VALID_TRIGGER_TYPES.includes(b.triggerType as never)) {
+      return NextResponse.json({ error: "invalid triggerType" }, { status: 400 });
+    }
+    if (!VALID_SEVERITIES.includes(b.severity as never)) {
+      return NextResponse.json({ error: "invalid severity" }, { status: 400 });
+    }
+    const days = Number(b.thresholdDays);
+    if (!Number.isFinite(days) || days < 0) {
+      return NextResponse.json({ error: "thresholdDays must be a non-negative number" }, { status: 400 });
+    }
+
+    const [row] = await db.insert(alertRules).values({
+      name:          b.name.trim(),
+      triggerType:   b.triggerType as typeof VALID_TRIGGER_TYPES[number],
+      thresholdDays: days,
+      actionTypeId:  b.actionTypeId ?? null,
+      severity:      b.severity as typeof VALID_SEVERITIES[number],
+      isActive:      true,
+    }).returning();
+    return NextResponse.json({ ok: true, row });
+  }
+
+  if (b.op === "update") {
+    const updates: Partial<typeof alertRules.$inferInsert> = {};
+    if (b.name !== undefined)         updates.name = b.name.trim();
+    if (b.thresholdDays !== undefined) {
+      const n = Number(b.thresholdDays);
+      if (!Number.isFinite(n) || n < 0) {
+        return NextResponse.json({ error: "thresholdDays must be a non-negative number" }, { status: 400 });
+      }
+      updates.thresholdDays = n;
+    }
+    if (b.actionTypeId !== undefined) updates.actionTypeId = b.actionTypeId ?? null;
+    if (b.severity !== undefined) {
+      if (!VALID_SEVERITIES.includes(b.severity as never)) {
+        return NextResponse.json({ error: "invalid severity" }, { status: 400 });
+      }
+      updates.severity = b.severity as typeof VALID_SEVERITIES[number];
+    }
+    if (b.isActive !== undefined) updates.isActive = b.isActive;
+
+    if (Object.keys(updates).length === 0) {
+      return NextResponse.json({ error: "no fields to update" }, { status: 400 });
+    }
+    await db.update(alertRules).set(updates).where(eq(alertRules.id, b.id));
+    return NextResponse.json({ ok: true });
+  }
+
+  if (b.op === "delete") {
+    await db.delete(alertRules).where(eq(alertRules.id, b.id));
     return NextResponse.json({ ok: true });
   }
 

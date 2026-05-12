@@ -8,11 +8,13 @@
  * Aggregation happens in JS since the dataset is small (dozens of batches × 9
  * actions). For larger volumes, switch to GROUP BY in SQL.
  */
-import { eq, asc, inArray } from "drizzle-orm";
+import { eq, asc, inArray, and } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders,
+  batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, alerts,
 } from "@/lib/db/schema";
+import type { ActiveAlert } from "@/lib/alert-engine";
+import { highestSeverity } from "@/lib/alert-engine";
 
 // ──────────────────────────────────────────────────────────────────
 // Public types
@@ -52,6 +54,10 @@ export interface CockpitRow {
   /* Confidence */
   operationsConfidence: number | null;
   operationsLocked: boolean;
+
+  /* Alerts */
+  alertCount: number;
+  highestAlertSeverity: ActiveAlert["severity"] | null;
 }
 
 export interface ActionDetail {
@@ -103,6 +109,8 @@ export interface DrawerData {
   actions: ActionDetail[];
   /** Departments available for re-assignment in the drawer. */
   departments: { id: number; name: string }[];
+  /** Active (unresolved) alerts for this batch. */
+  alerts: ActiveAlert[];
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -131,7 +139,9 @@ function statusFor(b: typeof batches.$inferSelect): { delayDays: number; statusL
 // Public API
 // ──────────────────────────────────────────────────────────────────
 
-export async function getCockpitRows(): Promise<CockpitRow[]> {
+export async function getCockpitRows(
+  alertsByBatch: Map<number, ActiveAlert[]> = new Map(),
+): Promise<CockpitRow[]> {
   // Pull every batch, plus its dealer name.
   const batchRows = await db
     .select({ b: batches, dealerName: dealers.name })
@@ -211,6 +221,9 @@ export async function getCockpitRows(): Promise<CockpitRow[]> {
 
       operationsConfidence: b.operationsConfidence ?? null,
       operationsLocked: b.operationsConfidenceAtLock != null,
+
+      alertCount:           (alertsByBatch.get(b.id) ?? []).length,
+      highestAlertSeverity: highestSeverity(alertsByBatch.get(b.id) ?? []),
     };
   });
 }
@@ -294,10 +307,16 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     sortOrder:                r.at.sortOrder,
   }));
 
-  const allDepartments = await db
-    .select({ id: departments.id, name: departments.name })
-    .from(departments)
-    .orderBy(asc(departments.sortOrder));
+  const [allDepartments, batchAlerts] = await Promise.all([
+    db
+      .select({ id: departments.id, name: departments.name })
+      .from(departments)
+      .orderBy(asc(departments.sortOrder)),
+    db
+      .select()
+      .from(alerts)
+      .where(and(eq(alerts.batchId, b.id), eq(alerts.resolved, false))),
+  ]);
 
   const { statusLabel } = statusFor(b);
 
@@ -323,6 +342,17 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
 
     actions,
     departments: allDepartments,
+    alerts: batchAlerts.map((a) => ({
+      id:             a.id,
+      fingerprint:    a.fingerprint,
+      severity:       a.severity as ActiveAlert["severity"],
+      alertType:      a.alertType,
+      message:        a.message,
+      raisedAt:       a.raisedAt ?? new Date().toISOString(),
+      acknowledged:   a.acknowledged ?? false,
+      acknowledgedBy: a.acknowledgedBy ?? null,
+      acknowledgedAt: a.acknowledgedAt ?? null,
+    })),
   };
 }
 

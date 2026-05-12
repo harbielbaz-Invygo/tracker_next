@@ -12,9 +12,21 @@ import { asc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   departments, stakeholders, actionTypes, actionDependencies,
-  dealers, batches, batchActions, users,
+  dealers, batches, batchActions, users, alertRules,
 } from "@/lib/db/schema";
 import { getAllRules } from "@/lib/rules";
+
+export interface AlertRuleSetting {
+  id: number;
+  name: string;
+  triggerType: "no_vin_before_avail" | "action_overdue" | "action_pending_before_avail";
+  thresholdDays: number;
+  actionTypeId: number | null;
+  /** Name of the actionType, resolved for display. */
+  actionTypeName: string | null;
+  severity: "critical" | "high" | "medium" | "info";
+  isActive: boolean;
+}
 
 export interface SettingsData {
   departments: {
@@ -39,6 +51,7 @@ export interface SettingsData {
   rules: {
     prePoOpsLeadTimeDays: number;
   };
+  alertRules: AlertRuleSetting[];
   /**
    * Application users. Password hashes are deliberately omitted — only
    * the metadata Settings → Users needs is exposed. To set or rotate a
@@ -133,7 +146,7 @@ export interface BatchEditRow {
 
 export async function getSettingsData(): Promise<SettingsData> {
   const [
-    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw,
+    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw, alertRulesRaw,
   ] = await Promise.all([
     db.select().from(departments).orderBy(asc(departments.sortOrder)),
     db.select().from(stakeholders).orderBy(asc(stakeholders.sortOrder)),
@@ -169,6 +182,7 @@ export async function getSettingsData(): Promise<SettingsData> {
       role:      users.role,
       createdAt: users.createdAt,
     }).from(users).orderBy(asc(users.role), asc(users.username)),
+    db.select().from(alertRules).orderBy(asc(alertRules.id)),
   ]);
 
   // Group stakeholders by department for inline rendering.
@@ -290,6 +304,16 @@ export async function getSettingsData(): Promise<SettingsData> {
     })),
     batches: batchesList,
     rules,
+    alertRules: alertRulesRaw.map((r) => ({
+      id:             r.id,
+      name:           r.name,
+      triggerType:    r.triggerType as AlertRuleSetting["triggerType"],
+      thresholdDays:  r.thresholdDays,
+      actionTypeId:   r.actionTypeId ?? null,
+      actionTypeName: r.actionTypeId ? (actionTypeNames[r.actionTypeId] ?? null) : null,
+      severity:       r.severity as AlertRuleSetting["severity"],
+      isActive:       r.isActive ?? true,
+    })),
     users: usersRaw.map((u) => ({
       id:        u.id,
       username:  u.username,

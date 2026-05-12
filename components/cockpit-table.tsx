@@ -46,6 +46,7 @@ export default function CockpitTable({ rows, selectedCode, onSelect, totalCount 
                 <Th align="right">Done</Th>
                 <Th>Status</Th>
                 <Th align="right">Ops Conf</Th>
+                <Th>Alerts</Th>
               </tr>
             </thead>
             <tbody>
@@ -124,6 +125,13 @@ export default function CockpitTable({ rows, selectedCode, onSelect, totalCount 
                         </span>
                       ) : (
                         <span className="text-ink-400">—</span>
+                      )}
+                    </Td>
+                    <Td>
+                      {r.alertCount > 0 ? (
+                        <AlertBadge count={r.alertCount} severity={r.highestAlertSeverity} />
+                      ) : (
+                        <span className="text-ink-300 text-xs">—</span>
                       )}
                     </Td>
                   </tr>
@@ -225,6 +233,30 @@ function StatusChip({
       cls,
     )}>
       {label}
+    </span>
+  );
+}
+
+type AlertSeverity = "critical" | "high" | "medium" | "info" | null;
+
+function AlertBadge({ count, severity }: { count: number; severity: AlertSeverity }) {
+  const cls =
+    severity === "critical" ? "bg-flame-dark text-white border-flame-dark"
+    : severity === "high"   ? "bg-flame-pale text-flame-dark border-flame"
+    : severity === "medium" ? "bg-gold-pale text-gold-dark border-gold"
+    :                         "bg-ink-100 text-ink-600 border-ink-300";
+  const icon =
+    severity === "critical" ? "🚨"
+    : severity === "high"   ? "⚠️"
+    : severity === "medium" ? "⚡"
+    :                         "ℹ️";
+  return (
+    <span className={cn(
+      "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs font-semibold border whitespace-nowrap tabular-nums",
+      cls,
+    )}>
+      <span aria-hidden="true">{icon}</span>
+      {count}
     </span>
   );
 }
