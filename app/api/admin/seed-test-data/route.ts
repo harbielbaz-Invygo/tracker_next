@@ -273,14 +273,20 @@ async function seedTestData() {
   const byCode = new Map(insertedBatches.map((b) => [b.code, b]));
 
   // ── 5. Batch actions ──────────────────────────────────────────
-  // We resolve action_type IDs by name — if your DB has a different VIN
-  // or Delivery action name, only those specific inserts will be skipped.
+  // Resolve action_type IDs by name. Tries exact "VIN"/"Delivery" first,
+  // then falls back to a case-insensitive substring match so a renamed
+  // action type ("VIN Assignment", "Final Delivery", etc.) still works.
   const types = await db.select({ id: actionTypes.id, name: actionTypes.name, sortOrder: actionTypes.sortOrder }).from(actionTypes);
-  const typeByName = new Map(types.map((t) => [t.name, t]));
-  const vinType = typeByName.get("VIN");
-  const deliveryType = typeByName.get("Delivery");
+
+  function findType(exact: string, substring: string) {
+    const byExact = types.find((t) => t.name === exact);
+    if (byExact) return byExact;
+    return types.find((t) => t.name.toLowerCase().includes(substring.toLowerCase()));
+  }
+  const vinType = findType("VIN", "vin");
+  const deliveryType = findType("Delivery", "deliver");
   const firstNonVinDelivery = types
-    .filter((t) => t.name !== "VIN" && t.name !== "Delivery")
+    .filter((t) => t !== vinType && t !== deliveryType)
     .sort((a, b) => a.sortOrder - b.sortOrder)[0];
 
   const actionInserts: (typeof batchActions.$inferInsert)[] = [];
@@ -359,6 +365,14 @@ async function seedTestData() {
     alertRulesInserted: rulesInserted,
     batchActionsInserted: actionInserts.length,
     colorMatrixInserted: colorInserts.length,
+    /** Diagnostics — which action_types we resolved. `null` = none found. */
+    resolved: {
+      actionTypesAvailable: types.length,
+      actionTypeNames: types.map((t) => t.name),
+      vinTypeName: vinType?.name ?? null,
+      deliveryTypeName: deliveryType?.name ?? null,
+      overdueAnchorName: firstNonVinDelivery?.name ?? null,
+    },
     note: "Refresh Dashboard, Cockpit, and Reports to see the seeded scenarios. Filter by dealer 'test' to isolate.",
   };
 }
