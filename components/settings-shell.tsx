@@ -157,10 +157,12 @@ function DepartmentsEditor({ data }: { data: SettingsData }) {
   return (
     <CollapsibleCard
       title="Departments"
-      description="Stakeholder groups that get assigned to actions. Add stakeholders inside each department — Ops picks one of them at Intake to own the work. Use ▲/▼ to reorder."
+      description="Stakeholder groups that get assigned to actions. Add stakeholders inside each department — Ops picks one of them at Intake to own the work. Use ▲/▼ to reorder; the number between the arrows is the current sort_order value."
     >
-      {/* Existing departments — one card each, with stakeholders inline. */}
-      <div className="space-y-3">
+      {/* Two-column grid on xl+ screens — was a vertical stack. The
+          inline stakeholders editor inside each card keeps working as
+          before; cards expand vertically to fit their stakeholder list. */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
         {data.departments.map((d, idx) => {
           const draftName = drafts[d.id] ?? d.name;
           const dirty = draftName !== d.name;
@@ -170,8 +172,8 @@ function DepartmentsEditor({ data }: { data: SettingsData }) {
             <div key={d.id} className="border border-ink-200 rounded-md p-3 bg-white">
               {/* Department header row */}
               <div className="grid grid-cols-1 md:grid-cols-[auto,1fr,auto] gap-3 items-end">
-                {/* Reorder column — up/down arrows replace the old numeric sort input. */}
-                <div className="flex flex-col gap-1">
+                {/* Reorder + position column — ▲ / current sort_order / ▼. */}
+                <div className="flex flex-col items-center gap-0.5">
                   <button
                     type="button"
                     disabled={isFirst || pending}
@@ -180,6 +182,13 @@ function DepartmentsEditor({ data }: { data: SettingsData }) {
                     aria-label={`Move ${d.name} up`}
                     title="Move up"
                   >▲</button>
+                  <span
+                    className="text-[0.65rem] font-medium text-ink-500 tabular-nums leading-none px-1 py-0.5"
+                    title={`Current sort_order: ${d.sortOrder}`}
+                    aria-label={`Sort position ${d.sortOrder}`}
+                  >
+                    {d.sortOrder}
+                  </span>
                   <button
                     type="button"
                     disabled={isLast || pending}
@@ -232,7 +241,7 @@ function DepartmentsEditor({ data }: { data: SettingsData }) {
           );
         })}
         {data.departments.length === 0 && (
-          <p className="text-sm text-ink-500 text-center py-6">No departments yet.</p>
+          <p className="text-sm text-ink-500 text-center py-6 col-span-full">No departments yet.</p>
         )}
       </div>
 
@@ -443,7 +452,7 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
   return (
     <CollapsibleCard
       title="Action Types"
-      description="The master catalog Ops picks from at Intake. Each action has a default department, two display labels (waiting / done), and optional dependencies on other actions. Use ▲/▼ to reorder; cards are laid out two-per-row on wide screens."
+      description="The master catalog Ops picks from at Intake. Each action has a default department, two display labels (waiting / done), and optional dependencies on other actions. Use ▲/▼ to reorder; the number between the arrows is the current sort_order. Cards lay out two-per-row on wide screens."
     >
       {/* Two-column grid on wide screens — was a vertical stack of full-width rows. */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
@@ -455,9 +464,9 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
           const isLast  = idx === data.actionTypes.length - 1;
           return (
             <div key={t.id} className="border border-ink-200 rounded-md p-3 bg-white flex flex-col gap-3">
-              {/* Header: reorder arrows · name · save/delete */}
+              {/* Header: reorder arrows + sort_order · name · save/delete */}
               <div className="grid grid-cols-[auto,1fr,auto] gap-2 items-end">
-                <div className="flex flex-col gap-1">
+                <div className="flex flex-col items-center gap-0.5">
                   <button
                     type="button"
                     disabled={isFirst || pending}
@@ -466,6 +475,13 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
                     aria-label={`Move ${t.name} up`}
                     title="Move up"
                   >▲</button>
+                  <span
+                    className="text-[0.65rem] font-medium text-ink-500 tabular-nums leading-none px-1 py-0.5"
+                    title={`Current sort_order: ${t.sortOrder}`}
+                    aria-label={`Sort position ${t.sortOrder}`}
+                  >
+                    {t.sortOrder}
+                  </span>
                   <button
                     type="button"
                     disabled={isLast || pending}
