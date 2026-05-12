@@ -42,9 +42,11 @@ export default function BatchTable({ rows, selectedCode, onSelect, totalCount }:
               <tr className="text-left text-xs font-medium text-ink-600 border-b border-ink-200">
                 <Th>Batch</Th>
                 <Th>Submitted</Th>
+                <Th>Phase</Th>
                 <Th>Stage</Th>
                 <Th>PO</Th>
                 <Th>Promised</Th>
+                <Th align="right">Days left</Th>
                 <Th>Delivery</Th>
                 <Th>Status</Th>
                 <Th align="right">Risk</Th>
@@ -82,12 +84,18 @@ export default function BatchTable({ rows, selectedCode, onSelect, totalCount }:
                     </Td>
                     <Td tabular>{r.requestedAt}</Td>
                     <Td>
+                      <VinPhaseChip phase={r.vinPhase} />
+                    </Td>
+                    <Td>
                       <span className="inline-block px-2 py-0.5 bg-ink-100 rounded-md text-xs font-medium text-midnight">
                         {r.stageDisplay}
                       </span>
                     </Td>
                     <Td tabular>{r.poStatusLabel}</Td>
                     <Td tabular>{r.promisedDate}</Td>
+                    <Td align="right" tabular>
+                      <DaysToAvailChip days={r.daysToAvailability} phase={r.vinPhase} />
+                    </Td>
                     <Td tabular>{r.deliveryStatusLabel}</Td>
                     <Td>
                       <StatusChip status={r.status} label={r.statusLabel} />
@@ -159,6 +167,82 @@ function StatusChip({ status, label }: { status: DashboardRow["status"]; label: 
     <span className={cn("inline-block px-2 py-0.5 rounded-md text-xs font-medium border whitespace-nowrap", cls)}>
       {label}
     </span>
+  );
+}
+
+/**
+ * VIN Phase chip — red badge for high-risk pre-VIN, green for execution zone.
+ */
+function VinPhaseChip({ phase }: { phase: "pre_vin" | "post_vin" }) {
+  if (phase === "post_vin") {
+    return (
+      <span className="inline-block px-2 py-0.5 rounded-md text-[0.7rem] font-semibold border bg-green-pale text-green-dark border-green whitespace-nowrap">
+        ✅ Post-VIN
+      </span>
+    );
+  }
+  return (
+    <span className="inline-block px-2 py-0.5 rounded-md text-[0.7rem] font-semibold border bg-flame-pale text-flame-dark border-flame whitespace-nowrap">
+      ⚠️ Pre-VIN
+    </span>
+  );
+}
+
+/**
+ * Days-to-availability counter. Colour escalates as the date approaches,
+ * intensifying when the batch is still in the risky pre-VIN phase.
+ *
+ * Thresholds (same whether pre-VIN or post-VIN — urgency is universal):
+ *   ≤ 0  → overdue (flame-dark, bold)
+ *   1–7  → critical (flame-dark)
+ *   8–14 → warning (gold-dark)
+ *   > 14 → comfortable (ink-500)
+ *   null → delivered, show em-dash
+ */
+function DaysToAvailChip({
+  days, phase,
+}: {
+  days: number | null;
+  phase: "pre_vin" | "post_vin";
+}) {
+  if (days === null) return <span className="text-ink-400">—</span>;
+
+  if (days <= 0) {
+    return (
+      <span className={cn(
+        "inline-block px-1.5 py-0.5 rounded-md text-xs font-bold border whitespace-nowrap tabular-nums",
+        "bg-flame-pale text-flame-dark border-flame",
+      )}>
+        {days === 0 ? "Today" : `${days}d`}
+      </span>
+    );
+  }
+  if (days <= 7) {
+    return (
+      <span className={cn(
+        "inline-block px-1.5 py-0.5 rounded-md text-xs font-semibold border whitespace-nowrap tabular-nums",
+        phase === "pre_vin"
+          ? "bg-flame-pale text-flame-dark border-flame"
+          : "bg-gold-pale text-gold-dark border-gold",
+      )}>
+        {days}d
+      </span>
+    );
+  }
+  if (days <= 14) {
+    return (
+      <span className={cn(
+        "inline-block px-1.5 py-0.5 rounded-md text-xs font-medium border whitespace-nowrap tabular-nums",
+        phase === "pre_vin"
+          ? "bg-gold-pale text-gold-dark border-gold"
+          : "bg-ink-100 text-midnight border-ink-200",
+      )}>
+        {days}d
+      </span>
+    );
+  }
+  return (
+    <span className="tabular-nums text-ink-500 text-xs">{days}d</span>
   );
 }
 

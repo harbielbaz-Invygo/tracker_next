@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 
 interface Props {
   rows: DashboardRow[];
-  totals: { total: number; active: number; delivered: number; delayed: number; onTrack: number };
+  totals: { total: number; active: number; delivered: number; delayed: number; onTrack: number; highRisk: number };
 }
 
 const STATUS_OPTIONS: { value: StatusBucket; label: string }[] = [
@@ -36,6 +36,13 @@ const RISK_OPTIONS = [
 ] as const;
 type RiskOption = (typeof RISK_OPTIONS)[number]["value"];
 
+const VIN_PHASE_OPTIONS = [
+  { value: "all",      label: "All phases" },
+  { value: "pre_vin",  label: "⚠️ Pre-VIN (high risk)" },
+  { value: "post_vin", label: "✅ Post-VIN (execution)" },
+] as const;
+type VinPhaseOption = (typeof VIN_PHASE_OPTIONS)[number]["value"];
+
 export default function DashboardShell({ rows, totals }: Props) {
   // ── Filter state ────────────────────────────────────────────
   const [search,        setSearch]       = useState<string>("");
@@ -45,6 +52,7 @@ export default function DashboardShell({ rows, totals }: Props) {
   const [modelFilter,   setModelFilter]  = useState<string>("all");
   const [statusFilter,  setStatusFilter] = useState<StatusBucket | "all">("all");
   const [riskFilter,    setRiskFilter]   = useState<RiskOption>("all");
+  const [vinPhaseFilter, setVinPhaseFilter] = useState<VinPhaseOption>("all");
 
   const [selected,  setSelected]  = useState<string | null>(null);
   const [timeline,  setTimeline]  = useState<TimelineData | null>(null);
@@ -81,9 +89,10 @@ export default function DashboardShell({ rows, totals }: Props) {
       if (riskFilter === "high"   && r.risk < 75) return false;
       if (riskFilter === "medium" && (r.risk < 40 || r.risk >= 75)) return false;
       if (riskFilter === "low"    && r.risk >= 40) return false;
+      if (vinPhaseFilter !== "all" && r.vinPhase !== vinPhaseFilter) return false;
       return true;
     });
-  }, [rows, search, dealerFilter, activeOnly, stageFilter, modelFilter, statusFilter, riskFilter]);
+  }, [rows, search, dealerFilter, activeOnly, stageFilter, modelFilter, statusFilter, riskFilter, vinPhaseFilter]);
 
   // ── Hydrate timeline whenever selection changes ─────────────
   useEffect(() => {
@@ -116,11 +125,17 @@ export default function DashboardShell({ rows, totals }: Props) {
       </p>
 
       {/* Metric strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
         <Metric label="Active batches"     value={totals.active} />
         <Metric label="On track"           value={totals.onTrack} valueColor="text-green-dark" />
         <Metric label="Delayed"            value={totals.delayed} valueColor="text-flame-dark" />
         <Metric label="Delivered"          value={totals.delivered} valueColor="text-ink-600" />
+        <Metric
+          label="⚠️ Pre-VIN critical"
+          value={totals.highRisk}
+          valueColor={totals.highRisk > 0 ? "text-flame-dark" : "text-ink-400"}
+          title="Active batches that are pre-VIN with ≤ 14 days to availability — need immediate action"
+        />
       </div>
 
       {/* Top-level filters */}
@@ -169,7 +184,7 @@ export default function DashboardShell({ rows, totals }: Props) {
       {/* Table-level filters */}
       <div className="card mb-4">
         <p className="text-xs font-medium text-ink-500 mb-2 uppercase tracking-wide">Table filters</p>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <Select
             label="Stage"
             value={stageFilter}
@@ -193,6 +208,12 @@ export default function DashboardShell({ rows, totals }: Props) {
             value={riskFilter}
             onChange={(v) => setRiskFilter(v as RiskOption)}
             options={[...RISK_OPTIONS]}
+          />
+          <Select
+            label="VIN phase"
+            value={vinPhaseFilter}
+            onChange={(v) => setVinPhaseFilter(v as VinPhaseOption)}
+            options={[...VIN_PHASE_OPTIONS]}
           />
         </div>
       </div>
@@ -230,9 +251,16 @@ export default function DashboardShell({ rows, totals }: Props) {
 
 // ── Metric tile ─────────────────────────────────────────────────
 
-function Metric({ label, value, valueColor }: { label: string; value: number; valueColor?: string }) {
+function Metric({
+  label, value, valueColor, title,
+}: {
+  label: string;
+  value: number;
+  valueColor?: string;
+  title?: string;
+}) {
   return (
-    <div className="metric">
+    <div className="metric" title={title}>
       <span className="metric-label">{label}</span>
       <span className={cn("metric-value", valueColor)}>{value}</span>
     </div>
