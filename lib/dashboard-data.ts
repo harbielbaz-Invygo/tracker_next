@@ -48,6 +48,20 @@ export interface DashboardRow {
   /* Risk + confidence */
   risk: number;
   confidenceLabel: string;    // "60% / 45%"
+
+  /**
+   * VIN phase — the pivot between uncertain and execution zones.
+   *  - `pre_vin`  = VIN not yet confirmed by dealer → HIGH RISK zone.
+   *  - `post_vin` = VIN received → EXECUTION zone (predictable lead time).
+   */
+  vinPhase: "pre_vin" | "post_vin";
+
+  /**
+   * Days from today to the effective availability date.
+   * Positive = future, negative = overdue, null = delivered batch.
+   * Uses `currentProjectedDeliveryDate` when set, else `dealerPromisedDeliveryDate`.
+   */
+  daysToAvailability: number | null;
 }
 
 /** Plan-vs-Reality timeline data — used by the SVG renderer. */
@@ -193,24 +207,39 @@ export async function getDashboardRows(): Promise<DashboardRow[]> {
     .leftJoin(dealers, eq(batches.dealerId, dealers.id))
     .orderBy(desc(batches.requestedAt));
 
-  // Pull every completed Delivery action — one row per delivered batch.
-  const delivered = await db
-    .select({
-      batchId:     batchActions.batchId,
-      completedAt: batchActions.completedAt,
-    })
-    .from(batchActions)
-    .innerJoin(actionTypes, eq(batchActions.actionTypeId, actionTypes.id))
-    .where(and(
-      eq(batchActions.status, "done"),
-      eq(actionTypes.name, "Delivery"),
-    ));
+  // Pull every completed Delivery action and every completed VIN action in
+  // parallel. Delivery = batch is fully delivered; VIN done = execution zone.
+  const [delivered, vinActions] = await Promise.all([
+    db
+      .select({
+        batchId:     batchActions.batchId,
+        completedAt: batchActions.completedAt,
+      })
+      .from(batchActions)
+      .innerJoin(actionTypes, eq(batchActions.actionTypeId, actionTypes.id))
+      .where(and(
+        eq(batchActions.status, "done"),
+        eq(actionTypes.name, "Delivery"),
+      )),
+    db
+      .select({ batchId: batchActions.batchId })
+      .from(batchActions)
+      .innerJoin(actionTypes, eq(batchActions.actionTypeId, actionTypes.id))
+      .where(and(
+        eq(batchActions.status, "done"),
+        eq(actionTypes.name, "VIN"),
+      )),
+  ]);
+
   const deliveredByBatch = new Map<number, string>();
   for (const m of delivered) {
     if (m.completedAt) deliveredByBatch.set(m.batchId, m.completedAt.slice(0, 10));
   }
+  const vinDoneBatches = new Set<number>(vinActions.map((a) => a.batchId));
 
-  return rows.map(({ b, dealerName }) => buildRow(b, dealerName, deliveredByBatch.get(b.id)));
+  return rows.map(({ b, dealerName }) =>
+    buildRow(b, dealerName, deliveredByBatch.get(b.id), vinDoneBatches.has(b.id)),
+  );
 }
 
 /**
@@ -394,6 +423,7 @@ function buildRow(
   b: typeof batches.$inferSelect,
   dealerName: string | null,
   deliveredAt?: string,
+  vinDone = false,
 ): DashboardRow {
   // PO status
   let poStatusLabel = "—";
@@ -437,6 +467,18 @@ function buildRow(
 
   const modelYear = [b.model, b.year].filter(Boolean).join(" ") || "—";
 
+  // VIN phase: once the VIN action is marked done the batch enters the
+  // execution zone. Delivered batches are also implicitly post-VIN but
+  // we track them separately via `status`.
+  const vinPhase: DashboardRow["vinPhase"] = vinDone ? "post_vin" : "pre_vin";
+
+  // Days to the effective availability date. null for delivered batches.
+  let daysToAvailability: number | null = null;
+  if (status !== "delivered") {
+    const effectiveDate = b.currentProjectedDeliveryDate ?? b.dealerPromisedDeliveryDate;
+    daysToAvailability = daysFromToday(effectiveDate);
+  }
+
   return {
     batchCode: b.batchCode,
     poNumber: b.poNumber ?? null,
@@ -455,6 +497,8 @@ function buildRow(
     delayDays,
     risk: Math.round(b.riskScore ?? 0),
     confidenceLabel: `${Math.round(b.partnershipConfidence ?? 0)}% / ${Math.round(b.operationsConfidence ?? 0)}%`,
+    vinPhase,
+    daysToAvailability,
   };
 }
 
@@ -465,5 +509,17 @@ export function summarize(rows: DashboardRow[]) {
   const active = total - delivered;
   const delayed = rows.filter((r) => r.status === "delayed").length;
   const onTrack = rows.filter((r) => r.status === "on_track").length;
-  return { total, active, delivered, delayed, onTrack };
+  /**
+   * High-risk count: active batches that are still pre-VIN AND have ≤ 14
+   * days until their effective availability date. These need immediate ops
+   * attention — the VIN is the last chance to course-correct.
+   */
+  const highRisk = rows.filter(
+    (r) =>
+      r.status !== "delivered" &&
+      r.vinPhase === "pre_vin" &&
+      r.daysToAvailability !== null &&
+      r.daysToAvailability <= 14,
+  ).length;
+  return { total, active, delivered, delayed, onTrack, highRisk };
 }
