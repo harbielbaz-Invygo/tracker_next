@@ -11,7 +11,7 @@
  * No interactivity beyond hover tooltips for now. CSV export, drill-down,
  * and date-range filters are deferred — let real usage shape them.
  */
-import type { PerformanceReport, DepartmentRow, StakeholderRow } from "@/lib/reports-data";
+import type { PerformanceReport, DepartmentRow, StakeholderRow, DealerReliabilityRow } from "@/lib/reports-data";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -19,7 +19,7 @@ interface Props {
 }
 
 export default function ReportsShell({ report }: Props) {
-  const { totals, departments, stakeholders } = report;
+  const { totals, departments, stakeholders, dealerReliability } = report;
   const onTimeRate = totals.deliveredOnTime + totals.deliveredLate > 0
     ? Math.round((totals.deliveredOnTime / (totals.deliveredOnTime + totals.deliveredLate)) * 100)
     : null;
@@ -50,6 +50,9 @@ export default function ReportsShell({ report }: Props) {
           </p>
         </div>
       )}
+
+      {/* ── Dealer reliability ─────────────────────────────────── */}
+      <DealerReliabilityTable rows={dealerReliability} />
 
       {/* ── Departments table ──────────────────────────────────── */}
       <PerformanceTable
@@ -176,6 +179,155 @@ function PerformanceTable({
 }
 
 // ──────────────────────────────────────────────────────────────────
+// Dealer reliability table
+// ──────────────────────────────────────────────────────────────────
+
+function DealerReliabilityTable({ rows }: { rows: DealerReliabilityRow[] }) {
+  return (
+    <div className="card p-0 overflow-hidden">
+      <header className="px-4 py-3 border-b border-ink-200">
+        <h2 className="text-base font-bold text-midnight">Dealer / Supplier Reliability</h2>
+        <p className="text-xs text-ink-500 mt-0.5">
+          Four PO trust dimensions per dealer — date, quantity, color, and cancellation rate.
+          Low scores indicate supplier-side risk, not operational delays.
+        </p>
+      </header>
+
+      {rows.length === 0 ? (
+        <p className="px-4 py-8 text-sm text-ink-500 text-center">
+          No dealers yet. Reliability metrics populate once batches are submitted through Intake.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-ink-50">
+              <tr className="text-left text-xs font-medium text-ink-600 border-b border-ink-200">
+                <Th align="left">Dealer</Th>
+                <Th align="right">Batches</Th>
+                <Th align="right">Open</Th>
+                <Th align="right">Delivered</Th>
+                <Th align="right">Cancelled</Th>
+                <Th align="right"
+                    title="% of delivered batches where the car arrived on or before the PO promised date">
+                  Date reliability
+                </Th>
+                <Th align="right"
+                    title="Average signed variance: closedAt minus promised date (negative = arrived early)">
+                  Avg variance
+                </Th>
+                <Th align="right"
+                    title="sum(deliveredQty) / sum(requestedQty) — partial deliveries reduce this">
+                  Qty fulfillment
+                </Th>
+                <Th align="right"
+                    title="sum(confirmedQty) / sum(requestedQty) across all color-matrix rows">
+                  Color reliability
+                </Th>
+                <Th align="right"
+                    title="cancelledBatches / totalBatches — high rate signals dealer commitment risk">
+                  Cancellation rate
+                </Th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((d) => (
+                <tr key={d.dealerId} className="border-b border-ink-200/60">
+                  <Td>
+                    <div className="font-medium text-midnight">{d.dealerName}</div>
+                    {d.dealerType && (
+                      <div className={cn(
+                        "text-[0.65rem] font-medium uppercase tracking-wide mt-0.5",
+                        d.dealerType === "new" ? "text-gold-dark" : "text-ink-400",
+                      )}>
+                        {d.dealerType === "new" ? "New dealer" : "Existing dealer"}
+                      </div>
+                    )}
+                  </Td>
+                  <Td align="right" tabular>{d.totalBatches}</Td>
+                  <Td align="right" tabular>
+                    {d.openBatches > 0
+                      ? <span className="text-brand-dark font-medium">{d.openBatches}</span>
+                      : <span className="text-ink-400">0</span>}
+                  </Td>
+                  <Td align="right" tabular>
+                    {d.deliveredBatches > 0
+                      ? <span className="text-green-dark font-medium">{d.deliveredBatches}</span>
+                      : <span className="text-ink-400">0</span>}
+                  </Td>
+                  <Td align="right" tabular>
+                    {d.cancelledBatches > 0
+                      ? <span className="text-flame-dark font-medium">{d.cancelledBatches}</span>
+                      : <span className="text-ink-400">0</span>}
+                  </Td>
+                  <Td align="right" tabular>
+                    <ReliabilityRate rate={d.dateReliabilityRate} invert={false} />
+                  </Td>
+                  <Td align="right" tabular>
+                    <DateVariance days={d.avgDateVarianceDays} />
+                  </Td>
+                  <Td align="right" tabular>
+                    <ReliabilityRate rate={d.qtyFulfillmentRate} invert={false} />
+                  </Td>
+                  <Td align="right" tabular>
+                    <ReliabilityRate rate={d.colorReliabilityRate} invert={false} />
+                  </Td>
+                  <Td align="right" tabular>
+                    <ReliabilityRate rate={d.cancellationRate} invert={true} />
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <footer className="px-4 py-2.5 border-t border-ink-200 bg-ink-50">
+        <p className="text-[0.7rem] text-ink-500 leading-relaxed">
+          <strong>Date reliability</strong> — % of delivered batches that arrived on or before the PO promised date.{" "}
+          <strong>Avg variance</strong> — mean signed days (negative = early).{" "}
+          <strong>Qty fulfillment</strong> — delivered ÷ requested across all batches.{" "}
+          <strong>Color reliability</strong> — confirmed colors ÷ requested colors (earlier signal than delivered).{" "}
+          <strong>Cancellation rate</strong> — lower is better; high rate = dealer frequently does not honour the PO.
+        </p>
+      </footer>
+    </div>
+  );
+}
+
+/** Rate chip — green when high (or low for inverted metrics like cancellation). */
+function ReliabilityRate({
+  rate, invert,
+}: {
+  rate: number | null;
+  /** When true (cancellation rate), low % is good and high % is bad. */
+  invert: boolean;
+}) {
+  if (rate == null) return <span className="text-ink-400">—</span>;
+
+  let cls: string;
+  if (!invert) {
+    cls = rate >= 90 ? "text-green-dark"
+        : rate >= 70 ? "text-gold-dark"
+        : "text-flame-dark";
+  } else {
+    // Cancellation rate: 0 is ideal, >20% is bad
+    cls = rate === 0 ? "text-green-dark"
+        : rate <= 10 ? "text-gold-dark"
+        : "text-flame-dark";
+  }
+
+  return <span className={cn("font-medium", cls)}>{rate}%</span>;
+}
+
+function DateVariance({ days }: { days: number | null }) {
+  if (days == null) return <span className="text-ink-400">—</span>;
+  if (days === 0) return <span className="text-ink-500">0d</span>;
+  const cls = days > 0 ? "text-flame-dark" : "text-green-dark";
+  const text = days > 0 ? `+${days}d` : `${days}d`;
+  return <span className={cn("font-medium tabular-nums", cls)}>{text}</span>;
+}
+
+// ──────────────────────────────────────────────────────────────────
 // Tiny presentational helpers
 // ──────────────────────────────────────────────────────────────────
 
@@ -194,13 +346,15 @@ function Metric({
   );
 }
 
-function Th({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
+function Th({ children, align = "left", title }: { children: React.ReactNode; align?: "left" | "right"; title?: string }) {
   return (
     <th
       scope="col"
+      title={title}
       className={cn(
         "px-3 py-2 font-medium uppercase tracking-wide whitespace-nowrap",
         align === "right" && "text-right",
+        title && "cursor-help",
       )}
     >
       {children}
