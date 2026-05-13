@@ -18,7 +18,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import {
-  departments, stakeholders, actionTypes, actionDependencies, batchActions, batches, users, alertRules,
+  departments, stakeholders, actionTypes, actionDependencies, batchActions, batches, users, alertRules, alerts,
 } from "@/lib/db/schema";
 import { setRuleNumber, RULE_KEYS, getLeadTimeDays } from "@/lib/rules";
 import { requireAuth } from "@/lib/api-auth";
@@ -345,8 +345,16 @@ const EDITABLE_BATCH_FIELDS = new Set<string>([
 
 async function handleBatch(b: Extract<Body, { resource: "batch" }>) {
   if (b.op === "delete") {
-    // Cascades to batch_actions / vehicles / milestones via FK ON DELETE CASCADE.
-    await db.delete(batches).where(eq(batches.id, b.id));
+    // batch_actions / vehicles / milestones / batch_color_matrix cascade
+    // via FK ON DELETE CASCADE. `alerts.batch_id` was defined without
+    // cascade, so any batch with active alerts (e.g. TEST-002/003/011
+    // after the alert engine fires) would otherwise fail with a FOREIGN
+    // KEY error. Delete those alerts first inside a transaction so the
+    // batch delete either fully succeeds or rolls back cleanly.
+    await db.transaction(async (tx) => {
+      await tx.delete(alerts).where(eq(alerts.batchId, b.id));
+      await tx.delete(batches).where(eq(batches.id, b.id));
+    });
     return NextResponse.json({ ok: true });
   }
 
