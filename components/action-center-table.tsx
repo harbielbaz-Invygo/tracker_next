@@ -45,7 +45,6 @@ export default function ActionCenterTable({ rows, selectedCode, onSelect, totalC
                 <Th align="right">Blocked</Th>
                 <Th align="right">Done</Th>
                 <Th>Status</Th>
-                <Th align="right">Ops Conf</Th>
                 <Th>Alerts</Th>
               </tr>
             </thead>
@@ -112,20 +111,6 @@ export default function ActionCenterTable({ rows, selectedCode, onSelect, totalC
                         ahead={r.delayDays < 0}
                         label={r.statusLabel}
                       />
-                    </Td>
-                    <Td align="right" tabular>
-                      {r.operationsConfidence != null ? (
-                        <span className={cn(
-                          "font-medium",
-                          r.operationsConfidence >= 70 ? "text-green-dark"
-                          : r.operationsConfidence >= 40 ? "text-gold-dark"
-                          : "text-flame-dark",
-                        )}>
-                          {Math.round(r.operationsConfidence)}%
-                        </span>
-                      ) : (
-                        <span className="text-ink-400">—</span>
-                      )}
                     </Td>
                     <Td>
                       {r.alertCount > 0 ? (
