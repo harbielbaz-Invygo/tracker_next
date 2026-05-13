@@ -1,22 +1,22 @@
 "use client";
 
 /**
- * Cockpit triage table — pure presentational. Row click opens the drawer.
+ * Action Center triage table — pure presentational. Row click opens the drawer.
  *
  * Sticky header, tabular numerals on every count, hit area = full row.
  * No row animation (PRODUCT.md "high-frequency user").
  */
-import type { CockpitRow } from "@/lib/cockpit-data";
+import type { ActionCenterRow } from "@/lib/action-center-data";
 import { cn } from "@/lib/utils";
 
 interface Props {
-  rows: CockpitRow[];
+  rows: ActionCenterRow[];
   selectedCode: string | null;
   onSelect: (code: string) => void;
   totalCount: number;
 }
 
-export default function CockpitTable({ rows, selectedCode, onSelect, totalCount }: Props) {
+export default function ActionCenterTable({ rows, selectedCode, onSelect, totalCount }: Props) {
   return (
     <div className="border border-ink-200 rounded-lg bg-white overflow-hidden">
       <div className="px-4 py-2.5 border-b border-ink-200 flex items-baseline gap-2">

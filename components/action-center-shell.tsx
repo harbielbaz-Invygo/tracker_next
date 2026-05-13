@@ -1,31 +1,31 @@
 "use client";
 
 /**
- * Cockpit shell — owns filter state + selection + cross-component refresh.
+ * Action Center shell — owns filter state + selection + cross-component refresh.
  *
  * Server-rendered rows come in fresh on every page load and on mutation
  * (we router.refresh() after every successful drawer action).
  */
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { CockpitRow } from "@/lib/cockpit-data";
-import CockpitTable from "./cockpit-table";
-import CockpitBatchList from "./cockpit-batch-list";
-import CockpitDrawer from "./cockpit-drawer";
+import type { ActionCenterRow } from "@/lib/action-center-data";
+import ActionCenterTable from "./action-center-table";
+import ActionCenterBatchList from "./action-center-batch-list";
+import ActionCenterDrawer from "./action-center-drawer";
 import { cn } from "@/lib/utils";
 
 type ViewMode = "stacked" | "side-by-side";
-const VIEW_MODE_KEY = "cockpit-view-mode";
+const VIEW_MODE_KEY = "action-center-view-mode";
 
 interface Props {
-  rows: CockpitRow[];
+  rows: ActionCenterRow[];
   totals: { total: number; withWaiting: number; fullyDone: number; delayed: number };
 }
 
 type LifecycleFilter = "all" | "pre_po" | "post_po";
 type StatusFilter    = "all" | "delayed" | "ahead" | "on_track" | "delivered";
 
-export default function CockpitShell({ rows, totals }: Props) {
+export default function ActionCenterShell({ rows, totals }: Props) {
   const router = useRouter();
 
   const [departmentFilter, setDepartmentFilter] = useState<string>("all");
@@ -36,7 +36,7 @@ export default function CockpitShell({ rows, totals }: Props) {
 
   // ── View mode (stacked / side-by-side), persisted in localStorage ──
   // Default = side-by-side: master/detail layout fits the daily-use shape
-  // of Cockpit better than the stacked variant. Users who prefer stacked
+  // of the Action Center better than the stacked variant. Users who prefer stacked
   // still get their preference back via localStorage on subsequent visits.
   const [viewMode, setViewMode] = useState<ViewMode>("side-by-side");
   useEffect(() => {
@@ -88,7 +88,7 @@ export default function CockpitShell({ rows, totals }: Props) {
 
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-1">🛠️ Cockpit</h1>
+      <h1 className="text-3xl font-bold mb-1">🛠️ Action Center</h1>
       <p className="text-sm text-ink-500 mb-6 max-w-prose">
         Every batch in flight, sorted by action required. Pick a batch to update its
         action statuses and capture Ops&apos; current confidence.
@@ -160,7 +160,7 @@ export default function CockpitShell({ rows, totals }: Props) {
       {viewMode === "stacked" ? (
         <>
           {/* Stacked: full-width table, drawer below when selected */}
-          <CockpitTable
+          <ActionCenterTable
             rows={filtered}
             selectedCode={selected}
             onSelect={(code) => setSelected((cur) => (cur === code ? null : code))}
@@ -168,7 +168,7 @@ export default function CockpitShell({ rows, totals }: Props) {
           />
           {selected && (
             <div className="mt-6">
-              <CockpitDrawer
+              <ActionCenterDrawer
                 key={selected}
                 batchCode={selected}
                 onMutation={onMutation}
@@ -185,7 +185,7 @@ export default function CockpitShell({ rows, totals }: Props) {
         /* Side-by-side: compact list on the left, action card on the right.
            Both panes scroll independently inside a fixed-height container. */
         <div className="grid grid-cols-1 lg:grid-cols-[minmax(300px,400px)_1fr] gap-4 h-[min(76vh,820px)] min-h-[480px]">
-          <CockpitBatchList
+          <ActionCenterBatchList
             rows={filtered}
             selectedCode={selected}
             onSelect={(code) => setSelected((cur) => (cur === code ? null : code))}
@@ -193,7 +193,7 @@ export default function CockpitShell({ rows, totals }: Props) {
           />
           <div className="overflow-auto rounded-lg">
             {selected ? (
-              <CockpitDrawer
+              <ActionCenterDrawer
                 key={selected}
                 batchCode={selected}
                 onMutation={onMutation}
@@ -227,7 +227,7 @@ function ViewToggle({
   return (
     <div
       role="tablist"
-      aria-label="Cockpit view mode"
+      aria-label="Action Center view mode"
       className="inline-flex items-center bg-ink-100 rounded-md p-0.5"
     >
       <ToggleButton

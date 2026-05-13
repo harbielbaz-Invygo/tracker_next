@@ -54,6 +54,13 @@ const nextConfig = {
       { source: "/:path*", headers: securityHeaders },
     ];
   },
+  // Preserve bookmarks after the Cockpit → Action Center rename.
+  async redirects() {
+    return [
+      { source: "/cockpit",            destination: "/action-center",            permanent: true },
+      { source: "/api/cockpit-drawer", destination: "/api/action-center-drawer", permanent: true },
+    ];
+  },
 };
 
 export default nextConfig;

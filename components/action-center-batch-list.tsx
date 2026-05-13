@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Cockpit batch list — compact card style for the side-by-side view.
+ * Action Center batch list — compact card style for the side-by-side view.
  *
  * Trimmed for narrow column display. Each row is a button that selects
  * the batch and surfaces just enough info to triage:
@@ -11,26 +11,26 @@
  *   - Action counts (waiting / blocked / done)
  *   - Next action label when the batch has work pending
  *
- * The CockpitTable (stacked view) stays in place — this is purely the
+ * The ActionCenterTable (stacked view) stays in place — this is purely the
  * narrow-pane alternative.
  */
 import { useState } from "react";
 // `import type` ensures the type imports are erased at compile time —
-// they don't drag the server-only `lib/cockpit-data.ts` (which imports
+// they don't drag the server-only `lib/action-center-data.ts` (which imports
 // better-sqlite3) into the client bundle.
-import type { CockpitRow, DrawerData } from "@/lib/cockpit-data";
+import type { ActionCenterRow, DrawerData } from "@/lib/action-center-data";
 // Pure formatter (no DB imports), safe to use from client components.
-import { formatStatusCheckMessage } from "@/lib/cockpit-slack";
+import { formatStatusCheckMessage } from "@/lib/action-center-slack";
 import { cn } from "@/lib/utils";
 
 interface Props {
-  rows: CockpitRow[];
+  rows: ActionCenterRow[];
   selectedCode: string | null;
   onSelect: (code: string) => void;
   totalCount: number;
 }
 
-export default function CockpitBatchList({
+export default function ActionCenterBatchList({
   rows, selectedCode, onSelect, totalCount,
 }: Props) {
   /**
@@ -43,11 +43,11 @@ export default function CockpitBatchList({
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
 
-  async function generateSlack(row: CockpitRow) {
+  async function generateSlack(row: ActionCenterRow) {
     setBusyCode(row.batchCode);
     setCopyError(null);
     try {
-      const res = await fetch(`/api/cockpit-drawer?code=${encodeURIComponent(row.batchCode)}`);
+      const res = await fetch(`/api/action-center-drawer?code=${encodeURIComponent(row.batchCode)}`);
       if (!res.ok) throw new Error(await res.text());
       const data = (await res.json()) as DrawerData;
       const msg = formatStatusCheckMessage(data);
@@ -104,7 +104,7 @@ export default function CockpitBatchList({
 function BatchCard({
   row, selected, onSelect, onSlackCopy, slackBusy, slackCopied,
 }: {
-  row: CockpitRow;
+  row: ActionCenterRow;
   selected: boolean;
   onSelect: () => void;
   onSlackCopy: () => void;

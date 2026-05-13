@@ -5,7 +5,7 @@
  * apply to every batch created. Dependencies determine initial status:
  *   - action with no parent dependencies → waiting
  *   - action with any parent dependency  → blocked
- * Once Ops marks a parent done in Cockpit, dependents auto-promote.
+ * Once Ops marks a parent done in the Action Center, dependents auto-promote.
  *
  * If the dealer doesn't exist yet, we create one with the dealer name as
  * given and the first split's city as home_city.
@@ -218,7 +218,7 @@ export async function POST(req: NextRequest) {
           dealerReceivingCity: split.city,
           requiresInterCityTransit: false,
           // VIN receiving date is no longer captured at Intake — Ops
-          // sets it later in Cockpit when the dealer commits a VIN date.
+          // sets it later in the Action Center when the dealer commits a VIN date.
           // Until then, post-VIN actions have a null expectedDate.
           vinReceivingDate:    null,
 
@@ -236,7 +236,7 @@ export async function POST(req: NextRequest) {
         for (const a of body.actions) {
           const status = hasParentDep.has(a.actionTypeId) ? "blocked" : "waiting";
           const type = typeById.get(a.actionTypeId);
-          // VIN receiving date is captured later in Cockpit, so it's
+          // VIN receiving date is captured later in the Action Center, so it's
           // null at Intake. Vin-anchored actions get a null expected
           // date here; they fill in once the VIN date is known.
           const expectedDate = type

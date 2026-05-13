@@ -5,7 +5,7 @@
  * - Auto-resolves existing alerts when their condition clears.
  * - Returns active (unresolved) alerts grouped by batchId.
  *
- * Called from the Cockpit page server component on every load so the
+ * Called from the Action Center page server component on every load so the
  * alert state in the DB is always fresh before the table renders.
  *
  * Three trigger types:

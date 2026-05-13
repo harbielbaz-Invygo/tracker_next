@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Cockpit per-batch drawer.
+ * Action Center per-batch drawer.
  *
  * Two interactive surfaces:
  *
@@ -16,7 +16,7 @@
  *     each successful mutation to reflect any cascade promotions.
  */
 import { useEffect, useState, useTransition } from "react";
-import type { ActionDetail, DrawerData } from "@/lib/cockpit-data";
+import type { ActionDetail, DrawerData } from "@/lib/action-center-data";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -26,14 +26,14 @@ interface Props {
   onMutation?: () => void;
   /**
    * `vertical` (default) — action groups stacked top-to-bottom, used in the
-   * Stacked Cockpit view where the drawer takes the full width.
+   * Stacked Action Center view where the drawer takes the full width.
    * `kanban` — Waiting / Blocked / Done in three columns side-by-side, used
-   * in the Side-by-side Cockpit view where horizontal space is plentiful.
+   * in the Side-by-side Action Center view where horizontal space is plentiful.
    */
   layout?: "vertical" | "kanban";
 }
 
-export default function CockpitDrawer({ batchCode, onMutation, layout = "vertical" }: Props) {
+export default function ActionCenterDrawer({ batchCode, onMutation, layout = "vertical" }: Props) {
   const [data, setData] = useState<DrawerData | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +42,7 @@ export default function CockpitDrawer({ batchCode, onMutation, layout = "vertica
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`/api/cockpit-drawer?code=${encodeURIComponent(batchCode)}`);
+      const res = await fetch(`/api/action-center-drawer?code=${encodeURIComponent(batchCode)}`);
       if (!res.ok) throw new Error(await res.text());
       setData((await res.json()) as DrawerData);
     } catch (e) {
@@ -1025,7 +1025,7 @@ function Sep() {
 
 /**
  * Render an ISO datetime as `YYYY-MM-DD HH:MM` in the viewer's local
- * timezone. The DB stores ISO UTC; the team reading the Cockpit reads
+ * timezone. The DB stores ISO UTC; the team reading the Action Center reads
  * in their wall-clock time, so we render local.
  */
 function fmtLocalDateTime(iso: string): string {

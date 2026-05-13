@@ -1,15 +1,15 @@
 /**
- * Pure Slack-message formatter for the Cockpit page.
+ * Pure Slack-message formatter for the Action Center page.
  *
- * Lives in its own file (separate from `lib/cockpit-data.ts`) so that
+ * Lives in its own file (separate from `lib/action-center-data.ts`) so that
  * client components can `import { formatStatusCheckMessage }` without
  * webpack pulling `better-sqlite3` into the browser bundle. The DB
- * queries stay in cockpit-data.ts; this module only takes the data.
+ * queries stay in action-center-data.ts; this module only takes the data.
  *
  * Types are imported as type-only references — they get erased at compile
- * time so cockpit-data.ts never appears in the client runtime graph.
+ * time so action-center-data.ts never appears in the client runtime graph.
  */
-import type { ActionDetail, DrawerData } from "./cockpit-data";
+import type { ActionDetail, DrawerData } from "./action-center-data";
 
 const STATUS_ICON: Record<ActionDetail["status"], string> = {
   waiting: "⏳",

@@ -167,7 +167,7 @@ export const batches = sqliteTable("batches", {
   updatedAt:  text("updated_at").default(sql`(CURRENT_TIMESTAMP)`),
 }, (t) => ({
   // SQLite (and Postgres) don't auto-index FK columns. These are the
-  // hottest filters in the app — Cockpit sorts by lifecycle, the dashboard
+  // hottest filters in the app — Action Center sorts by lifecycle, the dashboard
   // search hits poNumber, every join goes through dealerId.
   byDealer:    index("batches_dealer_idx").on(t.dealerId),
   byPoNumber:  index("batches_po_number_idx").on(t.poNumber),
@@ -276,7 +276,7 @@ export const alerts = sqliteTable("alerts", {
 // ─────────────────────────────────────────────────────────
 // Alert rules — admin-configured thresholds for the alert engine.
 // Each rule defines when an alert should fire on an open batch.
-// The engine runs on every Cockpit page load, creates new alerts
+// The engine runs on every Action Center page load, creates new alerts
 // (fingerprint-deduped) and auto-resolves ones whose condition cleared.
 // ─────────────────────────────────────────────────────────
 export const alertRules = sqliteTable("alert_rules", {
@@ -389,7 +389,7 @@ export const actionDependencies = sqliteTable("action_dependencies", {
 
 // ─────────────────────────────────────────────────────────
 // Batch actions — per-batch instances of action types.
-// Created on Intake; statuses updated on Ops Cockpit.
+// Created on Intake; statuses updated on the Ops Action Center.
 // ─────────────────────────────────────────────────────────
 export const batchActions = sqliteTable("batch_actions", {
   id:           integer("id").primaryKey({ autoIncrement: true }),
@@ -410,7 +410,7 @@ export const batchActions = sqliteTable("batch_actions", {
    * Planned date this action should complete. Computed at Intake from
    * action_types.offsetDays + offsetAnchor + batch dates. Auto-recomputed
    * when an upstream action slips (e.g. VIN late → all post-VIN actions
-   * push back). Editable in Cockpit when Ops gets new info.
+   * push back). Editable in the Action Center when Ops gets new info.
    */
   expectedDate: text("expected_date"),                       // ISO yyyy-mm-dd
   /** ISO datetime — set when status flips to `done`. Drives the dashboard timeline. */
@@ -421,9 +421,9 @@ export const batchActions = sqliteTable("batch_actions", {
 }, (t) => ({
   uniq: uniqueIndex("batch_action_uniq").on(t.batchId, t.actionTypeId),
   // Hot-path indexes:
-  //  - byBatch: every drawer fetch + Cockpit row aggregation queries by batchId.
+  //  - byBatch: every drawer fetch + Action Center row aggregation queries by batchId.
   //  - byActionType: cascade in /api/batch-action looks up by actionTypeId.
-  //  - byStatus: Cockpit's "actions waiting/blocked" counts filter on status.
+  //  - byStatus: the Action Center's "actions waiting/blocked" counts filter on status.
   byBatch:       index("batch_actions_batch_idx").on(t.batchId),
   byActionType:  index("batch_actions_action_type_idx").on(t.actionTypeId),
   byStatus:      index("batch_actions_status_idx").on(t.status),

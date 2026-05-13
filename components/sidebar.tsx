@@ -13,18 +13,18 @@ import { cn } from "@/lib/utils";
 
 // Stable mapping ViewName → URL slug
 const VIEW_TO_PATH: Record<ViewName, string> = {
-  "Dashboard": "/dashboard",
-  "Forecast":  "/forecast",
-  "Intake":    "/intake",
-  "Cockpit":   "/cockpit",
-  "Reports":   "/reports",
-  "Settings":  "/settings",
+  "Dashboard":     "/dashboard",
+  "Forecast":      "/forecast",
+  "Intake":        "/intake",
+  "Action Center": "/action-center",
+  "Reports":       "/reports",
+  "Settings":      "/settings",
 };
 
 const NAV_GROUPS: { label: string | null; items: ViewName[] }[] = [
   { label: null,         items: ["Dashboard"] },
   { label: "Workflow",   items: ["Forecast", "Intake"] },
-  { label: "Operations", items: ["Cockpit", "Reports"] },
+  { label: "Operations", items: ["Action Center", "Reports"] },
   { label: "Admin",      items: ["Settings"] },
 ];
 

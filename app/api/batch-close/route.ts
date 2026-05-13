@@ -9,7 +9,7 @@
  *   - Sets `closedAt = today`, `closureReason = …`, optional `cancellationNote`.
  *   - Idempotent — re-closing a batch that's already closed updates the
  *     reason and note (no-op if same).
- *   - Does NOT cascade to batch_actions. After closure, the Cockpit drawer
+ *   - Does NOT cascade to batch_actions. After closure, the Action Center drawer
  *     simply hides the action editor; existing statuses remain in place
  *     for audit / reopening.
  */

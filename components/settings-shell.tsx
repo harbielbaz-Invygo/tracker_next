@@ -839,12 +839,12 @@ function AlertRulesEditor({ data }: { data: SettingsData }) {
   return (
     <CollapsibleCard
       title="Alert Rules"
-      description="Configure when the Cockpit alert engine fires. Each rule evaluates all open batches on every Cockpit page load. Alerts auto-resolve when conditions clear."
+      description="Configure when the Action Center alert engine fires. Each rule evaluates all open batches on every Action Center page load. Alerts auto-resolve when conditions clear."
     >
       {/* Existing rules */}
       {data.alertRules.length === 0 ? (
         <p className="text-sm text-ink-500 italic mb-4">
-          No alert rules configured — add one below to start receiving alerts in the Cockpit.
+          No alert rules configured — add one below to start receiving alerts in the Action Center.
         </p>
       ) : (
         <div className="space-y-2 mb-5">

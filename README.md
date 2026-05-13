@@ -68,7 +68,7 @@ tracker_next/
 │   │   ├── dashboard/page.tsx       Plan-vs-Reality timeline + activity table
 │   │   ├── forecast/page.tsx        Pre-PO bets (Partnership confidence)
 │   │   ├── intake/page.tsx          PDF drop → form → batch creation
-│   │   ├── cockpit/page.tsx         Action status board (Ops daily surface)
+│   │   ├── action-center/page.tsx   Action status board (Ops daily surface)
 │   │   ├── reports/page.tsx         Departments + stakeholders performance
 │   │   └── settings/page.tsx        Admin config: 5 collapsible sections
 │   ├── api/
@@ -87,14 +87,14 @@ tracker_next/
 │   ├── settings-batches.tsx         Per-batch admin override
 │   ├── timeline-svg.tsx             Plan vs Reality SVG (port of Python)
 │   ├── dashboard-shell.tsx          Table + drawer + activity table
-│   ├── cockpit-shell.tsx            Stacked / side-by-side toggle
+│   ├── action-center-shell.tsx      Stacked / side-by-side toggle
 │   └── …
 ├── lib/
 │   ├── access.ts                    Pure role rules (admin / ops / guest)
 │   ├── api-auth.ts                  requireAuth(["role"]) helper for routes
 │   ├── auth.ts / auth.config.ts     NextAuth v5 (Node + Edge configs)
 │   ├── brand.ts                     Brand tokens for TS callers
-│   ├── cockpit-data.ts              Cockpit + drawer queries
+│   ├── action-center-data.ts        Action Center + drawer queries
 │   ├── dashboard-data.ts            Dashboard table + per-batch timeline
 │   ├── db/                          schema.ts + libsql client
 │   ├── env.ts                       Zod-validated env, hard-fails in prod
@@ -137,7 +137,7 @@ Pre PO Ops Lead Time defaults to **21 days**; admin tunes it in Settings → Rul
 
 ### Actions, not stages
 
-The Streamlit version had 19 hard-coded stages. The Next.js version replaces them with admin-configured **action types** (Specs / Pricing / SKU / VIN / Plate / Customs Card / Inspection / App Listing / Delivery) and a **dependency DAG** between them. Each batch picks a subset of actions at Intake; statuses flip in Cockpit; downstream actions auto-unblock when parents are done; post-VIN expected dates auto-shift when VIN slips.
+The Streamlit version had 19 hard-coded stages. The Next.js version replaces them with admin-configured **action types** (Specs / Pricing / SKU / VIN / Plate / Customs Card / Inspection / App Listing / Delivery) and a **dependency DAG** between them. Each batch picks a subset of actions at Intake; statuses flip in the Action Center; downstream actions auto-unblock when parents are done; post-VIN expected dates auto-shift when VIN slips.
 
 ### Departments + stakeholders
 
@@ -148,7 +148,7 @@ Replaces the per-action "owner" string from the Python version. Action types rou
 | Role  | Access |
 | ----- | ------ |
 | admin | Everything, including Settings + Users + Batches editor |
-| ops   | Forecast, Intake, Cockpit, Reports — read & mutate batches and actions but not configuration |
+| ops   | Forecast, Intake, Action Center, Reports — read & mutate batches and actions but not configuration |
 | guest | Dashboard only (public read view) |
 
 ---

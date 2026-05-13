@@ -11,7 +11,7 @@
  * Delete via { resource: "batch", op: "delete", id }.
  *
  * The action list inside the expanded row is editable too (status flip +
- * department reassign) — same APIs Cockpit uses.
+ * department reassign) — same APIs the Action Center uses.
  *
  * Per the design call: PO-level edits do NOT propagate. A warning chip on
  * the PO header section tells the admin when other batches share the PO,
@@ -63,7 +63,7 @@ export default function SettingsBatches({ data }: Props) {
   return (
     <CollapsibleCard
       title="Batches"
-      description="Admin override — edit any batch's data after creation. Most updates should still go through Intake (create) and Cockpit (action statuses)."
+      description="Admin override — edit any batch's data after creation. Most updates should still go through Intake (create) and the Action Center (action statuses)."
     >
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
         <label className="block">
@@ -544,9 +544,9 @@ function DetailForm({
         </div>
         <div className="flex gap-2">
           <a
-            href="/cockpit"
+            href="/action-center"
             className="btn text-sm"
-          >Open in Cockpit</a>
+          >Open in Action Center</a>
           <button
             type="button"
             className="btn text-sm"

@@ -1,5 +1,5 @@
 /**
- * POST /api/alerts — alert mutations for the Cockpit.
+ * POST /api/alerts — alert mutations for the Action Center.
  *
  * Supported ops:
  *   { op: "acknowledge", alertId: number }
