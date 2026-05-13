@@ -915,9 +915,14 @@ function ActionRow({
   const delayDays = action.expectedDate
     ? Math.round((new Date(compareTo).getTime() - new Date(action.expectedDate).getTime()) / 86_400_000)
     : 0;
+  // Show the signed delay chip ONLY for:
+  //   • done actions whose actual completion differs from the plan
+  //   • waiting actions whose expectedDate is already past
+  // Blocked actions are excluded — their lateness belongs to the parent
+  // they depend on (the parent's waiting row will show its own +Xd).
   const showDelay = action.expectedDate && (
-    (action.status === "done" && delayDays !== 0) ||
-    (tone !== "done" && tone !== "skipped" && delayDays > 0)
+    (action.status === "done"    && delayDays !== 0) ||
+    (action.status === "waiting" && delayDays > 0)
   );
 
   const Meta = (

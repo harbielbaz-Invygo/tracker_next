@@ -253,7 +253,10 @@ export async function getActionCenterRows(
         departmentName:  a.departmentName ?? null,
         stakeholderId:   a.stakeholderId ?? null,
         stakeholderName: a.stakeholderName ?? null,
-        delayDays:       computeDelayDays(a.expectedDate),
+        // Blocked actions don't own their delay — the parent action they
+        // depend on does. Force delayDays = 0 so the Delayed-Work strip
+        // skips them, and the upstream waiting parent shows the lateness.
+        delayDays:       a.status === "waiting" ? computeDelayDays(a.expectedDate) : 0,
       });
     }
 
