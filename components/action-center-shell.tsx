@@ -12,6 +12,7 @@ import type { ActionCenterRow } from "@/lib/action-center-data";
 import ActionCenterTable from "./action-center-table";
 import ActionCenterBatchList from "./action-center-batch-list";
 import ActionCenterDrawer from "./action-center-drawer";
+import ActionCenterAggregateStrip, { type AggregateFilter } from "./action-center-aggregate-strip";
 import { cn } from "@/lib/utils";
 
 type ViewMode = "stacked" | "side-by-side";
@@ -33,6 +34,12 @@ export default function ActionCenterShell({ rows, totals }: Props) {
   const [statusFilter,     setStatusFilter]     = useState<StatusFilter>("all");
   const [showCompleted,    setShowCompleted]    = useState<boolean>(false);
   const [selected,         setSelected]         = useState<string | null>(null);
+  /**
+   * Aggregate filter — single chip selected across the three rows of the
+   * filter strip. Applied AFTER the high-level filters so the chip counts
+   * reflect the same data the user is filtering inside.
+   */
+  const [aggregateFilter, setAggregateFilter] = useState<AggregateFilter>(null);
 
   // ── View mode (stacked / side-by-side), persisted in localStorage ──
   // Default = side-by-side: master/detail layout fits the daily-use shape
@@ -56,7 +63,17 @@ export default function ActionCenterShell({ rows, totals }: Props) {
     return Array.from(set).sort();
   }, [rows]);
 
-  const filtered = useMemo(() => {
+  /**
+   * Two-stage filter pipeline:
+   *   topLevelFiltered — high-level filters applied (dept / lifecycle /
+   *                      status / show-completed). The aggregate STRIP
+   *                      aggregates from THIS so its chip counts reflect
+   *                      the current view, not the raw dataset.
+   *   filtered         — aggregate strip filter applied on top. This is
+   *                      what the table renders. Clear the chip → identical
+   *                      to topLevelFiltered.
+   */
+  const topLevelFiltered = useMemo(() => {
     return rows.filter((r) => {
       if (lifecycleFilter !== "all" && r.lifecycleState !== lifecycleFilter) return false;
 
@@ -81,6 +98,17 @@ export default function ActionCenterShell({ rows, totals }: Props) {
     });
   }, [rows, departmentFilter, lifecycleFilter, statusFilter, showCompleted]);
 
+  const filtered = useMemo(() => {
+    if (aggregateFilter == null) return topLevelFiltered;
+    return topLevelFiltered.filter((r) => {
+      switch (aggregateFilter.kind) {
+        case "action":      return r.openActions.some((oa) => oa.actionTypeId === aggregateFilter.id);
+        case "department":  return r.openActions.some((oa) => oa.departmentId === aggregateFilter.id);
+        case "stakeholder": return r.openActions.some((oa) => oa.stakeholderId === aggregateFilter.id);
+      }
+    });
+  }, [topLevelFiltered, aggregateFilter]);
+
   function onMutation() {
     // Re-render the server component (refreshes rows from DB).
     router.refresh();
@@ -100,6 +128,18 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         <Metric label="Waiting actions"  value={totals.withWaiting} />
         <Metric label="Delayed"          value={totals.delayed} valueColor="text-flame-dark" />
         <Metric label="Fully done"       value={totals.fullyDone} valueColor="text-green-dark" />
+      </div>
+
+      {/* Aggregate filter strip — chip rows by Action / Department / Stakeholder.
+          Clicking a chip narrows the batches table below to only batches that
+          have a matching OPEN (waiting/blocked) action. Aggregations are
+          computed over `topLevelFiltered` so counts reflect the current view. */}
+      <div className="mb-4">
+        <ActionCenterAggregateStrip
+          rows={topLevelFiltered}
+          active={aggregateFilter}
+          onChange={setAggregateFilter}
+        />
       </div>
 
       {/* Filters */}
