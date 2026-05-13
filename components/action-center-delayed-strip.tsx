@@ -3,10 +3,10 @@
 /**
  * Action Center → "Delayed work" strip.
  *
- * Sits ABOVE the "Outstanding work" strip. Subdivides delayed open actions
- * by HOW MANY DAYS late they are. Inside each delay-day bucket we render
- * three chip rows — the same By Action / By Department / By Stakeholder
- * groupings, but scoped to that delay-day cohort.
+ * The single triage surface above the batches table. Subdivides delayed
+ * open actions by HOW MANY DAYS late they are. Inside each delay-day
+ * bucket we render three chip rows — By Action / By Department / By
+ * Stakeholder — scoped to that delay-day cohort.
  *
  *   1 day late
  *     By Action       [ 2 Specs ] [ 1 VIN ]
@@ -16,19 +16,27 @@
  *   2 days late
  *     ...
  *
- * Clicking a chip applies a COMPOUND filter: the chip's identity (action/
- * department/stakeholder) AND the chip's delay-day bucket. So a click on
- * "1 day late → Specs" filters batches that have an open Specs action
- * delayed exactly 1 day — different from clicking Specs in the
- * Outstanding-Work strip below, which matches Specs at any delay.
+ * Clicking a chip applies a COMPOUND filter: the chip's identity AND its
+ * delay-day bucket. A click on "1 day late → Specs" narrows to batches
+ * with an open Specs action delayed exactly 1 day.
  *
- * Filter state is shared with the Outstanding-Work strip (single-select
- * across both), so clicking a Delayed chip clears any Outstanding chip
- * that was active, and vice versa.
+ * The whole strip is collapsible via the header — useful on days when
+ * the dataset is small or to reclaim vertical space after triage.
  */
-import type { ActionCenterRow, OpenActionRef } from "@/lib/action-center-data";
+import { useState } from "react";
+import type { ActionCenterRow } from "@/lib/action-center-data";
 import { cn } from "@/lib/utils";
-import type { AggregateFilter } from "./action-center-aggregate-strip";
+
+/**
+ * Discriminated union — single active aggregate filter for the Action
+ * Center. `delayDays` carries the chip's delay-day bucket; the shell
+ * uses it as a compound predicate against open actions.
+ */
+export type AggregateFilter =
+  | { kind: "action";      id: number; label: string; delayDays: number }
+  | { kind: "department";  id: number; label: string; delayDays: number }
+  | { kind: "stakeholder"; id: number; label: string; delayDays: number }
+  | null;
 
 interface Props {
   rows: ActionCenterRow[];
@@ -54,7 +62,19 @@ interface DelayGroup {
 
 export default function ActionCenterDelayedStrip({ rows, active, onChange }: Props) {
   const groups = aggregateByDelay(rows);
+  const [expanded, setExpanded] = useState(true);
+
   if (groups.length === 0) return null;
+
+  /**
+   * Total distinct batches across all delay groups — shown in the
+   * collapsed header so the at-a-glance signal survives a collapse.
+   * A batch with multiple delayed actions across different delay-day
+   * buckets still counts ONCE here.
+   */
+  const totalBatches = new Set(
+    rows.flatMap((r) => r.openActions.filter((oa) => oa.delayDays >= 1).map(() => r.batchId)),
+  ).size;
 
   function toggle(
     kind: "action" | "department" | "stakeholder",
@@ -77,12 +97,37 @@ export default function ActionCenterDelayedStrip({ rows, active, onChange }: Pro
   return (
     <section
       aria-label="Delayed work filters"
-      className="card border-flame/40 space-y-4"
+      className={cn("card border-flame/40", expanded ? "space-y-4" : "")}
     >
       <header className="flex items-baseline justify-between gap-3">
-        <p className="text-xs font-medium text-flame-dark uppercase tracking-wide">
-          🔴 Delayed work — click to filter
-        </p>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          aria-controls="delayed-work-body"
+          className="flex items-baseline gap-2 text-flame-dark hover:text-flame
+                     focus-visible:outline-2 focus-visible:outline-brand
+                     focus-visible:outline-offset-2 rounded -m-1 p-1"
+          title={expanded ? "Collapse Delayed work" : "Expand Delayed work"}
+        >
+          <span aria-hidden="true" className="text-xs leading-none">
+            {expanded ? "▾" : "▸"}
+          </span>
+          <span className="text-xs font-medium uppercase tracking-wide">
+            🔴 Delayed work — click to filter
+          </span>
+          <span className="text-[0.7rem] font-normal text-ink-500 normal-case tabular-nums">
+            {totalBatches} batch{totalBatches === 1 ? "" : "es"} · {groups.length} bucket{groups.length === 1 ? "" : "s"}
+            {active && active.delayDays !== undefined && (
+              <>
+                {" · "}
+                <span className="font-medium text-flame-dark">
+                  filter: {active.label} ({active.delayDays}d late)
+                </span>
+              </>
+            )}
+          </span>
+        </button>
         {active && active.delayDays !== undefined && (
           <button
             type="button"
@@ -95,16 +140,18 @@ export default function ActionCenterDelayedStrip({ rows, active, onChange }: Pro
         )}
       </header>
 
-      <div className="space-y-4">
-        {groups.map((g) => (
-          <DelayGroupRow
-            key={g.delayDays}
-            group={g}
-            active={active}
-            onToggle={toggle}
-          />
-        ))}
-      </div>
+      {expanded && (
+        <div id="delayed-work-body" className="space-y-4">
+          {groups.map((g) => (
+            <DelayGroupRow
+              key={g.delayDays}
+              group={g}
+              active={active}
+              onToggle={toggle}
+            />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
