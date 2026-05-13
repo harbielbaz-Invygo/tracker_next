@@ -1,9 +1,9 @@
 /**
- * Cockpit data layer — server-side queries.
+ * Action Center data layer — server-side queries.
  *
  * Two public surfaces:
- *   - getCockpitRows():     one row per batch with action counts + next pending
- *   - getDrawerData(code):  full action list for a single batch (drawer detail)
+ *   - getActionCenterRows(): one row per batch with action counts + next pending
+ *   - getDrawerData(code):   full action list for a single batch (drawer detail)
  *
  * Aggregation happens in JS since the dataset is small (dozens of batches × 9
  * actions). For larger volumes, switch to GROUP BY in SQL.
@@ -20,7 +20,7 @@ import { highestSeverity } from "@/lib/alert-engine";
 // Public types
 // ──────────────────────────────────────────────────────────────────
 
-export interface CockpitRow {
+export interface ActionCenterRow {
   /* Identity */
   batchId: number;
   batchCode: string;
@@ -139,9 +139,9 @@ function statusFor(b: typeof batches.$inferSelect): { delayDays: number; statusL
 // Public API
 // ──────────────────────────────────────────────────────────────────
 
-export async function getCockpitRows(
+export async function getActionCenterRows(
   alertsByBatch: Map<number, ActiveAlert[]> = new Map(),
-): Promise<CockpitRow[]> {
+): Promise<ActionCenterRow[]> {
   // Pull every batch, plus its dealer name.
   const batchRows = await db
     .select({ b: batches, dealerName: dealers.name })
@@ -204,7 +204,7 @@ export async function getCockpitRows(
       lifecycleState: (b.lifecycleState ?? "post_po") as "pre_po" | "post_po",
 
       closedAt:      b.closedAt ?? null,
-      closureReason: (b.closureReason ?? null) as CockpitRow["closureReason"],
+      closureReason: (b.closureReason ?? null) as ActionCenterRow["closureReason"],
 
       actionsWaiting,
       actionsBlocked,
@@ -363,7 +363,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
 }
 
 /** Aggregate summary metrics for the top of the page. */
-export function summarizeCockpit(rows: CockpitRow[]) {
+export function summarizeActionCenter(rows: ActionCenterRow[]) {
   const total = rows.length;
   const withWaiting = rows.filter((r) => r.actionsWaiting > 0).length;
   const fullyDone   = rows.filter((r) => r.totalActions > 0 && r.actionsDone === r.totalActions).length;
@@ -371,6 +371,6 @@ export function summarizeCockpit(rows: CockpitRow[]) {
   return { total, withWaiting, fullyDone, delayed };
 }
 
-// Slack formatter moved to `lib/cockpit-slack.ts` so client components can
+// Slack formatter moved to `lib/action-center-slack.ts` so client components can
 // import it without dragging the better-sqlite3 driver into the browser
-// bundle. See lib/cockpit-slack.ts:formatStatusCheckMessage.
+// bundle. See lib/action-center-slack.ts:formatStatusCheckMessage.

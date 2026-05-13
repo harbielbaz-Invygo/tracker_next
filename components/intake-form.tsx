@@ -566,7 +566,7 @@ export default function IntakeForm({ options }: Props) {
               Pick what this batch needs. Actions are grouped by the department
               that owns them (configured in Settings → Action Types).
               Dependencies are auto-respected — actions with parents start as
-              &quot;blocked&quot; and unlock when their parents are marked done in Cockpit.
+              &quot;blocked&quot; and unlock when their parents are marked done in the Action Center.
             </p>
 
             <div
@@ -1004,7 +1004,7 @@ function SuccessPanel({
         ✅ Created {summary.created.length} batch{summary.created.length === 1 ? "" : "es"}
       </h2>
       <p className="text-sm text-ink-500 mb-4">
-        Each batch is now visible in the Dashboard and the Cockpit.
+        Each batch is now visible in the Dashboard and the Action Center.
         Mark its actions as Ops makes progress.
       </p>
       <div className="space-y-2 mb-5">
@@ -1021,7 +1021,7 @@ function SuccessPanel({
         ))}
       </div>
       <div className="flex flex-wrap gap-2">
-        <a href="/cockpit" className="btn btn-primary">Open Cockpit</a>
+        <a href="/action-center" className="btn btn-primary">Open Action Center</a>
         <a href="/dashboard" className="btn">View Dashboard</a>
         <button type="button" onClick={onAnother} className="btn">+ Submit another PO</button>
       </div>

@@ -350,7 +350,7 @@ SELECT id, 'Silver', 4, 4, 4 FROM batches WHERE batch_code = 'TEST-007';
 --     correction: cancelled counts as "not delivered" in summary unless we exclude it
 --   • Pre-VIN critical:     2-3 (TEST-002, TEST-003, possibly TEST-011 depending on its days-to-avail)
 --
--- Cockpit (alerts fire on page load):
+-- Action Center (alerts fire on page load):
 --   • TEST-002:    🚨/⚠️ "VIN approaching"  (high)
 --   • TEST-003:    🚨    "VIN critical"     (critical)
 --   • TEST-011:    ⚡    "Action overdue"   (medium)

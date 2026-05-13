@@ -1,10 +1,10 @@
 /**
- * Cockpit — Operations' daily work surface.
+ * Action Center — Operations' daily work surface.
  *
  * Server component:
- *   1. Pulls all batches + per-batch action counts via getCockpitRows().
+ *   1. Pulls all batches + per-batch action counts via getActionCenterRows().
  *   2. Computes top-line totals.
- *   3. Hands rows to <CockpitShell> (client) which owns filter state,
+ *   3. Hands rows to <ActionCenterShell> (client) which owns filter state,
  *      selection, and drawer fetching.
  *
  * Mutations on the drawer (mark done / skip / save Ops confidence) call
@@ -14,24 +14,24 @@
  * Access: Ops + Admin (enforced by middleware).
  */
 import AccessGate from "@/components/access-gate";
-import CockpitShell from "@/components/cockpit-shell";
-import { getCockpitRows, summarizeCockpit } from "@/lib/cockpit-data";
+import ActionCenterShell from "@/components/action-center-shell";
+import { getActionCenterRows, summarizeActionCenter } from "@/lib/action-center-data";
 import { runAlertEngine } from "@/lib/alert-engine";
 
 export const dynamic = "force-dynamic";
 
-export default async function CockpitPage() {
+export default async function ActionCenterPage() {
   // Run the alert engine first — creates/resolves alerts in DB so the table
   // rows below reflect the current alert state.
   const alertsByBatch = await runAlertEngine();
-  const rows   = await getCockpitRows(alertsByBatch);
-  const totals = summarizeCockpit(rows);
+  const rows   = await getActionCenterRows(alertsByBatch);
+  const totals = summarizeActionCenter(rows);
 
   if (rows.length === 0) {
     return (
-      <AccessGate view="Cockpit">
+      <AccessGate view="Action Center">
         <div>
-          <h1 className="text-3xl font-bold mb-1">🛠️ Cockpit</h1>
+          <h1 className="text-3xl font-bold mb-1">🛠️ Action Center</h1>
           <p className="text-sm text-ink-500 mb-6 max-w-prose">
             Every batch in flight, sortable by action required and by department.
           </p>
@@ -47,8 +47,8 @@ export default async function CockpitPage() {
   }
 
   return (
-    <AccessGate view="Cockpit">
-      <CockpitShell rows={rows} totals={totals} />
+    <AccessGate view="Action Center">
+      <ActionCenterShell rows={rows} totals={totals} />
     </AccessGate>
   );
 }

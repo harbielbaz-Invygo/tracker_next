@@ -155,7 +155,7 @@ interface Scenario {
   opsExpectedOffset: number | null;
   /**
    * Days from today for `vinReceivingDate`. Null on pre-PO and right
-   * after Intake — Ops captures it later in Cockpit when the dealer
+   * after Intake — Ops captures it later in the Action Center when the dealer
    * commits a VIN-share date.
    */
   vinReceivingOffset: number | null;
@@ -632,7 +632,7 @@ async function seed() {
       closureReason:    scn.closureReason ?? undefined,
       cancellationNote: scn.cancellationNote ?? undefined,
       // VIN receiving date — null at Intake by design; Ops captures it
-      // later in Cockpit. Seeded here for scenarios that have already
+      // later in the Action Center. Seeded here for scenarios that have already
       // moved past that point (mid-ops, near-done, delivered, cancelled).
       vinReceivingDate: vinReceiving ?? undefined,
       poNumber: syntheticPoNumber,   // populate so the dashboard table can show it

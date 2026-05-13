@@ -373,6 +373,6 @@ async function seedTestData() {
       deliveryTypeName: deliveryType?.name ?? null,
       overdueAnchorName: firstNonVinDelivery?.name ?? null,
     },
-    note: "Refresh Dashboard, Cockpit, and Reports to see the seeded scenarios. Filter by dealer 'test' to isolate.",
+    note: "Refresh Dashboard, Action Center, and Reports to see the seeded scenarios. Filter by dealer 'test' to isolate.",
   };
 }

@@ -20,7 +20,7 @@
  *     The next time a parent is marked done, the unblock cascade picks
  *     them back up.
  *
- * Auth: relies on middleware. Cockpit is gated for ops/admin only at the
+ * Auth: relies on middleware. The Action Center is gated for ops/admin only at the
  * route level; this API is reachable by any authed user. (Phase: tighten
  * by checking req.auth.role here once roles propagate to NextRequest.)
  */

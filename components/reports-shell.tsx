@@ -126,7 +126,7 @@ function PerformanceTable({
 
       {rows.length === 0 ? (
         <p className="px-4 py-8 text-sm text-ink-500 text-center">
-          No data yet. Once batches start moving through Intake and Cockpit,
+          No data yet. Once batches start moving through Intake and the Action Center,
           metrics will populate here.
         </p>
       ) : (
