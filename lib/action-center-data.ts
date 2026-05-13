@@ -58,6 +58,30 @@ export interface ActionCenterRow {
   /* Alerts */
   alertCount: number;
   highestAlertSeverity: ActiveAlert["severity"] | null;
+
+  /**
+   * Compact descriptors of every OPEN (waiting OR blocked) action on
+   * this batch. Used by the aggregate filter strip above the table to
+   * count "N batches waiting on Car Specs / on Specs dept / on Ahmed",
+   * and to filter the table when a chip is clicked.
+   *
+   * One entry per open action — a batch with 3 waiting actions
+   * contributes 3 entries. Aggregations DE-DUPE by batchId, so we count
+   * distinct *batches* per group, not actions.
+   */
+  openActions: OpenActionRef[];
+}
+
+/** One open-action reference — enough to power the aggregate strip. */
+export interface OpenActionRef {
+  actionTypeId: number;
+  actionTypeName: string;
+  waitingLabel: string;
+  status: "waiting" | "blocked";
+  departmentId: number | null;
+  departmentName: string | null;
+  stakeholderId: number | null;
+  stakeholderName: string | null;
 }
 
 export interface ActionDetail {
@@ -148,19 +172,25 @@ export async function getActionCenterRows(
     .from(batches)
     .leftJoin(dealers, eq(batches.dealerId, dealers.id));
 
-  // Pull every batch_action joined with its action_type and department for
-  // a single round-trip aggregate.
+  // Pull every batch_action joined with its action_type, department, and
+  // (optionally) the assigned stakeholder. One round-trip — small dataset.
   const actions = await db
     .select({
-      batchId:       batchActions.batchId,
-      status:        batchActions.status,
-      sortOrder:     actionTypes.sortOrder,
-      waitingLabel:  actionTypes.waitingLabel,
+      batchId:        batchActions.batchId,
+      status:         batchActions.status,
+      sortOrder:      actionTypes.sortOrder,
+      actionTypeId:   actionTypes.id,
+      actionTypeName: actionTypes.name,
+      waitingLabel:   actionTypes.waitingLabel,
+      departmentId:   departments.id,
       departmentName: departments.name,
+      stakeholderId:    stakeholders.id,
+      stakeholderName:  stakeholders.name,
     })
     .from(batchActions)
-    .innerJoin(actionTypes,  eq(batchActions.actionTypeId, actionTypes.id))
-    .leftJoin(departments,   eq(batchActions.departmentId, departments.id));
+    .innerJoin(actionTypes,    eq(batchActions.actionTypeId, actionTypes.id))
+    .leftJoin(departments,     eq(batchActions.departmentId, departments.id))
+    .leftJoin(stakeholders,    eq(batchActions.assignedStakeholderId, stakeholders.id));
 
   // Bucket actions by batchId for O(1) per-row lookup.
   const byBatch = new Map<number, typeof actions>();
@@ -187,10 +217,20 @@ export async function getActionCenterRows(
     const next = nextWaiting ?? nextBlocked ?? null;
 
     const pendingDeptSet = new Set<string>();
+    const openActions: OpenActionRef[] = [];
     for (const a of bAct) {
-      if ((a.status === "waiting" || a.status === "blocked") && a.departmentName) {
-        pendingDeptSet.add(a.departmentName);
-      }
+      if (a.status !== "waiting" && a.status !== "blocked") continue;
+      if (a.departmentName) pendingDeptSet.add(a.departmentName);
+      openActions.push({
+        actionTypeId:    a.actionTypeId,
+        actionTypeName:  a.actionTypeName,
+        waitingLabel:    a.waitingLabel,
+        status:          a.status as "waiting" | "blocked",
+        departmentId:    a.departmentId ?? null,
+        departmentName:  a.departmentName ?? null,
+        stakeholderId:   a.stakeholderId ?? null,
+        stakeholderName: a.stakeholderName ?? null,
+      });
     }
 
     const { delayDays, statusLabel } = statusFor(b);
@@ -224,6 +264,8 @@ export async function getActionCenterRows(
 
       alertCount:           (alertsByBatch.get(b.id) ?? []).length,
       highestAlertSeverity: highestSeverity(alertsByBatch.get(b.id) ?? []),
+
+      openActions,
     };
   });
 }
