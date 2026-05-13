@@ -223,10 +223,13 @@ export async function runAlertEngine(): Promise<AlertsByBatch> {
         }
       }
 
-      // ── B. Any waiting/blocked action is overdue ──────────────────────────
+      // ── B. Any waiting action is overdue ──────────────────────────────────
+      // Skip BLOCKED actions — their delay belongs to the parent they're
+      // waiting on, not them. Alerting on a blocked child would blame the
+      // wrong owner; the upstream waiting parent will fire its own alert.
       if (rule.triggerType === "action_overdue") {
         for (const { ba, atName } of acts) {
-          if (ba.status !== "waiting" && ba.status !== "blocked") continue;
+          if (ba.status !== "waiting") continue;
           if (!ba.expectedDate || ba.expectedDate >= todayStr) continue;
 
           const fingerprint = fp(rule.id, batch.id, `action-${ba.id}`);

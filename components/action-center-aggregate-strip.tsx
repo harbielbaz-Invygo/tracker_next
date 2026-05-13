@@ -21,11 +21,17 @@
 import type { ActionCenterRow } from "@/lib/action-center-data";
 import { cn } from "@/lib/utils";
 
-/** Discriminated union — one active filter at a time across all 3 rows. */
+/**
+ * Discriminated union — one active filter at a time across the strip
+ * (and the sibling Delayed-Work strip). When `delayDays` is set, the
+ * filter is a COMPOUND match: a batch matches only when one of its open
+ * actions has BOTH the matching kind/id AND exactly that delay value.
+ * Set from the Delayed-Work strip; left undefined for Outstanding-Work.
+ */
 export type AggregateFilter =
-  | { kind: "action";      id: number; label: string }
-  | { kind: "department";  id: number; label: string }
-  | { kind: "stakeholder"; id: number; label: string }
+  | { kind: "action";      id: number; label: string; delayDays?: number }
+  | { kind: "department";  id: number; label: string; delayDays?: number }
+  | { kind: "stakeholder"; id: number; label: string; delayDays?: number }
   | null;
 
 interface Props {
@@ -75,7 +81,7 @@ export default function ActionCenterAggregateStrip({ rows, active, onChange }: P
         <p className="text-xs font-medium text-ink-500 uppercase tracking-wide">
           Outstanding work — click to filter
         </p>
-        {active && (
+        {active && active.delayDays === undefined && (
           <button
             type="button"
             onClick={() => onChange(null)}
@@ -134,7 +140,14 @@ function ChipRow({
       </span>
       <div className="flex flex-wrap items-center gap-1.5">
         {buckets.map((b) => {
-          const isActive = active != null && active.kind === kind && active.id === b.id;
+          // Only "highlight active" if the active filter has no delayDays
+          // payload — when it does, it came from the Delayed-Work strip
+          // and the chip there is the right one to show as pressed.
+          const isActive =
+            active != null &&
+            active.kind === kind &&
+            active.id === b.id &&
+            active.delayDays === undefined;
           return (
             <button
               key={`${kind}-${b.id}`}
