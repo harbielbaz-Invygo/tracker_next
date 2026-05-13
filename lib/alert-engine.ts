@@ -26,6 +26,13 @@ import {
 export interface ActiveAlert {
   id: number;
   fingerprint: string;
+  /**
+   * The batch_action this alert points at, or null for batch-level alerts
+   * that aren't tied to a specific action (none today, but reserved for
+   * future trigger types). Derived from the fingerprint's `-action-{id}`
+   * suffix so no DB-column migration is needed.
+   */
+  actionId: number | null;
   severity: "critical" | "high" | "medium" | "info";
   alertType: string;
   message: string;
@@ -33,6 +40,12 @@ export interface ActiveAlert {
   acknowledged: boolean;
   acknowledgedBy: string | null;
   acknowledgedAt: string | null;
+}
+
+/** Parse the `-action-{id}` suffix from a fingerprint, if any. */
+function actionIdFromFingerprint(fp: string): number | null {
+  const m = fp.match(/-action-(\d+)$/);
+  return m ? Number(m[1]) : null;
 }
 
 /** Map<batchId, ActiveAlert[]> */
@@ -188,7 +201,10 @@ export async function runAlertEngine(): Promise<AlertsByBatch> {
 
         if (!targetAction || !availDate) continue;
 
-        const fingerprint = fp(rule.id, batch.id);
+        // Fingerprint now includes the action id so the drawer can match
+        // alerts to specific action rows. Old fingerprints (rule-X-batch-Y
+        // without the suffix) auto-resolve on the next engine run.
+        const fingerprint = fp(rule.id, batch.id, `action-${targetAction.ba.id}`);
         const isNotDone   = targetAction.ba.status !== "done" && targetAction.ba.status !== "skipped";
         const daysLeft    = daysUntil(availDate);
 
@@ -283,6 +299,7 @@ export async function runAlertEngine(): Promise<AlertsByBatch> {
     arr.push({
       id:             a.id,
       fingerprint:    a.fingerprint,
+      actionId:       actionIdFromFingerprint(a.fingerprint),
       severity:       a.severity as ActiveAlert["severity"],
       alertType:      a.alertType,
       message:        a.message,
@@ -332,6 +349,7 @@ export async function getAlertsForBatch(batchId: number): Promise<ActiveAlert[]>
   return rows.map((a) => ({
     id:             a.id,
     fingerprint:    a.fingerprint,
+    actionId:       actionIdFromFingerprint(a.fingerprint),
     severity:       a.severity as ActiveAlert["severity"],
     alertType:      a.alertType,
     message:        a.message,
