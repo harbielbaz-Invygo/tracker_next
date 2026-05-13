@@ -161,6 +161,15 @@ export const batches = sqliteTable("batches", {
   delayReason:        text("delay_reason"),
   nextAction:         text("next_action"),
   responsibleOwner:   text("responsible_owner"),
+  /**
+   * True when ops captured the PO and the VIN at the same intake — the
+   * dealer already shared VIN numbers along with the PO PDF. Skips the
+   * first two steps of the VIN-chase flow (Send Dealer Confirmation
+   * Email + VIN Received) since both are already satisfied. Risk model
+   * also treats this batch as post_vin from day one.
+   */
+  vinReceivedAtIntake: integer("vin_received_at_intake", { mode: "boolean" })
+                       .notNull().default(false),
 
   notes:      text("notes"),
   createdAt:  text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
@@ -187,6 +196,41 @@ export const batchColorMatrix = sqliteTable("batch_color_matrix", {
   deliveredQuantity:  integer("delivered_quantity").default(0),
 }, (t) => ({
   byBatch: index("batch_color_matrix_batch_idx").on(t.batchId),
+}));
+
+// ─────────────────────────────────────────────────────────
+// Batch date revisions — one row per shift event of the projected
+// availability date. Replaces the `deliveryDateRevisionCount` counter
+// on `batches` with a per-event history so we can compute customer
+// impact precisely (bookings_at_shift × delay_added_by_shift). Each
+// shift also captures WHY it happened (reason text) and WHO applied it.
+// ─────────────────────────────────────────────────────────
+export const batchDateRevisions = sqliteTable("batch_date_revisions", {
+  id:                     integer("id").primaryKey({ autoIncrement: true }),
+  batchId:                integer("batch_id").notNull()
+                            .references(() => batches.id, { onDelete: "cascade" }),
+  /** ISO datetime when ops applied the shift. */
+  revisedAt:              text("revised_at").default(sql`(CURRENT_TIMESTAMP)`),
+  /** Username of the ops/admin who applied the shift (audit trail). */
+  revisedBy:              text("revised_by"),
+  /** The projected date BEFORE this shift (ISO yyyy-mm-dd). */
+  previousProjectedDate:  text("previous_projected_date").notNull(),
+  /** The projected date AFTER this shift (ISO yyyy-mm-dd). */
+  newProjectedDate:       text("new_projected_date").notNull(),
+  /** newProjectedDate - previousProjectedDate (days, signed; usually positive). */
+  delayDays:              integer("delay_days").notNull(),
+  /**
+   * Number of customer bookings against this batch at the moment of
+   * the shift. Manually entered by ops. Drives the customer-impact
+   * metric: customer-days lost = bookings × delayDays per shift event.
+   * 0 when the shift happens before "App Listing" (no bookings yet).
+   */
+  bookingsAtShift:        integer("bookings_at_shift").notNull().default(0),
+  /** Optional free-text reason captured at the shift moment. */
+  reason:                 text("reason"),
+}, (t) => ({
+  byBatch:     index("batch_date_revisions_batch_idx").on(t.batchId),
+  byRevisedAt: index("batch_date_revisions_revised_at_idx").on(t.revisedAt),
 }));
 
 // ─────────────────────────────────────────────────────────
@@ -443,3 +487,4 @@ export type Stakeholder       = typeof stakeholders.$inferSelect;
 export type ActionType        = typeof actionTypes.$inferSelect;
 export type ActionDependency  = typeof actionDependencies.$inferSelect;
 export type BatchAction       = typeof batchActions.$inferSelect;
+export type BatchDateRevision = typeof batchDateRevisions.$inferSelect;
