@@ -390,7 +390,15 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
     stageDisplay: stageDisplay(b.currentStage),
 
     planRequested: b.requestedAt,
-    planExpectedPo: b.expectedPoDate ?? null,
+    // Suppress the Expected-PO milestone when it equals the Actual-PO
+    // date — that's the Post-PO case (PO uploaded at intake, both fields
+    // derived from the same PDF), where putting it on the Plan track
+    // just duplicates the Reality-track Actual-PO tick at the same date.
+    // For Pre-PO batches (no actualPoDate yet, or a real override gap),
+    // the planned target survives and the comparison stays meaningful.
+    planExpectedPo: b.expectedPoDate && b.expectedPoDate !== b.actualPoDate
+      ? b.expectedPoDate
+      : null,
     planPromised: b.dealerPromisedDeliveryDate,
 
     poIssuedDate: b.actualPoDate ?? null,
