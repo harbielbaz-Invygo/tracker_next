@@ -74,18 +74,34 @@ export default function CockpitDrawer({ batchCode, onMutation, layout = "vertica
   }
   if (!data) return null;
 
+  // Alerts split into two streams:
+  //   • action-tied (alert.actionId set) → rendered inline on the matching
+  //     action row, no separate section.
+  //   • batch-level (alert.actionId null) → rendered as a compact strip
+  //     above the actions list. None of today's three trigger types produce
+  //     these, but the fallback is there for future rules.
+  const batchLevelAlerts = data.alerts.filter((a) => a.actionId == null);
+  const alertsByActionId = new Map<number, typeof data.alerts>();
+  for (const a of data.alerts) {
+    if (a.actionId == null) continue;
+    const arr = alertsByActionId.get(a.actionId) ?? [];
+    arr.push(a);
+    alertsByActionId.set(a.actionId, arr);
+  }
+
   return (
     <div className="card">
       <DrawerHeader data={data} onClosed={() => { refresh(); onMutation?.(); }} />
       {data.closedAt && data.closureReason ? (
         <ClosedBanner data={data} />
       ) : null}
-      {data.alerts.length > 0 && (
-        <AlertsSection alerts={data.alerts} onAcknowledged={refresh} />
+      {batchLevelAlerts.length > 0 && (
+        <BatchAlertsStrip alerts={batchLevelAlerts} onAcknowledged={refresh} />
       )}
       <ConfidenceRow data={data} onSaved={() => { refresh(); onMutation?.(); }} disabled={!!data.closedAt} />
       <ActionsList
         data={data}
+        alertsByActionId={alertsByActionId}
         layout={layout}
         onMutated={() => { refresh(); onMutation?.(); }}
         disabled={!!data.closedAt}
@@ -95,81 +111,108 @@ export default function CockpitDrawer({ batchCode, onMutation, layout = "vertica
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Alerts section
+// Alerts — inline rendering on action rows + fallback strip
 // ──────────────────────────────────────────────────────────────────
 
 import type { ActiveAlert } from "@/lib/alert-engine";
 
-function AlertsSection({
+/** Fire-and-forget POST to acknowledge an alert. Returns ok-flag. */
+async function acknowledgeAlert(alertId: number): Promise<boolean> {
+  try {
+    const res = await fetch("/api/alerts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "acknowledge", alertId }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return true;
+  } catch (e) {
+    alert(`Could not acknowledge: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+/** Severity → emoji + colour classes. Used by both inline + strip renders. */
+function severityVisuals(s: ActiveAlert["severity"]) {
+  return {
+    critical: { icon: "🚨", cls: "bg-flame-dark/10 border-flame text-flame-dark" },
+    high:     { icon: "⚠️", cls: "bg-flame-pale     border-flame text-flame-dark" },
+    medium:   { icon: "⚡", cls: "bg-gold-pale      border-gold  text-gold-dark"  },
+    info:     { icon: "ℹ️", cls: "bg-ink-50         border-ink-200 text-ink-600"   },
+  }[s];
+}
+
+/**
+ * Inline alert detail rendered immediately under an action row's meta line.
+ * The action row itself already shows a severity badge on the title; this
+ * block gives the full message, raised time, ack state, and the Ack button.
+ */
+function AlertInline({ alert, onAcknowledged }: { alert: ActiveAlert; onAcknowledged: () => void }) {
+  const [pending, setPending] = useState(false);
+  const v = severityVisuals(alert.severity);
+
+  async function onAck() {
+    setPending(true);
+    const ok = await acknowledgeAlert(alert.id);
+    setPending(false);
+    if (ok) onAcknowledged();
+  }
+
+  return (
+    <div
+      className={cn(
+        "mt-1.5 flex items-start gap-2 px-2.5 py-1.5 rounded-md border text-[0.7rem]",
+        v.cls,
+        alert.acknowledged && "opacity-60",
+      )}
+      role="status"
+    >
+      <span aria-hidden="true" className="text-sm shrink-0 leading-none mt-px">{v.icon}</span>
+      <div className="flex-1 min-w-0">
+        <p className="font-medium leading-snug">{alert.message}</p>
+        <p className="text-[0.65rem] mt-0.5 opacity-70">
+          Raised {alert.raisedAt.slice(0, 10)}
+          {alert.acknowledged && alert.acknowledgedBy && (
+            <> · Acked by <span className="font-medium">{alert.acknowledgedBy}</span></>
+          )}
+        </p>
+      </div>
+      {!alert.acknowledged && (
+        <button
+          type="button"
+          disabled={pending}
+          onClick={onAck}
+          className="shrink-0 text-[0.65rem] font-medium px-2 py-0.5 rounded border
+                     border-current bg-white/60 hover:bg-white transition-colors"
+          title="Acknowledge — mark that you've seen this alert"
+        >
+          {pending ? "…" : "Ack"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Fallback strip for batch-level alerts (no actionId). Today's three
+ * trigger types are all action-tied so this stays empty in practice,
+ * but a future "PO cancelled by dealer" type alert would land here.
+ */
+function BatchAlertsStrip({
   alerts, onAcknowledged,
 }: {
   alerts: ActiveAlert[];
   onAcknowledged: () => void;
 }) {
-  const [pending, setPending] = useState<number | null>(null);
-
-  async function acknowledge(alertId: number) {
-    setPending(alertId);
-    try {
-      const res = await fetch("/api/alerts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ op: "acknowledge", alertId }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      onAcknowledged();
-    } catch (e) {
-      alert(`Could not acknowledge: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setPending(null);
-    }
-  }
-
   return (
     <div className="mb-5">
       <p className="text-[0.7rem] font-medium text-ink-600 uppercase tracking-wide mb-2">
-        Active Alerts ({alerts.length})
+        Batch alerts ({alerts.length})
       </p>
       <ul className="space-y-1.5">
         {alerts.map((a) => (
-          <li
-            key={a.id}
-            className={cn(
-              "flex items-start gap-3 px-3 py-2 rounded-md border text-xs",
-              a.severity === "critical" ? "bg-flame-dark/10 border-flame text-flame-dark"
-              : a.severity === "high"   ? "bg-flame-pale border-flame text-flame-dark"
-              : a.severity === "medium" ? "bg-gold-pale border-gold text-gold-dark"
-              :                           "bg-ink-50 border-ink-200 text-ink-600",
-              a.acknowledged && "opacity-60",
-            )}
-          >
-            <span aria-hidden="true" className="mt-px text-sm shrink-0">
-              {a.severity === "critical" ? "🚨"
-               : a.severity === "high"   ? "⚠️"
-               : a.severity === "medium" ? "⚡"
-               :                           "ℹ️"}
-            </span>
-            <div className="flex-1 min-w-0">
-              <p className="font-medium leading-snug">{a.message}</p>
-              <p className="text-[0.65rem] mt-0.5 text-inherit opacity-70">
-                Raised {a.raisedAt.slice(0, 10)}
-                {a.acknowledged && a.acknowledgedBy && (
-                  <> · Acknowledged by <span className="font-medium">{a.acknowledgedBy}</span></>
-                )}
-              </p>
-            </div>
-            {!a.acknowledged && (
-              <button
-                type="button"
-                disabled={pending === a.id}
-                onClick={() => acknowledge(a.id)}
-                className="shrink-0 text-[0.65rem] font-medium px-2 py-0.5 rounded border
-                           border-current bg-white/60 hover:bg-white transition-colors"
-                title="Acknowledge — mark that you've seen this alert"
-              >
-                {pending === a.id ? "…" : "Ack"}
-              </button>
-            )}
+          <li key={a.id}>
+            <AlertInline alert={a} onAcknowledged={onAcknowledged} />
           </li>
         ))}
       </ul>
@@ -470,9 +513,11 @@ function ConfidenceRow({
 // ──────────────────────────────────────────────────────────────────
 
 function ActionsList({
-  data, onMutated, layout, disabled = false,
+  data, alertsByActionId, onMutated, layout, disabled = false,
 }: {
   data: DrawerData;
+  /** Pre-grouped alerts by action id so each row knows its own. */
+  alertsByActionId: Map<number, ActiveAlert[]>;
   onMutated: () => void;
   layout: "vertical" | "kanban";
   /** When true (e.g. batch is closed), every status mutation is disabled. */
@@ -501,19 +546,20 @@ function ActionsList({
       <div className="space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
           <KanbanColumn
-            title="Waiting" tone="waiting" actions={groups.waiting} onMutated={onMutated} disabled={disabled}
+            title="Waiting" tone="waiting" actions={groups.waiting} alertsByActionId={alertsByActionId} onMutated={onMutated} disabled={disabled}
           />
           <KanbanColumn
-            title="Blocked" tone="blocked" actions={groups.blocked} onMutated={onMutated} disabled={disabled}
+            title="Blocked" tone="blocked" actions={groups.blocked} alertsByActionId={alertsByActionId} onMutated={onMutated} disabled={disabled}
           />
           <KanbanColumn
-            title="Done"    tone="done"    actions={groups.done}    onMutated={onMutated} disabled={disabled}
+            title="Done"    tone="done"    actions={groups.done}    alertsByActionId={alertsByActionId} onMutated={onMutated} disabled={disabled}
           />
         </div>
         {groups.skipped.length > 0 && (
           <ActionGroup
             title="Skipped" tone="skipped"
             actions={groups.skipped}
+            alertsByActionId={alertsByActionId}
             onMutated={onMutated}
             disabled={disabled}
             collapsibleByDefault
@@ -528,22 +574,22 @@ function ActionsList({
     <div className="space-y-4">
       {groups.waiting.length > 0 && (
         <ActionGroup
-          title="Waiting" tone="waiting" actions={groups.waiting} onMutated={onMutated} disabled={disabled}
+          title="Waiting" tone="waiting" actions={groups.waiting} alertsByActionId={alertsByActionId} onMutated={onMutated} disabled={disabled}
         />
       )}
       {groups.blocked.length > 0 && (
         <ActionGroup
-          title="Blocked" tone="blocked" actions={groups.blocked} onMutated={onMutated} disabled={disabled}
+          title="Blocked" tone="blocked" actions={groups.blocked} alertsByActionId={alertsByActionId} onMutated={onMutated} disabled={disabled}
         />
       )}
       {groups.done.length > 0 && (
         <ActionGroup
-          title="Done" tone="done" actions={groups.done} onMutated={onMutated} disabled={disabled} collapsibleByDefault
+          title="Done" tone="done" actions={groups.done} alertsByActionId={alertsByActionId} onMutated={onMutated} disabled={disabled} collapsibleByDefault
         />
       )}
       {groups.skipped.length > 0 && (
         <ActionGroup
-          title="Skipped" tone="skipped" actions={groups.skipped} onMutated={onMutated} disabled={disabled} collapsibleByDefault
+          title="Skipped" tone="skipped" actions={groups.skipped} alertsByActionId={alertsByActionId} onMutated={onMutated} disabled={disabled} collapsibleByDefault
         />
       )}
     </div>
@@ -556,11 +602,12 @@ function ActionsList({
  * needed, and the side-by-side pane scrolls vertically as a whole.
  */
 function KanbanColumn({
-  title, tone, actions, onMutated, disabled = false,
+  title, tone, actions, alertsByActionId, onMutated, disabled = false,
 }: {
   title: string;
   tone: "waiting" | "blocked" | "done" | "skipped";
   actions: ActionDetail[];
+  alertsByActionId: Map<number, ActiveAlert[]>;
   onMutated: () => void;
   disabled?: boolean;
 }) {
@@ -587,7 +634,14 @@ function KanbanColumn({
         <ul className="space-y-2">
           {actions.map((a) => (
             <li key={a.id}>
-              <ActionRow action={a} tone={tone} onMutated={onMutated} compact disabled={disabled} />
+              <ActionRow
+                action={a}
+                tone={tone}
+                alerts={alertsByActionId.get(a.id) ?? []}
+                onMutated={onMutated}
+                compact
+                disabled={disabled}
+              />
             </li>
           ))}
         </ul>
@@ -597,16 +651,25 @@ function KanbanColumn({
 }
 
 function ActionGroup({
-  title, tone, actions, onMutated, collapsibleByDefault = false, disabled = false,
+  title, tone, actions, alertsByActionId, onMutated, collapsibleByDefault = false, disabled = false,
 }: {
   title: string;
   tone: "waiting" | "blocked" | "done" | "skipped";
   actions: ActionDetail[];
+  alertsByActionId: Map<number, ActiveAlert[]>;
   onMutated: () => void;
   collapsibleByDefault?: boolean;
   disabled?: boolean;
 }) {
-  const [collapsed, setCollapsed] = useState(collapsibleByDefault);
+  // Don't collapse a group by default when any of its rows has an active
+  // alert — surfacing the alert is more important than initial tidiness.
+  const hasAlertedRow = actions.some((a) => (alertsByActionId.get(a.id)?.length ?? 0) > 0);
+  const [collapsed, setCollapsed] = useState(collapsibleByDefault && !hasAlertedRow);
+  // Count alerts in this group for the header badge.
+  const groupAlertCount = actions.reduce(
+    (sum, a) => sum + (alertsByActionId.get(a.id)?.length ?? 0),
+    0,
+  );
   return (
     <div>
       <button
@@ -617,12 +680,27 @@ function ActionGroup({
       >
         <span aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
         <span>{title} <span className="tabular-nums text-ink-400">({actions.length})</span></span>
+        {groupAlertCount > 0 && (
+          <span
+            className="ml-1 text-[0.65rem] font-semibold tabular-nums px-1.5 py-0.5 rounded-full
+                       bg-flame-pale text-flame-dark border border-flame"
+            title={`${groupAlertCount} active alert${groupAlertCount === 1 ? "" : "s"} in this group`}
+          >
+            ⚠ {groupAlertCount}
+          </span>
+        )}
       </button>
       {!collapsed && (
         <ul className="space-y-2">
           {actions.map((a) => (
             <li key={a.id}>
-              <ActionRow action={a} tone={tone} onMutated={onMutated} disabled={disabled} />
+              <ActionRow
+                action={a}
+                tone={tone}
+                alerts={alertsByActionId.get(a.id) ?? []}
+                onMutated={onMutated}
+                disabled={disabled}
+              />
             </li>
           ))}
         </ul>
@@ -632,10 +710,18 @@ function ActionGroup({
 }
 
 function ActionRow({
-  action, tone, onMutated, compact = false, disabled = false,
+  action, tone, alerts = [], onMutated, compact = false, disabled = false,
 }: {
   action: ActionDetail;
   tone: "waiting" | "blocked" | "done" | "skipped";
+  /**
+   * Alerts tied to this action (alert.actionId === action.id). Drives:
+   *   • severity icon next to the action title
+   *   • coloured left-border on the row
+   *   • inline alert-detail block under the meta line
+   * Empty array (default) → row renders normally with no alert affordances.
+   */
+  alerts?: ActiveAlert[];
   onMutated: () => void;
   /** Compact mode (kanban): buttons drop below the meta line so the
    *  card fits a narrow column without truncating. */
@@ -689,12 +775,33 @@ function ActionRow({
   }
 
   const labelText = tone === "done" ? action.doneLabel : action.waitingLabel;
-  const borderTone = {
-    waiting: "border-ink-200",
-    blocked: "border-ink-200 opacity-75",
-    done:    "border-green",
-    skipped: "border-ink-200 opacity-60",
-  }[tone];
+
+  // Pick the highest-severity unacknowledged alert for the row's visual
+  // treatment. Acknowledged-only rows still get a (faded) badge so the
+  // alert presence remains visible without screaming.
+  const SEV_RANK: Record<ActiveAlert["severity"], number> = { critical: 4, high: 3, medium: 2, info: 1 };
+  const sortedAlerts = [...alerts].sort((a, b) => {
+    // Unacknowledged first, then by severity desc.
+    if (a.acknowledged !== b.acknowledged) return a.acknowledged ? 1 : -1;
+    return SEV_RANK[b.severity] - SEV_RANK[a.severity];
+  });
+  const topAlert = sortedAlerts[0];
+  const topVisuals = topAlert ? severityVisuals(topAlert.severity) : null;
+
+  // Border tone: alerted rows take a coloured border that overrides the
+  // status border. Done rows keep their green border since the alert
+  // would already have auto-resolved in that case.
+  const borderTone = topAlert && tone !== "done"
+    ? (topAlert.severity === "critical" ? "border-flame border-l-4 border-l-flame-dark"
+       : topAlert.severity === "high"   ? "border-flame border-l-4 border-l-flame"
+       : topAlert.severity === "medium" ? "border-gold  border-l-4 border-l-gold"
+       :                                  "border-ink-300 border-l-4 border-l-ink-400")
+    : {
+        waiting: "border-ink-200",
+        blocked: "border-ink-200 opacity-75",
+        done:    "border-green",
+        skipped: "border-ink-200 opacity-60",
+      }[tone];
 
   const allDisabled = disabled || pending;
   const Buttons = backdating ? (
@@ -857,25 +964,57 @@ function ActionRow({
     </p>
   );
 
+  // Action title with optional severity icon prefix. The icon is the
+  // single most-prominent signal that this row needs attention.
+  const Title = (
+    <p className="text-sm font-medium text-midnight flex items-center gap-1.5 min-w-0">
+      {topVisuals && (
+        <span
+          aria-hidden="true"
+          className={cn("text-sm shrink-0 leading-none", topAlert?.acknowledged && "opacity-50")}
+          title={`${alerts.length} active alert${alerts.length === 1 ? "" : "s"}`}
+        >
+          {topVisuals.icon}
+        </span>
+      )}
+      <span className="truncate">{labelText}</span>
+    </p>
+  );
+
+  // Inline alert details — one block per alert, rendered under the meta.
+  const AlertsBlock = alerts.length > 0 ? (
+    <div className="space-y-1.5">
+      {sortedAlerts.map((a) => (
+        <AlertInline key={a.id} alert={a} onAcknowledged={onMutated} />
+      ))}
+    </div>
+  ) : null;
+
   if (compact) {
     // Kanban card: meta + buttons stacked vertically so a narrow column fits.
     return (
       <div className={cn("rounded-md border bg-white px-3 py-2", borderTone)}>
-        <p className="text-sm font-medium text-midnight">{labelText}</p>
+        {Title}
         {Meta}
+        {AlertsBlock}
         <div className="mt-2">{Buttons}</div>
       </div>
     );
   }
 
   // Vertical (default): meta + buttons side by side, wrap on narrow.
+  // When alerts are present, the alert block needs full row width — so we
+  // wrap the title/meta/buttons in a top row and the alert block sits below.
   return (
-    <div className={cn("flex flex-wrap items-center gap-3 px-3 py-2 rounded-md border bg-white", borderTone)}>
-      <div className="flex-1 min-w-[10rem]">
-        <p className="text-sm font-medium text-midnight">{labelText}</p>
-        {Meta}
+    <div className={cn("px-3 py-2 rounded-md border bg-white", borderTone)}>
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex-1 min-w-[10rem]">
+          {Title}
+          {Meta}
+        </div>
+        {Buttons}
       </div>
-      {Buttons}
+      {AlertsBlock}
     </div>
   );
 }

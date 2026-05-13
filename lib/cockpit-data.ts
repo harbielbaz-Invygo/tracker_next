@@ -345,6 +345,12 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     alerts: batchAlerts.map((a) => ({
       id:             a.id,
       fingerprint:    a.fingerprint,
+      // Same fingerprint-parse pattern used by the engine. Keeps the wire
+      // shape consistent across both data sources without needing a DB column.
+      actionId:       (() => {
+        const m = a.fingerprint.match(/-action-(\d+)$/);
+        return m ? Number(m[1]) : null;
+      })(),
       severity:       a.severity as ActiveAlert["severity"],
       alertType:      a.alertType,
       message:        a.message,
