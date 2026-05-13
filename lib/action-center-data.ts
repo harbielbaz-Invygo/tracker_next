@@ -82,6 +82,12 @@ export interface OpenActionRef {
   departmentName: string | null;
   stakeholderId: number | null;
   stakeholderName: string | null;
+  /**
+   * Days late: today − expectedDate when expectedDate is in the past,
+   * else 0. Drives the "Delayed work" filter strip — actions with
+   * delayDays === 0 don't appear there.
+   */
+  delayDays: number;
 }
 
 export interface ActionDetail {
@@ -174,10 +180,13 @@ export async function getActionCenterRows(
 
   // Pull every batch_action joined with its action_type, department, and
   // (optionally) the assigned stakeholder. One round-trip — small dataset.
+  // expectedDate flows through so we can compute delayDays per open action
+  // for the "Delayed work" filter strip.
   const actions = await db
     .select({
       batchId:        batchActions.batchId,
       status:         batchActions.status,
+      expectedDate:   batchActions.expectedDate,
       sortOrder:      actionTypes.sortOrder,
       actionTypeId:   actionTypes.id,
       actionTypeName: actionTypes.name,
@@ -191,6 +200,20 @@ export async function getActionCenterRows(
     .innerJoin(actionTypes,    eq(batchActions.actionTypeId, actionTypes.id))
     .leftJoin(departments,     eq(batchActions.departmentId, departments.id))
     .leftJoin(stakeholders,    eq(batchActions.assignedStakeholderId, stakeholders.id));
+
+  // Today as midnight epoch ms — reused inside the per-row loop below so
+  // we don't reconstruct the date for every action.
+  const todayMs = (() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  })();
+  function computeDelayDays(expectedDate: string | null | undefined): number {
+    if (!expectedDate) return 0;
+    const exp = new Date(expectedDate).setHours(0, 0, 0, 0);
+    if (exp >= todayMs) return 0;
+    return Math.round((todayMs - exp) / DAY_MS);
+  }
 
   // Bucket actions by batchId for O(1) per-row lookup.
   const byBatch = new Map<number, typeof actions>();
@@ -230,6 +253,7 @@ export async function getActionCenterRows(
         departmentName:  a.departmentName ?? null,
         stakeholderId:   a.stakeholderId ?? null,
         stakeholderName: a.stakeholderName ?? null,
+        delayDays:       computeDelayDays(a.expectedDate),
       });
     }
 

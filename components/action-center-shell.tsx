@@ -13,6 +13,7 @@ import ActionCenterTable from "./action-center-table";
 import ActionCenterBatchList from "./action-center-batch-list";
 import ActionCenterDrawer from "./action-center-drawer";
 import ActionCenterAggregateStrip, { type AggregateFilter } from "./action-center-aggregate-strip";
+import ActionCenterDelayedStrip from "./action-center-delayed-strip";
 import { cn } from "@/lib/utils";
 
 type ViewMode = "stacked" | "side-by-side";
@@ -101,11 +102,23 @@ export default function ActionCenterShell({ rows, totals }: Props) {
   const filtered = useMemo(() => {
     if (aggregateFilter == null) return topLevelFiltered;
     return topLevelFiltered.filter((r) => {
-      switch (aggregateFilter.kind) {
-        case "action":      return r.openActions.some((oa) => oa.actionTypeId === aggregateFilter.id);
-        case "department":  return r.openActions.some((oa) => oa.departmentId === aggregateFilter.id);
-        case "stakeholder": return r.openActions.some((oa) => oa.stakeholderId === aggregateFilter.id);
-      }
+      return r.openActions.some((oa) => {
+        // Identity match (action / department / stakeholder).
+        let identityMatch = false;
+        switch (aggregateFilter.kind) {
+          case "action":      identityMatch = oa.actionTypeId === aggregateFilter.id; break;
+          case "department":  identityMatch = oa.departmentId === aggregateFilter.id; break;
+          case "stakeholder": identityMatch = oa.stakeholderId === aggregateFilter.id; break;
+        }
+        if (!identityMatch) return false;
+        // If the filter came from the Delayed-Work strip, the same OPEN
+        // action must also have exactly that delay-day value. Otherwise
+        // any delay (or none) matches — Outstanding-Work behaviour.
+        if (aggregateFilter.delayDays !== undefined) {
+          return oa.delayDays === aggregateFilter.delayDays;
+        }
+        return true;
+      });
     });
   }, [topLevelFiltered, aggregateFilter]);
 
@@ -130,10 +143,21 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         <Metric label="Fully done"       value={totals.fullyDone} valueColor="text-green-dark" />
       </div>
 
-      {/* Aggregate filter strip — chip rows by Action / Department / Stakeholder.
-          Clicking a chip narrows the batches table below to only batches that
-          have a matching OPEN (waiting/blocked) action. Aggregations are
-          computed over `topLevelFiltered` so counts reflect the current view. */}
+      {/* Delayed-work strip — chips bucketed by HOW MANY DAYS late an open
+          action is, with Action / Department / Stakeholder sub-aggregations
+          inside each delay-day group. Compound filter: chip click narrows
+          to batches whose matching action is exactly that many days late. */}
+      <div className="mb-4">
+        <ActionCenterDelayedStrip
+          rows={topLevelFiltered}
+          active={aggregateFilter}
+          onChange={setAggregateFilter}
+        />
+      </div>
+
+      {/* Outstanding-work strip — same Action / Department / Stakeholder
+          groupings, but over ALL open actions (delayed or not). Useful
+          when ops wants the broader "what's in flight" picture. */}
       <div className="mb-4">
         <ActionCenterAggregateStrip
           rows={topLevelFiltered}
