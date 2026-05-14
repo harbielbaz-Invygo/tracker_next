@@ -62,22 +62,45 @@ for (const envFile of [".env.production", ".env.local", ".env"]) {
   }
   const content = readFileSync(envFile, "utf-8");
   const setFromThisFile: string[] = [];
+  const setButEmpty: string[] = [];
   const skipped: string[] = [];
   for (const line of content.split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/i);
     if (!m) continue;
     const [, key, rawValue] = m;
-    if (process.env[key]) {
+    // Use `in` instead of truthy check so an explicit empty string
+    // counts as "set" — otherwise a higher-priority file with an
+    // empty value (e.g. Vercel masks DATABASE_URL on env pull) would
+    // get silently overridden by a lower-priority file with a real
+    // value. The right behaviour is: if .env.production explicitly
+    // wrote "", treat that as authoritative and surface it clearly.
+    if (key in process.env) {
       skipped.push(key);
       continue;
     }
     const v = rawValue.replace(/^"(.*)"$/s, "$1").replace(/^'(.*)'$/s, "$1");
     process.env[key] = v;
-    setFromThisFile.push(key);
+    if (v === "") setButEmpty.push(key);
+    else setFromThisFile.push(key);
   }
-  console.log(`    ${envFile}: set ${setFromThisFile.length} key(s)` +
-              (setFromThisFile.length ? ` [${setFromThisFile.join(", ")}]` : "") +
-              (skipped.length ? `; skipped ${skipped.length} already-set` : ""));
+  const parts: string[] = [];
+  if (setFromThisFile.length) parts.push(`set ${setFromThisFile.length} key(s) [${setFromThisFile.join(", ")}]`);
+  if (setButEmpty.length)     parts.push(`set EMPTY ${setButEmpty.length} key(s) [${setButEmpty.join(", ")}]`);
+  if (skipped.length)         parts.push(`skipped ${skipped.length} already-set`);
+  console.log(`    ${envFile}: ${parts.join("; ") || "no changes"}`);
+}
+// Specifically warn when DATABASE_URL came in empty — the common
+// Vercel-env-pull-masks-sensitive-vars trap. Tell the user how to
+// fix without having to dig through the script's output.
+if (process.env.DATABASE_URL === "") {
+  console.error("\n❌ DATABASE_URL was loaded as an empty string.");
+  console.error("   This usually means Vercel masked the value during `env pull`.");
+  console.error("   Fix: grab the real value from Vercel → Settings → Environment Variables");
+  console.error("        (click the eye icon to reveal), then in PowerShell:");
+  console.error("            $env:DATABASE_URL = 'libsql://your-db.turso.io'");
+  console.error("            $env:TURSO_AUTH_TOKEN = 'eyJ…'");
+  console.error("            npx tsx scripts/migrate-vin-stages.ts\n");
+  process.exit(1);
 }
 // Spot-check: is DATABASE_URL actually present after env loading?
 if (!process.env.DATABASE_URL) {
