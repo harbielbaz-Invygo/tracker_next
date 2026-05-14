@@ -21,13 +21,54 @@
  * Local run:
  *     npx tsx scripts/migrate-vin-stages.ts
  *
- * Production (Turso) run — set env first so the script targets prod:
- *     DATABASE_URL=libsql://your-db.turso.io \
- *     TURSO_AUTH_TOKEN=eyJ… \
+ * Production (Turso) run — recommended:
+ *     npx vercel env pull .env.production --environment=production
  *     npx tsx scripts/migrate-vin-stages.ts
+ *   (The script auto-loads `.env.production` if it exists, so the
+ *   second command is enough — no need to copy-paste secrets into
+ *   the shell.)
  *
  * Safe to run multiple times; each step is idempotent.
  */
+import { readFileSync, existsSync } from "node:fs";
+
+// Auto-load env so the script targets the right DB. Order, first wins:
+//   1. process.env (already set in the shell)
+//   2. .env.production  (pulled from Vercel — convenient for prod migrations)
+//   3. .env.local
+//   4. .env
+// This matches drizzle.config.ts but adds .env.production so the
+// `vercel env pull` workflow lands here without manual var copy-paste.
+for (const envFile of [".env.production", ".env.local", ".env"]) {
+  if (!existsSync(envFile)) continue;
+  const content = readFileSync(envFile, "utf-8");
+  for (const line of content.split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/i);
+    if (!m) continue;
+    const [, key, rawValue] = m;
+    if (process.env[key]) continue; // earlier wins
+    const v = rawValue.replace(/^"(.*)"$/s, "$1").replace(/^'(.*)'$/s, "$1");
+    process.env[key] = v;
+  }
+}
+
+// Fail FAST on the common foot-gun: pasting a placeholder like
+// `libsql://<your-db>.turso.io` instead of the real value. Without
+// this guard, the libsql client tries to parse the URL, encodes the
+// angle brackets, and throws a confusing ERR_INVALID_URL deep in
+// node:internal.
+const _dbUrl = process.env.DATABASE_URL ?? "";
+if (/<|>/.test(_dbUrl)) {
+  // eslint-disable-next-line no-console
+  console.error("\n❌ DATABASE_URL still contains placeholder characters (< or >):");
+  console.error(`   ${_dbUrl}`);
+  console.error("\nReplace <your-db> and <your-turso-token> with the actual values.\n");
+  console.error("Easiest path:");
+  console.error("   npx vercel env pull .env.production --environment=production");
+  console.error("   npx tsx scripts/migrate-vin-stages.ts\n");
+  process.exit(1);
+}
+
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { vinChaseStages, batchVinStages, batches } from "@/lib/db/schema";
