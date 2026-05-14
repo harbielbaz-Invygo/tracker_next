@@ -124,6 +124,13 @@ export const batches = sqliteTable("batches", {
 
   // Cities
   appDisplayCities:           text("app_display_cities"),  // CSV
+  /**
+   * @deprecated for multi-leg batches — see `batch_delivery_legs`.
+   * Kept for back-compat / display when only one leg exists.
+   * Single-leg batches still populate this; multi-leg batches set it
+   * to a comma-joined hint (e.g. "Riyadh, Khobar") for fast filtering
+   * but the legs table is the source of truth for per-city quantities.
+   */
   dealerReceivingCity:        text("dealer_receiving_city"),
   requiresInterCityTransit:   integer("requires_inter_city_transit", { mode: "boolean" })
                               .default(false),
@@ -182,6 +189,43 @@ export const batches = sqliteTable("batches", {
   byPoNumber:  index("batches_po_number_idx").on(t.poNumber),
   byLifecycle: index("batches_lifecycle_idx").on(t.lifecycleState),
   byStage:     index("batches_stage_idx").on(t.currentStage),
+}));
+
+// ─────────────────────────────────────────────────────────
+// Batch delivery legs — per-city breakdown of a batch's quantity.
+//
+// Replaces the single-city `batches.dealer_receiving_city` model for
+// newly-grouped batches. Multiple legs under one batch mean the same
+// `(po_number, model, year, availability_date, commercial_terms)` cohort
+// is being delivered to different cities — typical when one PO line item
+// is split across destinations.
+//
+// `batches.requested_quantity` is the SUM across legs (kept on the
+// parent row for fast filtering). Legs are the source of truth for
+// per-city quantities + per-city delivery confirmation.
+//
+// `batches.dealer_receiving_city` stays for back-compat / display when
+// only one leg exists, but the legs table is canonical.
+// ─────────────────────────────────────────────────────────
+export const batchDeliveryLegs = sqliteTable("batch_delivery_legs", {
+  id:                  integer("id").primaryKey({ autoIncrement: true }),
+  batchId:             integer("batch_id").notNull()
+                         .references(() => batches.id, { onDelete: "cascade" }),
+  /** Destination city for this leg (e.g. "Riyadh"). */
+  city:                text("city").notNull(),
+  /** Cars to deliver to this city. */
+  requestedQuantity:   integer("requested_quantity").notNull(),
+  /**
+   * Cars actually delivered to this city. Captured at batch close via
+   * the Car Delivery modal — per-leg breakdown lets ops record partial
+   * deliveries cleanly (e.g. 3/3 to Riyadh, 1/2 to Khobar).
+   */
+  deliveredQuantity:   integer("delivered_quantity").default(0),
+  /** Optional per-leg note (transit problems, address issues, etc.). */
+  notes:               text("notes"),
+  createdAt:           text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
+}, (t) => ({
+  byBatch: index("batch_delivery_legs_batch_idx").on(t.batchId),
 }));
 
 // ─────────────────────────────────────────────────────────
@@ -488,3 +532,4 @@ export type ActionType        = typeof actionTypes.$inferSelect;
 export type ActionDependency  = typeof actionDependencies.$inferSelect;
 export type BatchAction       = typeof batchActions.$inferSelect;
 export type BatchDateRevision = typeof batchDateRevisions.$inferSelect;
+export type BatchDeliveryLeg  = typeof batchDeliveryLegs.$inferSelect;
