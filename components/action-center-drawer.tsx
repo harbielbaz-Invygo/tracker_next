@@ -15,7 +15,7 @@
  *     auto-unblock cascade on the server. The drawer re-fetches once on
  *     each successful mutation to reflect any cascade promotions.
  */
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useState } from "react";
 import type { ActionDetail, DrawerData } from "@/lib/action-center-data";
 import { cn } from "@/lib/utils";
 
@@ -150,7 +150,19 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
           onShifted={() => { refresh(); onMutation?.(); }}
         />
       )}
-      <ConfidenceRow data={data} onSaved={() => { refresh(); onMutation?.(); }} disabled={!!data.closedAt} />
+      {/* Drawer body order:
+            1. Car Delivery  — closing action surfaces FIRST so it's
+               always one click away. Hidden when the batch is closed.
+            2. VIN chase cluster — dealer-side execution chain.
+            3. Internal phase cluster — admin / internal work.
+          (Cluster order is handled inside ActionsList.) Ops Confidence
+          row removed for now per ops feedback. */}
+      {!data.closedAt && (
+        <CarDeliveryPanel
+          data={data}
+          onDelivered={() => { refresh(); onMutation?.(); }}
+        />
+      )}
       <ActionsList
         data={data}
         actionsOverride={actionsForList}
@@ -159,12 +171,6 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
         onMutated={() => { refresh(); onMutation?.(); }}
         disabled={!!data.closedAt}
       />
-      {!data.closedAt && (
-        <CarDeliveryPanel
-          data={data}
-          onDelivered={() => { refresh(); onMutation?.(); }}
-        />
-      )}
     </div>
   );
 }
@@ -1181,97 +1187,11 @@ function CancelModal({
   );
 }
 
-// ──────────────────────────────────────────────────────────────────
-// Confidence row
-// ──────────────────────────────────────────────────────────────────
-
-function ConfidenceRow({
-  data, onSaved, disabled = false,
-}: {
-  data: DrawerData;
-  onSaved: () => void;
-  disabled?: boolean;
-}) {
-  const [draft, setDraft] = useState<number>(data.operationsConfidence ?? 50);
-  const [pending, startTransition] = useTransition();
-  const [savedNow, setSavedNow] = useState(false);
-
-  // Reset slider when the drawer switches to a new batch.
-  useEffect(() => {
-    setDraft(data.operationsConfidence ?? 50);
-  }, [data.batchId, data.operationsConfidence]);
-
-  function save() {
-    startTransition(async () => {
-      try {
-        const res = await fetch("/api/batch-confidence", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ batchId: data.batchId, value: draft }),
-        });
-        if (!res.ok) throw new Error(await res.text());
-        setSavedNow(true);
-        setTimeout(() => setSavedNow(false), 1400);
-        onSaved();
-      } catch (e) {
-        alert(`Could not save confidence: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    });
-  }
-
-  const dirty = draft !== (data.operationsConfidence ?? 50);
-  const lockedAt = data.operationsConfidenceAtLock;
-  const partnership = data.partnershipConfidence;
-  const partnershipLock = data.partnershipConfidenceAtLock;
-
-  return (
-    <div className="bg-ink-50 border border-ink-200 rounded-md p-3 mb-5">
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
-        <p className="text-xs font-medium text-ink-600 uppercase tracking-wide">
-          Ops Confidence
-        </p>
-        {lockedAt != null && (
-          <p className="text-[0.7rem] text-ink-500">
-            🔒 Locked at <span className="tabular-nums font-medium text-midnight">{Math.round(lockedAt)}%</span>
-          </p>
-        )}
-      </div>
-      <div className="flex items-center gap-3">
-        <input
-          type="range" min={0} max={100} step={5}
-          value={draft}
-          onChange={(e) => setDraft(parseInt(e.target.value, 10))}
-          aria-label="Ops confidence"
-          className="flex-1 accent-brand"
-          disabled={disabled}
-        />
-        <span className={cn(
-          "tabular-nums font-bold text-sm w-12 text-right",
-          draft >= 70 ? "text-green-dark" : draft >= 40 ? "text-gold-dark" : "text-flame-dark",
-        )}>
-          {draft}%
-        </span>
-        <button
-          type="button"
-          onClick={save}
-          disabled={!dirty || pending || disabled}
-          className="btn btn-primary text-xs px-3"
-          aria-live="polite"
-        >
-          {savedNow ? "✓ Saved" : pending ? "Saving…" : lockedAt == null ? "Lock & save" : "Save"}
-        </button>
-      </div>
-      {partnership != null && (
-        <p className="text-[0.7rem] text-ink-500 mt-2">
-          Partnership confidence: <span className="font-medium text-midnight tabular-nums">{Math.round(partnership)}%</span>
-          {partnershipLock != null && (
-            <> · locked at <span className="tabular-nums">{Math.round(partnershipLock)}%</span></>
-          )}
-        </p>
-      )}
-    </div>
-  );
-}
+// Ops Confidence row removed per user feedback. The slider + the
+// /api/batch-confidence endpoint still exist in case we want to bring
+// it back — restore by re-rendering <ConfidenceRow .../> in the
+// drawer main return. (Component intentionally deleted to keep the
+// file lean while it's not in use.)
 
 // ──────────────────────────────────────────────────────────────────
 // Actions list
@@ -1337,12 +1257,15 @@ function ActionsList({
   // picked VIN-chase actions at intake) it's skipped.
   return (
     <div className="space-y-6">
-      {internalActions.length > 0 && (
+      {/* User-requested order: VIN chase first (dealer-side execution),
+          Internal phase second (admin work). Both clusters are now
+          collapsible — click the header to toggle. */}
+      {vinChaseActions.length > 0 && (
         <ClusterSection
-          title="🏢 Internal phase"
-          subtitle="Specs · Pricing · SKU — runs in parallel"
-          accent="brand"
-          actions={internalActions}
+          title="🔑 VIN chase"
+          subtitle="Linear chain — once VIN is in hand, the car moves toward the showroom"
+          accent="gold"
+          actions={vinChaseActions}
           alertsByActionId={alertsByActionId}
           onMutated={onMutated}
           layout={layout}
@@ -1350,12 +1273,12 @@ function ActionsList({
           lifecycleState={data.lifecycleState}
         />
       )}
-      {vinChaseActions.length > 0 && (
+      {internalActions.length > 0 && (
         <ClusterSection
-          title="🔑 VIN chase"
-          subtitle="Linear chain — once VIN is in hand, the car moves toward the showroom"
-          accent="gold"
-          actions={vinChaseActions}
+          title="🏢 Internal phase"
+          subtitle="Specs · Pricing · SKU — runs in parallel"
+          accent="brand"
+          actions={internalActions}
           alertsByActionId={alertsByActionId}
           onMutated={onMutated}
           layout={layout}
@@ -1401,15 +1324,40 @@ function ClusterSection({
   const pending = groups.waiting.length + groups.blocked.length;
   const done = groups.done.length;
 
+  // Each cluster is independently collapsible. Default expanded —
+  // when ops opens the drawer they're here to act on actions. They
+  // can collapse a cluster to focus on the other (e.g. collapse
+  // Internal phase once it's all done to declutter VIN-chase view).
+  const [expanded, setExpanded] = useState(true);
+
   return (
     <section className={cn("rounded-md border-2", accentBorder, accentBg)}>
-      <header className="px-3 py-2 border-b border-current/15">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="w-full text-left px-3 py-2 border-b border-current/15
+                   focus-visible:outline-2 focus-visible:outline-brand
+                   focus-visible:outline-offset-[-2px]
+                   hover:bg-white/30 transition-colors rounded-t-md"
+        title={expanded ? "Click to collapse" : "Click to expand"}
+      >
         <div className="flex items-baseline justify-between gap-3">
-          <div>
-            <h3 className={cn("text-sm font-bold", accentText)}>{title}</h3>
-            <p className="text-[0.7rem] text-ink-500 leading-snug">{subtitle}</p>
+          <div className="flex items-baseline gap-2 min-w-0">
+            <span
+              aria-hidden="true"
+              className={cn("text-xs leading-none shrink-0", accentText)}
+            >
+              {expanded ? "▾" : "▸"}
+            </span>
+            <div className="min-w-0">
+              <h3 className={cn("text-sm font-bold", accentText)}>{title}</h3>
+              {expanded && (
+                <p className="text-[0.7rem] text-ink-500 leading-snug">{subtitle}</p>
+              )}
+            </div>
           </div>
-          <p className="text-[0.7rem] text-ink-600 tabular-nums whitespace-nowrap">
+          <p className="text-[0.7rem] text-ink-600 tabular-nums whitespace-nowrap shrink-0">
             {done}/{total} done
             {pending > 0 && (
               <>
@@ -1421,18 +1369,20 @@ function ClusterSection({
             )}
           </p>
         </div>
-      </header>
+      </button>
 
-      <div className="p-3">
-        <ClusterBody
-          groups={groups}
-          alertsByActionId={alertsByActionId}
-          onMutated={onMutated}
-          layout={layout}
-          disabled={disabled}
-          lifecycleState={lifecycleState}
-        />
-      </div>
+      {expanded && (
+        <div className="p-3">
+          <ClusterBody
+            groups={groups}
+            alertsByActionId={alertsByActionId}
+            onMutated={onMutated}
+            layout={layout}
+            disabled={disabled}
+            lifecycleState={lifecycleState}
+          />
+        </div>
+      )}
     </section>
   );
 }
