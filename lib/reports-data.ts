@@ -16,7 +16,7 @@
 import { eq, asc } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  batchActions, actionTypes, departments, stakeholders, batches, dealers, batchColorMatrix, batchDateRevisions,
+  batchActions, actionTypes, departments, stakeholders, batches, dealers, batchColorMatrix, batchDateRevisions, batchDeliveryLegs,
 } from "@/lib/db/schema";
 import { daysBetween } from "@/lib/expected-date";
 
@@ -208,6 +208,44 @@ export interface PerformanceReport {
   dealerReliability: DealerReliabilityRow[];
   /** Customer impact from availability date shifts (item 4). */
   customerImpact: CustomerImpactReport;
+  /**
+   * Per-city reliability (Phase δ). Drawn from batch_delivery_legs joined
+   * to their parent batch. Empty array when no multi-leg batches exist yet
+   * — the lens is most useful once Phase β has been running for a while.
+   */
+  cityReliability: CityReliabilityRow[];
+}
+
+/**
+ * One row per delivery city across the whole dataset. Joined from
+ * batch_delivery_legs → batches, so date metrics (variance, on-time
+ * rate) inherit the parent batch's promised vs closedAt date.
+ */
+export interface CityReliabilityRow {
+  city: string;
+  /** Total batches this city is a leg of (delivered + open + cancelled). */
+  totalBatches: number;
+  /** Batches delivered to this city (closureReason="delivered"). */
+  deliveredBatches: number;
+  /** Cars requested to this city across all batches. */
+  carsRequested: number;
+  /** Cars actually delivered to this city. */
+  carsDelivered: number;
+  /**
+   * sum(deliveredQuantity) / sum(requestedQuantity) × 100, across all
+   * legs for this city. Null when no cars requested.
+   */
+  qtyFulfillmentRate: number | null;
+  /**
+   * % of delivered batches in this city where closedAt ≤ promisedDate.
+   * Null when no deliveries to this city yet.
+   */
+  dateReliabilityRate: number | null;
+  /**
+   * Mean (closedAt − promisedDate) in days across this city's delivered
+   * batches. Negative = early. Null when no deliveries.
+   */
+  avgDateVarianceDays: number | null;
 }
 
 interface AggregateAccumulator {
@@ -567,6 +605,95 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
   // Sort: dealers with most batches first (most relevant at top).
   dealerReliability.sort((a, b) => b.totalBatches - a.totalBatches);
 
+  // ── City reliability (Phase δ) ─────────────────────────────────────
+  // Aggregates batch_delivery_legs joined with their parent batch so the
+  // per-city lens picks up the parent's promised vs closedAt date.
+  // Defensive: legs table may be missing on older DBs that pre-date α.
+  type CityAcc = {
+    totalBatches: Set<number>;
+    deliveredBatches: Set<number>;
+    carsRequested: number;
+    carsDelivered: number;
+    /** Signed variances for delivered batches (closedAt − promised). */
+    dateVariances: number[];
+  };
+  const cityAcc = new Map<string, CityAcc>();
+  function ensureCity(city: string): CityAcc {
+    if (!cityAcc.has(city)) {
+      cityAcc.set(city, {
+        totalBatches: new Set(),
+        deliveredBatches: new Set(),
+        carsRequested: 0,
+        carsDelivered: 0,
+        dateVariances: [],
+      });
+    }
+    return cityAcc.get(city)!;
+  }
+  let legRows: {
+    city: string;
+    requestedQuantity: number;
+    deliveredQuantity: number | null;
+    batchId: number;
+    closedAt: string | null;
+    closureReason: string | null;
+    promisedDate: string;
+  }[] = [];
+  try {
+    legRows = await db
+      .select({
+        city:               batchDeliveryLegs.city,
+        requestedQuantity:  batchDeliveryLegs.requestedQuantity,
+        deliveredQuantity:  batchDeliveryLegs.deliveredQuantity,
+        batchId:            batches.id,
+        closedAt:           batches.closedAt,
+        closureReason:      batches.closureReason,
+        promisedDate:       batches.dealerPromisedDeliveryDate,
+      })
+      .from(batchDeliveryLegs)
+      .innerJoin(batches, eq(batches.id, batchDeliveryLegs.batchId));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such table/i.test(msg)) throw err;
+    // eslint-disable-next-line no-console
+    console.warn("[reports] batch_delivery_legs missing — city reliability lens shows empty. Run the Phase α migration.");
+  }
+
+  for (const r of legRows) {
+    const acc = ensureCity(r.city);
+    acc.totalBatches.add(r.batchId);
+    acc.carsRequested += r.requestedQuantity;
+    acc.carsDelivered += r.deliveredQuantity ?? 0;
+    if (r.closedAt && r.closureReason === "delivered") {
+      acc.deliveredBatches.add(r.batchId);
+      acc.dateVariances.push(daysBetween(r.closedAt, r.promisedDate));
+    }
+  }
+
+  const cityReliability: CityReliabilityRow[] = Array.from(cityAcc.entries()).map(([city, acc]) => {
+    const dateReliabilityRate = acc.deliveredBatches.size > 0
+      ? Math.round((acc.dateVariances.filter((v) => v <= 0).length / acc.deliveredBatches.size) * 100)
+      : null;
+    const avgDateVarianceDays = acc.dateVariances.length > 0
+      ? Math.round((acc.dateVariances.reduce((a, b) => a + b, 0) / acc.dateVariances.length) * 10) / 10
+      : null;
+    const qtyFulfillmentRate = acc.carsRequested > 0
+      ? Math.round((acc.carsDelivered / acc.carsRequested) * 1000) / 10
+      : null;
+    return {
+      city,
+      totalBatches:      acc.totalBatches.size,
+      deliveredBatches:  acc.deliveredBatches.size,
+      carsRequested:     acc.carsRequested,
+      carsDelivered:     acc.carsDelivered,
+      qtyFulfillmentRate,
+      dateReliabilityRate,
+      avgDateVarianceDays,
+    };
+  });
+  // Most-active cities at top.
+  cityReliability.sort((a, b) => b.totalBatches - a.totalBatches);
+
   // ── Customer impact (item 4) ───────────────────────────────────────
   // A batch is "affected" when its effective availability date lands
   // after the dealer-promised date. We evaluate both delivered batches
@@ -697,5 +824,6 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
     stakeholders: rankBy(stakeholdersList),
     dealerReliability,
     customerImpact,
+    cityReliability,
   };
 }
