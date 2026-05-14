@@ -41,12 +41,16 @@ export async function POST(req: NextRequest) {
   if (!gate.ok) return gate.response;
 
   /**
-   * Body supports three flavours of mutation (each combinable with the others):
-   *   - Status flip (cascades, auto-close, auto-shift): { batchActionId, newStatus }
-   *   - Plan date patch:                                { batchActionId, newExpectedDate }
-   *   - Manual completion timestamp:                    { batchActionId, newStatus:"done", newCompletedAt }
+   * Body supports several mutation flavours:
+   *   - Add a new batch_action:    { op: "add", batchId, actionTypeId }
+   *   - Status flip:               { batchActionId, newStatus }
+   *   - Plan date patch:           { batchActionId, newExpectedDate }
+   *   - Manual completion stamp:   { batchActionId, newStatus:"done", newCompletedAt }
    */
   let body: {
+    op?: string;
+    batchId?: number;
+    actionTypeId?: number;
     batchActionId?: number;
     newStatus?: Status;
     newExpectedDate?: string | null;
@@ -56,6 +60,73 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  // ── Add a new batch_action to an existing batch ──────────────────
+  // Used by the VIN-chase stepper when ops clicks "+ Add" on a
+  // template step that isn't yet attached to this batch. The new row
+  // is created with status="waiting" + expectedDate computed from the
+  // action_type's offsetDays + offsetAnchor (same logic as intake).
+  if (body.op === "add") {
+    const batchId = Number(body.batchId);
+    const actionTypeId = Number(body.actionTypeId);
+    if (!Number.isFinite(batchId) || !Number.isFinite(actionTypeId)) {
+      return NextResponse.json(
+        { error: "op=add requires batchId and actionTypeId" },
+        { status: 400 },
+      );
+    }
+    // Pre-check: don't double-create.
+    const existing = await db.select({ id: batchActions.id })
+      .from(batchActions)
+      .where(and(
+        eq(batchActions.batchId, batchId),
+        eq(batchActions.actionTypeId, actionTypeId),
+      ))
+      .limit(1);
+    if (existing.length > 0) {
+      return NextResponse.json(
+        { error: `Batch ${batchId} already has action_type ${actionTypeId}`, batchActionId: existing[0].id },
+        { status: 409 },
+      );
+    }
+    // Pull batch + action_type for expectedDate computation.
+    const [type] = await db.select({
+      id:               actionTypes.id,
+      offsetDays:       actionTypes.offsetDays,
+      offsetAnchor:     actionTypes.offsetAnchor,
+      defaultDeptId:    actionTypes.defaultDepartmentId,
+    }).from(actionTypes).where(eq(actionTypes.id, actionTypeId)).limit(1);
+    if (!type) {
+      return NextResponse.json({ error: `action_type ${actionTypeId} not found` }, { status: 404 });
+    }
+    const [batchRow] = await db.select({
+      requestedAt: batches.requestedAt,
+      vin:         batches.vinReceivingDate,
+      promised:    batches.dealerPromisedDeliveryDate,
+    }).from(batches).where(eq(batches.id, batchId)).limit(1);
+    if (!batchRow) {
+      return NextResponse.json({ error: `batch ${batchId} not found` }, { status: 404 });
+    }
+    const expectedDate = computeExpectedDate({
+      anchor:     type.offsetAnchor,
+      offsetDays: type.offsetDays,
+      submission: batchRow.requestedAt,
+      vin:        batchRow.vin,
+      promised:   batchRow.promised,
+    });
+    const [inserted] = await db.insert(batchActions).values({
+      batchId,
+      actionTypeId,
+      departmentId: type.defaultDeptId ?? undefined,
+      status:       "waiting",
+      expectedDate: expectedDate ?? undefined,
+    }).returning({ id: batchActions.id });
+    return NextResponse.json({
+      ok: true,
+      batchActionId: inserted.id,
+      expectedDate,
+    });
   }
 
   const id = Number(body.batchActionId);
