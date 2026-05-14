@@ -14,7 +14,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
-  batches, dealers, batchActions, actionDependencies, actionTypes,
+  batches, dealers, batchActions, actionDependencies, actionTypes, batchDeliveryLegs,
 } from "@/lib/db/schema";
 import { makeBatchCode } from "@/lib/utils";
 import { getLeadTimeDays } from "@/lib/rules";
@@ -192,154 +192,240 @@ export async function POST(req: NextRequest) {
     it.splits.some((s) => (s.opsExpectedDate || s.date) > s.date),
   ) ? "at_risk" : "feasible";
 
-  type CreatedBatch = { id: number; batchCode: string; modelYear: string; city: string; quantity: number };
+  // ── Group items × splits into batches by the agreed key ──────────
+  // Decided in design chat (Q1-Q8): one batch per
+  //   (po_number, model, year, availability_date,
+  //    unit_price, tax_pct, buy_back_rate, contract_length_months).
+  // Multiple splits with different cities under the same key become
+  // sibling LEGS under one batch (batch_delivery_legs table).
+  //
+  // Commercial-term mismatches block the merge — same model + date but
+  // different unit price = two separate batches.
+  type Group = {
+    /** Stable representative for batch-level fields. */
+    item: typeof body.items[number];
+    /** Availability date for this group (shared across all legs). */
+    availabilityDate: string;
+    /** Legs: per-city qty. May contain ONE city (no merge happened). */
+    legs: { city: string; quantity: number; opsExpectedDate: string }[];
+  };
+  const groupsByKey = new Map<string, Group>();
+  for (const item of body.items) {
+    for (const split of item.splits) {
+      // Key fields per design Q3: model + year + date + all commercial terms.
+      // po_number is already implicit (one PO per submit).
+      const key = JSON.stringify({
+        m:  item.model,
+        y:  item.year,
+        d:  split.date,
+        up: item.unitPriceSar ?? null,
+        tx: item.taxPct ?? null,
+        bb: item.buyBackRate ?? null,
+        cl: item.contractLengthMonths ?? null,
+      });
+      const existing = groupsByKey.get(key);
+      if (existing) {
+        existing.legs.push({
+          city: split.city,
+          quantity: split.quantity,
+          opsExpectedDate: split.opsExpectedDate,
+        });
+      } else {
+        groupsByKey.set(key, {
+          item,
+          availabilityDate: split.date,
+          legs: [{
+            city: split.city,
+            quantity: split.quantity,
+            opsExpectedDate: split.opsExpectedDate,
+          }],
+        });
+      }
+    }
+  }
+  const groups = Array.from(groupsByKey.values());
+  const groupTotal = groups.length;
+
+  type CreatedBatch = {
+    id: number;
+    batchCode: string;
+    modelYear: string;
+    /** Comma-joined city list for the success summary. */
+    cities: string[];
+    quantity: number;
+    legCount: number;
+  };
 
   // libSQL transactions take an async callback. All inserts/updates
   // inside must be `await`-ed; if any throws, the whole submission rolls
   // back and we never leave half-created batches.
   const created: CreatedBatch[] = await db.transaction(async (tx) => {
     const out: CreatedBatch[] = [];
-    let splitN = 0;
-    for (const item of body.items) {
-      for (const split of item.splits) {
-        splitN++;
-        const batchCode = makeBatchCode({
-          poNumber:   body.po.number,
-          dealerName,
-          splitN,
-          splitTotal,
-          city:       split.city,
-          model:      item.model,
-          qty:        split.quantity,
-        });
-        // Per-batch target PO date — Ops needs `leadTimeDays` before the
-        // split's own promised delivery date.
-        const targetPoDate = isoMinusDays(split.date, leadTimeDays);
-        const [batchRow] = await tx.insert(batches).values({
-          batchCode,
-          dealerId,
-          model: item.model,
-          year:  item.year,
-          category: "Standard",
+    let groupN = 0;
+    for (const group of groups) {
+      groupN++;
+      const { item, availabilityDate, legs } = group;
+      // Sum across legs for the batch-level quantity. Legs are the
+      // source of truth for per-city qty.
+      const totalQty = legs.reduce((sum, l) => sum + l.quantity, 0);
+      // Conservatively take the LATEST opsExpectedDate across legs —
+      // the batch can't be "done" until the slowest leg is done.
+      const opsExpected = legs
+        .map((l) => l.opsExpectedDate)
+        .filter(Boolean)
+        .sort()
+        .at(-1) ?? availabilityDate;
+      // City fields on the batch row: single leg → as-is; multi-leg →
+      // comma-joined for fast filtering. `batch_delivery_legs` is the
+      // source of truth for per-city qty + delivery.
+      const cityLabel = legs.map((l) => l.city).join(", ");
+      const batchCode = makeBatchCode({
+        poNumber:   body.po.number,
+        dealerName,
+        splitN:     groupN,
+        splitTotal: groupTotal,
+        city:       legs[0].city,
+        model:      item.model,
+        qty:        totalQty,
+      });
+      const targetPoDate = isoMinusDays(availabilityDate, leadTimeDays);
 
-          buyBackRate:           item.buyBackRate ?? undefined,
-          contractLengthMonths:  item.contractLengthMonths ?? undefined,
-          colorSummary:          item.colorsRaw ?? undefined,
-          unitPriceSar:          item.unitPriceSar ?? undefined,
-          taxPct:                item.taxPct ?? undefined,
+      const [batchRow] = await tx.insert(batches).values({
+        batchCode,
+        dealerId,
+        model: item.model,
+        year:  item.year,
+        category: "Standard",
 
-          poNumber:    body.po.number,
-          poReference: body.po.reference ?? undefined,
+        buyBackRate:           item.buyBackRate ?? undefined,
+        contractLengthMonths:  item.contractLengthMonths ?? undefined,
+        colorSummary:          item.colorsRaw ?? undefined,
+        unitPriceSar:          item.unitPriceSar ?? undefined,
+        taxPct:                item.taxPct ?? undefined,
 
-          requestedQuantity: split.quantity,
-          requestedAt: today,
-          dealerPromisedDeliveryDate: split.date,
-          targetPoDate,
-          expectedPoDate: body.po.date,
-          actualPoDate:   body.po.date,
-          // Ops's own commitment, separate from the dealer promise. Used
-          // to measure Ops Confidence over time. Falls back to the dealer
-          // date if Ops didn't change it at Intake.
-          currentProjectedDeliveryDate: split.opsExpectedDate || split.date,
+        poNumber:    body.po.number,
+        poReference: body.po.reference ?? undefined,
 
-          appDisplayCities:    split.city,
-          dealerReceivingCity: split.city,
-          requiresInterCityTransit: false,
-          // VIN receiving date is no longer captured at Intake — Ops
-          // sets it later in the Action Center when the dealer commits a VIN date.
-          // Until then, post-VIN actions have a null expectedDate.
-          vinReceivingDate:    null,
+        requestedQuantity: totalQty,
+        requestedAt: today,
+        dealerPromisedDeliveryDate: availabilityDate,
+        targetPoDate,
+        expectedPoDate: body.po.date,
+        actualPoDate:   body.po.date,
+        currentProjectedDeliveryDate: opsExpected || availabilityDate,
 
-          currentStage: "po_issued",
-          lifecycleState: "post_po",
-          feasibilityStatus,
+        appDisplayCities:    cityLabel,
+        dealerReceivingCity: cityLabel,
+        requiresInterCityTransit: legs.length > 1,
+        vinReceivingDate:    null,
 
-          // Ops confirmed at intake that the dealer shared VIN numbers
-          // with the PO PDF. Drives downstream pre-marking of the first
-          // two VIN-chase steps + reduces initial risk score.
-          vinReceivedAtIntake: body.vinReceivedAtIntake ?? false,
+        currentStage: "po_issued",
+        lifecycleState: "post_po",
+        feasibilityStatus,
 
-          notes: body.notes ?? undefined,
-        }).returning({ id: batches.id });
+        vinReceivedAtIntake: body.vinReceivedAtIntake ?? false,
 
-        // Create batch_actions per picked action — same transaction.
-        // Each action's expectedDate is derived from the action_type's
-        // offsetDays + offsetAnchor and the batch's submission, VIN, and
-        // promised dates.
-        for (const a of body.actions) {
-          const status = hasParentDep.has(a.actionTypeId) ? "blocked" : "waiting";
-          const type = typeById.get(a.actionTypeId);
-          // VIN receiving date is captured later in the Action Center, so it's
-          // null at Intake. Vin-anchored actions get a null expected
-          // date here; they fill in once the VIN date is known.
-          const expectedDate = type
-            ? computeExpectedDate({
-                anchor:     type.offsetAnchor,
-                offsetDays: type.offsetDays,
-                submission: today,
-                vin:        null,
-                promised:   split.date,
-              })
-            : null;
-          await tx.insert(batchActions).values({
-            batchId:      batchRow.id,
-            actionTypeId: a.actionTypeId,
-            departmentId: a.departmentId ?? undefined,
-            assignedStakeholderId: a.assignedStakeholderId ?? undefined,
-            status,
-            expectedDate: expectedDate ?? undefined,
-          });
+        notes: body.notes ?? undefined,
+      }).returning({ id: batches.id });
+
+      // ── Write per-city legs ─────────────────────────────────────
+      // Defensive: if the new table is missing (Phase α migration not
+      // applied yet to this DB), warn and continue without legs.
+      // dealerReceivingCity carries the comma-joined fallback already.
+      try {
+        await tx.insert(batchDeliveryLegs).values(
+          legs.map((l) => ({
+            batchId:           batchRow.id,
+            city:              l.city,
+            requestedQuantity: l.quantity,
+            deliveredQuantity: 0,
+          })),
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/no such table/i.test(msg)) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[intake] batch_delivery_legs missing — leg rows skipped. " +
+            "Run the Phase α migration in the Turso shell.",
+          );
+        } else {
+          throw err;
         }
+      }
 
-        // ── VIN-at-intake fork ──────────────────────────────────────
-        // When ops confirmed at intake that the dealer shared VIN
-        // numbers with the PO, ensure the first two VIN-chase steps
-        // (Send Dealer Confirmation Email + VIN) exist on this batch
-        // and are marked done at the PO date. If ops already picked
-        // either at intake, we UPDATE the row we just inserted; if
-        // not, we INSERT a fresh done row.
-        if (body.vinReceivedAtIntake) {
-          const pickedIds = new Set(body.actions.map((a) => a.actionTypeId));
-          const completedAtIso = `${body.po.date}T12:00:00Z`;
-          for (const typeId of [vinPreMarkTypeIds.email, vinPreMarkTypeIds.vin]) {
-            if (typeId == null) continue;
-            if (pickedIds.has(typeId)) {
-              await tx.update(batchActions)
-                .set({
-                  status: "done",
-                  completedAt: completedAtIso,
-                  expectedDate: body.po.date,
-                })
-                .where(and(
-                  eq(batchActions.batchId, batchRow.id),
-                  eq(batchActions.actionTypeId, typeId),
-                ));
-            } else {
-              await tx.insert(batchActions).values({
-                batchId:      batchRow.id,
-                actionTypeId: typeId,
-                status:       "done",
-                completedAt:  completedAtIso,
-                expectedDate: body.po.date,
-                notes:        "Auto-completed: VIN received with the PO at intake.",
-              });
-            }
-          }
-        }
-
-        out.push({
-          id: batchRow.id,
-          batchCode,
-          modelYear: `${item.model} ${item.year}`,
-          city: split.city,
-          quantity: split.quantity,
+      // ── Per-picked-action batch_actions (one set per BATCH, not per leg) ──
+      for (const a of body.actions) {
+        const status = hasParentDep.has(a.actionTypeId) ? "blocked" : "waiting";
+        const type = typeById.get(a.actionTypeId);
+        const expectedDate = type
+          ? computeExpectedDate({
+              anchor:     type.offsetAnchor,
+              offsetDays: type.offsetDays,
+              submission: today,
+              vin:        null,
+              promised:   availabilityDate,
+            })
+          : null;
+        await tx.insert(batchActions).values({
+          batchId:      batchRow.id,
+          actionTypeId: a.actionTypeId,
+          departmentId: a.departmentId ?? undefined,
+          assignedStakeholderId: a.assignedStakeholderId ?? undefined,
+          status,
+          expectedDate: expectedDate ?? undefined,
         });
       }
+
+      // ── VIN-at-intake pre-mark (unchanged) ──────────────────────
+      if (body.vinReceivedAtIntake) {
+        const pickedIds = new Set(body.actions.map((a) => a.actionTypeId));
+        const completedAtIso = `${body.po.date}T12:00:00Z`;
+        for (const typeId of [vinPreMarkTypeIds.email, vinPreMarkTypeIds.vin]) {
+          if (typeId == null) continue;
+          if (pickedIds.has(typeId)) {
+            await tx.update(batchActions)
+              .set({
+                status: "done",
+                completedAt: completedAtIso,
+                expectedDate: body.po.date,
+              })
+              .where(and(
+                eq(batchActions.batchId, batchRow.id),
+                eq(batchActions.actionTypeId, typeId),
+              ));
+          } else {
+            await tx.insert(batchActions).values({
+              batchId:      batchRow.id,
+              actionTypeId: typeId,
+              status:       "done",
+              completedAt:  completedAtIso,
+              expectedDate: body.po.date,
+              notes:        "Auto-completed: VIN received with the PO at intake.",
+            });
+          }
+        }
+      }
+
+      out.push({
+        id: batchRow.id,
+        batchCode,
+        modelYear: `${item.model} ${item.year}`,
+        cities: legs.map((l) => l.city),
+        quantity: totalQty,
+        legCount: legs.length,
+      });
     }
     return out;
   });
 
-  return NextResponse.json({ ok: true, created });
+  return NextResponse.json({
+    ok: true,
+    created,
+    /** Useful for the success-summary UI to say "N splits grouped into M batches". */
+    inputSplits: splitTotal,
+    groupedBatches: groupTotal,
+  });
 }
 
 // ── Validation ─────────────────────────────────────────────────────
