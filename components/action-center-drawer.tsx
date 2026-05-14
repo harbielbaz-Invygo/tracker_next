@@ -1362,6 +1362,7 @@ function ActionsList({
           variant="stepper"
           actions={vinChaseActions}
           template={data.vinChaseTemplate}
+          batchId={data.batchId}
           alertsByActionId={alertsByActionId}
           onMutated={onMutated}
           layout={layout}
@@ -1392,7 +1393,7 @@ function ActionsList({
  * Waiting/Blocked/Done/Skipped sub-grouping inside.
  */
 function ClusterSection({
-  title, subtitle, accent, variant, actions, template, alertsByActionId, onMutated, layout, disabled, lifecycleState,
+  title, subtitle, accent, variant, actions, template, batchId, alertsByActionId, onMutated, layout, disabled, lifecycleState,
 }: {
   title: string;
   subtitle: string;
@@ -1414,6 +1415,8 @@ function ClusterSection({
    * kanban variant. Defaults to [] for safety.
    */
   template?: DrawerData["vinChaseTemplate"];
+  /** Needed by the stepper to add template steps not yet on this batch. */
+  batchId?: number;
   alertsByActionId: Map<number, ActiveAlert[]>;
   onMutated: () => void;
   layout: "vertical" | "kanban";
@@ -1497,6 +1500,7 @@ function ClusterSection({
             <VinChaseStepper
               actions={actions}
               template={template ?? []}
+              batchId={batchId}
               onMutated={onMutated}
               disabled={disabled}
             />
@@ -1602,7 +1606,7 @@ function ClusterBody({
 // past them to the next.
 
 function VinChaseStepper({
-  actions, template, onMutated, disabled,
+  actions, template, batchId, onMutated, disabled,
 }: {
   actions: ActionDetail[];
   /**
@@ -1612,6 +1616,12 @@ function VinChaseStepper({
    * subset is attached to this batch.
    */
   template: DrawerData["vinChaseTemplate"];
+  /**
+   * Needed so a missing template step can be added to this batch
+   * on demand via op:"add" — the only way a "+ Add" button can know
+   * which batch to attach to.
+   */
+  batchId?: number;
   onMutated: () => void;
   disabled: boolean;
 }) {
@@ -1629,26 +1639,29 @@ function VinChaseStepper({
     label: string;
     doneLabel: string;
     action: ActionDetail | null; // null = template step with no batch_action yet
+    actionTypeId: number | null; // present for template-driven steps so we can "+ Add"
     sortOrder: number;
   };
   const steps: Step[] = template.length > 0
     ? template.map((t, i) => ({
-        key:        `tpl-${t.actionTypeId}`,
-        stepNumber: i + 1,
-        label:      t.waitingLabel,
-        doneLabel:  t.doneLabel,
-        action:     actionByTypeId.get(t.actionTypeId) ?? null,
-        sortOrder:  t.sortOrder,
+        key:          `tpl-${t.actionTypeId}`,
+        stepNumber:   i + 1,
+        label:        t.waitingLabel,
+        doneLabel:    t.doneLabel,
+        action:       actionByTypeId.get(t.actionTypeId) ?? null,
+        actionTypeId: t.actionTypeId,
+        sortOrder:    t.sortOrder,
       }))
     : [...actions]
         .sort((a, b) => a.sortOrder - b.sortOrder)
         .map((a, i) => ({
-          key:        `act-${a.id}`,
-          stepNumber: i + 1,
-          label:      a.waitingLabel,
-          doneLabel:  a.doneLabel,
-          action:     a,
-          sortOrder:  a.sortOrder,
+          key:          `act-${a.id}`,
+          stepNumber:   i + 1,
+          label:        a.waitingLabel,
+          doneLabel:    a.doneLabel,
+          action:       a,
+          actionTypeId: a.actionTypeId,
+          sortOrder:    a.sortOrder,
         }));
 
   // First step whose action is not-done and not-skipped is "current".
@@ -1677,6 +1690,8 @@ function VinChaseStepper({
               label={s.label}
               doneLabel={s.doneLabel}
               action={s.action}
+              actionTypeId={s.actionTypeId}
+              batchId={batchId}
               state={
                 isDone     ? "done"
                 : isSkipped ? "skipped"
@@ -1696,13 +1711,17 @@ function VinChaseStepper({
 }
 
 function VinStepperRow({
-  stepNumber, label, doneLabel, action, state, missing, onMutated, disabled, showActions,
+  stepNumber, label, doneLabel, action, actionTypeId, batchId, state, missing, onMutated, disabled, showActions,
 }: {
   stepNumber: number;
   label: string;
   doneLabel: string;
   /** Underlying batch_action, or null for template steps not attached to this batch. */
   action: ActionDetail | null;
+  /** action_type id — populated for template-driven steps; needed for the "+ Add" affordance. */
+  actionTypeId: number | null;
+  /** Batch id — needed so "+ Add" knows where to attach the new batch_action. */
+  batchId?: number;
   state: "done" | "current" | "upcoming" | "skipped";
   /** True when this step exists in the template but has no batch_action on the current batch. */
   missing: boolean;
@@ -1712,7 +1731,7 @@ function VinStepperRow({
 }) {
   const [pending, setPending] = useState(false);
 
-  async function setStatus(newStatus: "done" | "skipped") {
+  async function setStatus(newStatus: "done" | "skipped" | "waiting") {
     if (!action) return;
     setPending(true);
     try {
@@ -1732,6 +1751,28 @@ function VinStepperRow({
       onMutated();
     } catch (e) {
       alert(`Could not update: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  // Add a template step to this batch — used when a VIN-chase
+  // action_type exists in Settings but no batch_action row has been
+  // created on this batch yet. Hits op:"add", which inserts a new
+  // batch_action row with status="waiting" + computed expectedDate.
+  async function addToBatch() {
+    if (!batchId || !actionTypeId) return;
+    setPending(true);
+    try {
+      const res = await fetch("/api/batch-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "add", batchId, actionTypeId }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onMutated();
+    } catch (e) {
+      alert(`Could not add step: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setPending(false);
     }
@@ -1785,9 +1826,7 @@ function VinStepperRow({
             <span className="italic text-ink-400">— waiting for the previous step</span>
           )}
           {missing && (
-            <span className="italic text-ink-400">
-              — not on this batch yet (add via Settings → Batches)
-            </span>
+            <span className="italic text-ink-400">— not on this batch yet</span>
           )}
         </p>
       </div>
@@ -1810,6 +1849,48 @@ function VinStepperRow({
             title="Skip this step — the next step still becomes active"
           >
             Skip
+          </button>
+        </div>
+      )}
+      {/*
+        Revert affordance — visible on every "done" row so ops can
+        undo a mistaken Mark done. Sets status back to "waiting",
+        which the API cascade-reverts dependent steps as well. Hidden
+        when the row is disabled (read-only viewers).
+      */}
+      {state === "done" && action && !disabled && (
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              if (!confirm("Revert this step back to waiting? Later steps in the chain will reset to blocked.")) return;
+              setStatus("waiting");
+            }}
+            className="btn text-xs"
+            title="Undo Mark done — flips this step back to waiting"
+          >
+            {pending ? "…" : "↩ Revert"}
+          </button>
+        </div>
+      )}
+      {/*
+        + Add affordance — appears on template steps not yet attached
+        to this batch. Creates a batch_action via op:"add" so ops can
+        light up a step even if the batch was originally created
+        without it (e.g. a new VIN-chase action_type was added after
+        intake). Disabled when batchId is missing (defensive).
+      */}
+      {missing && !disabled && batchId && actionTypeId && (
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            disabled={pending}
+            onClick={addToBatch}
+            className="btn text-xs"
+            title="Add this step to the current batch as waiting"
+          >
+            {pending ? "…" : "+ Add"}
           </button>
         </div>
       )}
