@@ -110,7 +110,11 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
 
   return (
     <div className="card">
-      <DrawerHeader data={data} onClosed={() => { refresh(); onMutation?.(); }} />
+      <DrawerHeader
+        data={data}
+        onClosed={() => { refresh(); onMutation?.(); }}
+        onShifted={() => { refresh(); onMutation?.(); }}
+      />
       {data.closedAt && data.closureReason ? (
         <ClosedBanner data={data} />
       ) : null}
@@ -721,12 +725,14 @@ function ClosedBanner({ data }: { data: DrawerData }) {
 // ──────────────────────────────────────────────────────────────────
 
 function DrawerHeader({
-  data, onClosed,
+  data, onClosed, onShifted,
 }: {
   data: DrawerData;
   onClosed: () => void;
+  onShifted: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const [shifting, setShifting] = useState(false);
   const isClosed = !!data.closedAt;
 
   return (
@@ -747,15 +753,26 @@ function DrawerHeader({
         </p>
       </div>
       {!isClosed && (
-        <button
-          type="button"
-          onClick={() => setConfirming(true)}
-          className="text-xs font-medium px-3 py-1.5 rounded-md border border-flame text-flame-dark
-                     bg-white hover:bg-flame-pale transition-colors"
-          title="Cancel this batch — Ops can no longer update its actions"
-        >
-          🚫 Cancel batch
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShifting(true)}
+            className="text-xs font-medium px-3 py-1.5 rounded-md border border-gold text-gold-dark
+                       bg-white hover:bg-gold-pale transition-colors"
+            title="Shift the projected availability date — captures bookings + reason"
+          >
+            📅 Shift availability date
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            className="text-xs font-medium px-3 py-1.5 rounded-md border border-flame text-flame-dark
+                       bg-white hover:bg-flame-pale transition-colors"
+            title="Cancel this batch — Ops can no longer update its actions"
+          >
+            🚫 Cancel batch
+          </button>
+        </div>
       )}
       {confirming && (
         <CancelModal
@@ -764,6 +781,16 @@ function DrawerHeader({
           onCancelled={() => {
             setConfirming(false);
             onClosed();
+          }}
+        />
+      )}
+      {shifting && (
+        <DateShiftModal
+          data={data}
+          onClose={() => setShifting(false)}
+          onShifted={() => {
+            setShifting(false);
+            onShifted();
           }}
         />
       )}
@@ -777,6 +804,187 @@ function DrawerHeader({
  * and requires a deliberate action; an optional reason note goes onto
  * the batch for audit / Slack status checks.
  */
+// ──────────────────────────────────────────────────────────────────
+// Date-shift modal — capture the projected-availability date shift
+// ──────────────────────────────────────────────────────────────────
+//
+// Phase F: every shift to currentProjectedDeliveryDate writes a row to
+// batch_date_revisions so the customer-impact metric is precise.
+// Ops manually enters the bookings count at the shift moment (the
+// number of customer bookings currently held against this batch); the
+// reason text captures WHY the shift happened — both feed postmortems
+// and the per-batch customer-days lost calculation in Reports (Phase H).
+//
+// The modal can be invoked directly from the drawer header ("📅 Shift
+// availability date"), or in Phase G from a recommend-shift banner with
+// a pre-filled new date. Both paths land on the same /api/batch-shift
+// endpoint.
+function DateShiftModal({
+  data, onClose, onShifted, recommendedDate,
+}: {
+  data: DrawerData;
+  onClose: () => void;
+  onShifted: () => void;
+  /** Optional pre-filled new date (Phase G's recommend-shift banner). */
+  recommendedDate?: string;
+}) {
+  // The "previous" date is the current projection, falling back to the
+  // dealer-promised date when ops hasn't set one yet (first shift).
+  const previous = data.currentProjectedDeliveryDate ?? data.promisedDate;
+  const [newDate, setNewDate] = useState<string>(
+    recommendedDate || previous,
+  );
+  const [bookings, setBookings] = useState<number>(0);
+  const [reason, setReason] = useState<string>("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const DAY_MS_LOCAL = 24 * 60 * 60 * 1000;
+  const delayDays = newDate && previous
+    ? Math.round((new Date(newDate).getTime() - new Date(previous).getTime()) / DAY_MS_LOCAL)
+    : 0;
+  const isNoOp = delayDays === 0;
+  const direction = delayDays > 0 ? `+${delayDays}d later` : delayDays < 0 ? `${delayDays}d earlier` : "no change";
+
+  async function confirm() {
+    setPending(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/batch-shift", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchId: data.batchId,
+          newProjectedDate: newDate,
+          bookingsAtShift: bookings,
+          reason: reason.trim() || null,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onShifted();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="shift-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center px-4
+                 bg-midnight/60 backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-md bg-white rounded-lg shadow-2xl border-2 border-gold">
+        <div className="bg-gold-pale border-b-2 border-gold px-5 py-3 rounded-t-md">
+          <h3 id="shift-modal-title" className="text-xl font-bold text-gold-dark">
+            📅 Shift availability date
+          </h3>
+          <p className="text-xs text-ink-600 mt-0.5">
+            {data.batchCode} · {data.quantity}× {data.modelYear}
+          </p>
+        </div>
+
+        <div className="px-5 py-4 space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="block text-xs font-medium text-ink-600 mb-1">From</span>
+              <input
+                type="date"
+                className="input tabular-nums"
+                value={previous}
+                disabled
+              />
+            </label>
+            <label className="block">
+              <span className="block text-xs font-medium text-ink-600 mb-1">To</span>
+              <input
+                type="date"
+                className="input tabular-nums"
+                value={newDate}
+                onChange={(e) => setNewDate(e.target.value)}
+                disabled={pending}
+              />
+            </label>
+          </div>
+          <p className={cn(
+            "text-xs font-medium tabular-nums",
+            isNoOp ? "text-ink-500"
+              : delayDays > 0 ? "text-flame-dark"
+              : "text-green-dark",
+          )}>
+            Shift: {direction}
+          </p>
+
+          <label className="block">
+            <span className="block text-xs font-medium text-ink-600 mb-1">
+              Bookings at shift
+              <span className="text-[0.65rem] font-normal text-ink-500 ml-1.5">
+                (customers booked against this batch right now)
+              </span>
+            </span>
+            <input
+              type="number"
+              min={0}
+              className="input tabular-nums"
+              value={bookings}
+              onChange={(e) => setBookings(parseInt(e.target.value || "0", 10))}
+              disabled={pending}
+            />
+            <span className="block text-[0.65rem] text-ink-500 mt-1">
+              Used to compute customer-days lost: {bookings} × {Math.max(0, delayDays)}d ={" "}
+              <span className="font-medium text-midnight">{Math.max(0, bookings * delayDays)}</span> customer-day(s).
+            </span>
+          </label>
+
+          <label className="block">
+            <span className="block text-xs font-medium text-ink-600 mb-1">
+              Reason (optional)
+            </span>
+            <textarea
+              className="input min-h-[64px]"
+              placeholder="e.g. VIN delay from dealer, internal Specs backlog…"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              disabled={pending}
+            />
+          </label>
+
+          {error && (
+            <p role="alert" className="text-sm text-flame-dark">{error}</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-3 bg-ink-50 rounded-b-md border-t border-ink-200">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={pending}
+            className="btn text-sm"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={pending || !newDate}
+            className="text-sm font-semibold px-4 py-2 rounded-md text-white
+                       bg-gold-dark hover:bg-gold disabled:opacity-50
+                       border border-gold-dark"
+          >
+            {pending ? "Applying…" : "📅 Apply shift"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CancelModal({
   data, onClose, onCancelled,
 }: {
