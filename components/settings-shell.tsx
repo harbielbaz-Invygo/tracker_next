@@ -105,8 +105,17 @@ async function callApi(body: unknown): Promise<void> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
+    // Prefer the JSON `error` field when the server returns one — keeps
+    // raw {"error":"…","nonWaitingCount":3,…} payloads from leaking into
+    // the editor's red banner. Falls back to plain text for non-JSON
+    // responses (rare; usually crash pages).
     const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
+    let message = text || `HTTP ${res.status}`;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed.error === "string") message = parsed.error;
+    } catch { /* not JSON — keep the raw text */ }
+    throw new Error(message);
   }
 }
 
@@ -1388,7 +1397,7 @@ function VinChaseStagesEditor({ data }: { data: SettingsData }) {
   return (
     <CollapsibleCard
       title="VIN Chase Stages"
-      description="The strict linear chain shown in the Action Center drawer's VIN chase section. Independent of Action Types — admins can add, rename, reorder, or delete stages here without affecting the rest of the action graph. Adding a new stage backfills every existing batch with a waiting row."
+      description="The strict linear chain shown in the Action Center drawer's VIN chase section. Independent of Action Types — admins can add, rename, reorder, or delete stages here. Rename is always safe. Reorder + Add can shift the 'current' pointer on mid-flow batches but don't lose data. Delete is blocked when batches have done/skipped state on the stage (would erase completion history)."
     >
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
         {data.vinChaseStages.map((s, idx) => {
