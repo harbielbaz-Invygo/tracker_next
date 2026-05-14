@@ -473,9 +473,6 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
       alertType:      a.alertType,
       message:        a.message,
       raisedAt:       a.raisedAt ?? new Date().toISOString(),
-      acknowledged:   a.acknowledged ?? false,
-      acknowledgedBy: a.acknowledgedBy ?? null,
-      acknowledgedAt: a.acknowledgedAt ?? null,
     })),
   };
 }
