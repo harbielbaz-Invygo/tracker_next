@@ -89,6 +89,17 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
     alertsByActionId.set(a.actionId, arr);
   }
 
+  // App Listing has been promoted to a prominent drawer panel; resolve
+  // its action row here so we can both render it specially AND filter
+  // it out of the generic ActionsList below. Match by name (case-
+  // insensitive) so a renamed type still resolves.
+  const appListingAction = data.actions.find((a) =>
+    a.actionTypeName.toLowerCase().includes("app listing"),
+  );
+  const actionsForList = appListingAction
+    ? data.actions.filter((a) => a.id !== appListingAction.id)
+    : data.actions;
+
   return (
     <div className="card">
       <DrawerHeader data={data} onClosed={() => { refresh(); onMutation?.(); }} />
@@ -98,14 +109,183 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
       {batchLevelAlerts.length > 0 && (
         <BatchAlertsStrip alerts={batchLevelAlerts} onAcknowledged={refresh} />
       )}
+      <AppListingPanel
+        action={appListingAction ?? null}
+        onMutated={() => { refresh(); onMutation?.(); }}
+        disabled={!!data.closedAt}
+      />
       <ConfidenceRow data={data} onSaved={() => { refresh(); onMutation?.(); }} disabled={!!data.closedAt} />
       <ActionsList
         data={data}
+        actionsOverride={actionsForList}
         alertsByActionId={alertsByActionId}
         layout={layout}
         onMutated={() => { refresh(); onMutation?.(); }}
         disabled={!!data.closedAt}
       />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// App Listing — prominent drawer panel
+// ──────────────────────────────────────────────────────────────────
+//
+// Phase D: the App Listing action is the single most important
+// moment in the customer-visible journey — once cars are listed,
+// pre-bookings can start. Pulling it out of the action list into
+// a dedicated panel near the top of the drawer reflects that
+// status. The corresponding action_list row is filtered out by
+// the parent so it doesn't render twice.
+
+/**
+ * Two states:
+ *   • not done → primary CTA, datetime input pre-filled with now (ops
+ *     can backdate). Submit fires POST /api/batch-action with newStatus
+ *     "done" and a custom completedAt.
+ *   • done     → status banner ("✅ Cars listed in app · 2026-05-13 14:32")
+ *     with an "Edit timestamp" button that swaps the panel back into
+ *     edit mode for adjustments.
+ */
+function AppListingPanel({
+  action, onMutated, disabled,
+}: {
+  action: ActionDetail | null;
+  onMutated: () => void;
+  disabled: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draftAt, setDraftAt] = useState<string>("");
+  const [pending, setPending] = useState(false);
+
+  // Reset edit state when the selected batch changes (drawer reuses the
+  // component but `action.id` shifts).
+  useEffect(() => {
+    setEditing(false);
+    setDraftAt("");
+  }, [action?.id]);
+
+  if (!action) {
+    return (
+      <div className="mb-4 px-3 py-2 rounded-md border border-dashed border-ink-300 bg-ink-50 text-xs text-ink-500">
+        <span className="font-medium text-midnight">📱 App Listing</span>
+        <span className="ml-2">no App Listing action on this batch — add it via Settings → Batches.</span>
+      </div>
+    );
+  }
+
+  // Local non-null alias — narrowing from the guard above doesn't carry
+  // into the nested function declarations below.
+  const a = action;
+  const isDone = a.status === "done";
+
+  function openEdit() {
+    const seed = isDone && a.completedAt ? a.completedAt : new Date().toISOString();
+    // datetime-local wants "YYYY-MM-DDTHH:MM" in LOCAL time (no offset).
+    const d = new Date(seed);
+    if (!Number.isNaN(d.getTime())) {
+      const pad = (n: number) => String(n).padStart(2, "0");
+      setDraftAt(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`);
+    }
+    setEditing(true);
+  }
+
+  async function submit() {
+    setPending(true);
+    try {
+      const completedIso = draftAt ? new Date(draftAt).toISOString() : new Date().toISOString();
+      const res = await fetch("/api/batch-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchActionId: a.id,
+          newStatus: "done",
+          newCompletedAt: completedIso,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setEditing(false);
+      onMutated();
+    } catch (e) {
+      alert(`Could not save: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  if (isDone && !editing) {
+    return (
+      <div className="mb-5 rounded-md border-2 border-green bg-green-pale px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm font-bold text-green-dark flex items-center gap-2">
+          <span aria-hidden="true">📱</span>
+          ✅ Cars listed in app
+          <span className="font-medium text-green-dark/80 tabular-nums">
+            · {action.completedAt ? fmtLocalDateTime(action.completedAt) : "—"}
+          </span>
+        </p>
+        {!disabled && (
+          <button
+            type="button"
+            onClick={openEdit}
+            className="text-xs font-medium text-green-dark hover:text-midnight underline-offset-2 hover:underline"
+            title="Edit the timestamp of when cars were listed"
+          >
+            ✎ Edit timestamp
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  // Edit / first-time mode — datetime picker + submit.
+  return (
+    <div className="mb-5 rounded-md border-2 border-brand bg-brand-pastel/30 px-4 py-3">
+      <p className="text-sm font-bold text-midnight mb-2 flex items-center gap-2">
+        <span aria-hidden="true">📱</span>
+        App Listing
+        <span className="text-xs font-medium text-ink-500">
+          {isDone ? "Editing timestamp…" : "Mark cars listed in app"}
+        </span>
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="datetime-local"
+          className="input text-sm py-1"
+          value={draftAt}
+          onChange={(e) => setDraftAt(e.target.value)}
+          disabled={pending || disabled}
+          // Pre-fill on mount if not opened via openEdit.
+          ref={(el) => {
+            if (el && !draftAt && !editing) {
+              const d = new Date();
+              const pad = (n: number) => String(n).padStart(2, "0");
+              setDraftAt(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`);
+            }
+          }}
+        />
+        <button
+          type="button"
+          onClick={submit}
+          disabled={pending || disabled || !draftAt}
+          className="btn btn-primary text-sm px-3 py-1.5"
+        >
+          {pending ? "Saving…" : isDone ? "✓ Update" : "📱 Mark cars listed"}
+        </button>
+        {isDone && (
+          <button
+            type="button"
+            onClick={() => setEditing(false)}
+            disabled={pending}
+            className="btn text-sm"
+          >
+            Cancel
+          </button>
+        )}
+      </div>
+      <p className="text-[0.7rem] text-ink-500 mt-1.5">
+        Set the date and time customers first saw the cars on the app.
+        Defaults to now; backdate as needed.
+      </p>
     </div>
   );
 }
@@ -513,9 +693,15 @@ function ConfidenceRow({
 // ──────────────────────────────────────────────────────────────────
 
 function ActionsList({
-  data, alertsByActionId, onMutated, layout, disabled = false,
+  data, actionsOverride, alertsByActionId, onMutated, layout, disabled = false,
 }: {
   data: DrawerData;
+  /**
+   * When provided, render this subset instead of `data.actions`. Used by
+   * the parent to filter out actions that have their own dedicated panel
+   * (e.g. App Listing as a prominent button). Falls back to `data.actions`.
+   */
+  actionsOverride?: ActionDetail[];
   /** Pre-grouped alerts by action id so each row knows its own. */
   alertsByActionId: Map<number, ActiveAlert[]>;
   onMutated: () => void;
@@ -523,7 +709,8 @@ function ActionsList({
   /** When true (e.g. batch is closed), every status mutation is disabled. */
   disabled?: boolean;
 }) {
-  if (data.actions.length === 0) {
+  const actions = actionsOverride ?? data.actions;
+  if (actions.length === 0) {
     return (
       <p className="text-sm text-ink-500 italic">
         No actions yet. {data.lifecycleState === "pre_po"
@@ -534,10 +721,10 @@ function ActionsList({
   }
 
   const groups = {
-    waiting: data.actions.filter((a) => a.status === "waiting"),
-    blocked: data.actions.filter((a) => a.status === "blocked"),
-    done:    data.actions.filter((a) => a.status === "done"),
-    skipped: data.actions.filter((a) => a.status === "skipped"),
+    waiting: actions.filter((a) => a.status === "waiting"),
+    blocked: actions.filter((a) => a.status === "blocked"),
+    done:    actions.filter((a) => a.status === "done"),
+    skipped: actions.filter((a) => a.status === "skipped"),
   };
 
   // ── Kanban layout — three columns side-by-side, action cards stacked.
