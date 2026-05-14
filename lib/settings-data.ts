@@ -13,6 +13,7 @@ import { db } from "@/lib/db";
 import {
   departments, stakeholders, actionTypes, actionDependencies,
   dealers, batches, batchActions, users, alertRules,
+  vinChaseStages,
 } from "@/lib/db/schema";
 import { getAllRules } from "@/lib/rules";
 
@@ -59,6 +60,17 @@ export interface SettingsData {
    * the server bcrypt-hashes it and updates `passwordHash`.
    */
   users: SettingsUser[];
+  /**
+   * Canonical VIN chase stages (the linear chain shown in the Action
+   * Center drawer). Edited inline in Settings → VIN Chase Stages.
+   */
+  vinChaseStages: {
+    id: number;
+    name: string;
+    waitingLabel: string;
+    doneLabel: string;
+    sortOrder: number;
+  }[];
 }
 
 export interface SettingsUser {
@@ -149,6 +161,20 @@ export interface BatchEditRow {
  * database (e.g. production hasn't had `npm run db:push` run since the alert
  * engine landed). Without this, the entire Settings page would 500.
  */
+async function safeListVinChaseStages(): Promise<(typeof vinChaseStages.$inferSelect)[]> {
+  try {
+    return await db.select().from(vinChaseStages).orderBy(asc(vinChaseStages.sortOrder));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table/i.test(msg)) {
+      // eslint-disable-next-line no-console
+      console.warn("[settings] vin_chase_stages table missing — returning []. Run `npm run db:push` to enable.");
+      return [];
+    }
+    throw err;
+  }
+}
+
 async function safeListAlertRules(): Promise<(typeof alertRules.$inferSelect)[]> {
   try {
     return await db.select().from(alertRules).orderBy(asc(alertRules.id));
@@ -165,7 +191,7 @@ async function safeListAlertRules(): Promise<(typeof alertRules.$inferSelect)[]>
 
 export async function getSettingsData(): Promise<SettingsData> {
   const [
-    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw, alertRulesRaw,
+    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw, alertRulesRaw, vinStagesRaw,
   ] = await Promise.all([
     db.select().from(departments).orderBy(asc(departments.sortOrder)),
     db.select().from(stakeholders).orderBy(asc(stakeholders.sortOrder)),
@@ -202,6 +228,7 @@ export async function getSettingsData(): Promise<SettingsData> {
       createdAt: users.createdAt,
     }).from(users).orderBy(asc(users.role), asc(users.username)),
     safeListAlertRules(),
+    safeListVinChaseStages(),
   ]);
 
   // Group stakeholders by department for inline rendering.
@@ -340,6 +367,13 @@ export async function getSettingsData(): Promise<SettingsData> {
       email:     u.email,
       role:      u.role as "admin" | "ops",
       createdAt: u.createdAt,
+    })),
+    vinChaseStages: vinStagesRaw.map((s) => ({
+      id:           s.id,
+      name:         s.name,
+      waitingLabel: s.waitingLabel,
+      doneLabel:    s.doneLabel,
+      sortOrder:    s.sortOrder,
     })),
   };
 }

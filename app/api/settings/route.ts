@@ -19,6 +19,7 @@ import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import {
   departments, stakeholders, actionTypes, actionDependencies, batchActions, batches, users, alertRules, alerts,
+  vinChaseStages, batchVinStages,
 } from "@/lib/db/schema";
 import { setRuleNumber, RULE_KEYS, getLeadTimeDays } from "@/lib/rules";
 import { requireAuth } from "@/lib/api-auth";
@@ -48,7 +49,10 @@ type Body =
   | { resource: "user"; op: "delete"; id: number }
   | { resource: "alert-rule"; op: "create"; name: string; triggerType: string; thresholdDays: number; actionTypeId?: number | null; severity: string }
   | { resource: "alert-rule"; op: "update"; id: number; name?: string; thresholdDays?: number; actionTypeId?: number | null; severity?: string; isActive?: boolean }
-  | { resource: "alert-rule"; op: "delete"; id: number };
+  | { resource: "alert-rule"; op: "delete"; id: number }
+  | { resource: "vin-stage";  op: "create"; name: string; waitingLabel: string; doneLabel: string; sortOrder?: number }
+  | { resource: "vin-stage";  op: "update"; id: number; name?: string; waitingLabel?: string; doneLabel?: string; sortOrder?: number }
+  | { resource: "vin-stage";  op: "delete"; id: number };
 
 export async function POST(req: NextRequest) {
   // Settings are admin-only — no other role can mutate departments,
@@ -73,6 +77,7 @@ export async function POST(req: NextRequest) {
       case "stakeholder":  return await handleStakeholder(body);
       case "user":         return await handleUser(body, Number(gate.user.id));
       case "alert-rule":   return await handleAlertRule(body);
+      case "vin-stage":    return await handleVinStage(body);
       default:
         return NextResponse.json({ error: "Unknown resource" }, { status: 400 });
     }
@@ -645,6 +650,65 @@ async function handleAlertRule(b: Extract<Body, { resource: "alert-rule" }>) {
 
   if (b.op === "delete") {
     await db.delete(alertRules).where(eq(alertRules.id, b.id));
+    return NextResponse.json({ ok: true });
+  }
+
+  return NextResponse.json({ error: "Unknown op" }, { status: 400 });
+}
+
+async function handleVinStage(b: Extract<Body, { resource: "vin-stage" }>) {
+  if (b.op === "create") {
+    if (!b.name?.trim() || !b.waitingLabel?.trim() || !b.doneLabel?.trim()) {
+      return NextResponse.json(
+        { error: "name, waitingLabel, doneLabel are all required" },
+        { status: 400 },
+      );
+    }
+    const [row] = await db.insert(vinChaseStages).values({
+      name:         b.name.trim(),
+      waitingLabel: b.waitingLabel.trim(),
+      doneLabel:    b.doneLabel.trim(),
+      sortOrder:    b.sortOrder ?? 0,
+    }).returning();
+    // Backfill: every existing batch gets a `batch_vin_stages` row for
+    // this new stage with status="waiting". Without this, batches
+    // created before the stage existed would render an incomplete chain.
+    const allBatches = await db.select({ id: batches.id }).from(batches);
+    for (const ba of allBatches) {
+      await db.insert(batchVinStages).values({
+        batchId: ba.id,
+        stageId: row.id,
+        status:  "waiting",
+      }).onConflictDoNothing();
+    }
+    return NextResponse.json({ ok: true, row });
+  }
+
+  if (b.op === "update") {
+    const updates: Partial<typeof vinChaseStages.$inferInsert> = {};
+    if (b.name !== undefined) {
+      if (!b.name.trim()) return NextResponse.json({ error: "name cannot be empty" }, { status: 400 });
+      updates.name = b.name.trim();
+    }
+    if (b.waitingLabel !== undefined) {
+      if (!b.waitingLabel.trim()) return NextResponse.json({ error: "waitingLabel cannot be empty" }, { status: 400 });
+      updates.waitingLabel = b.waitingLabel.trim();
+    }
+    if (b.doneLabel !== undefined) {
+      if (!b.doneLabel.trim()) return NextResponse.json({ error: "doneLabel cannot be empty" }, { status: 400 });
+      updates.doneLabel = b.doneLabel.trim();
+    }
+    if (b.sortOrder !== undefined) updates.sortOrder = b.sortOrder;
+    if (Object.keys(updates).length === 0) {
+      return NextResponse.json({ error: "no fields to update" }, { status: 400 });
+    }
+    await db.update(vinChaseStages).set(updates).where(eq(vinChaseStages.id, b.id));
+    return NextResponse.json({ ok: true });
+  }
+
+  if (b.op === "delete") {
+    // FK cascade on batch_vin_stages takes care of per-batch rows.
+    await db.delete(vinChaseStages).where(eq(vinChaseStages.id, b.id));
     return NextResponse.json({ ok: true });
   }
 
