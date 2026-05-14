@@ -1,0 +1,131 @@
+/**
+ * Per-view icons used in the sidebar (mainly when collapsed, where the
+ * access badges (✅/🔒/🌐) collapse to a wall of identical green checks
+ * and you can't tell Dashboard from Reports).
+ *
+ * All icons are inline SVG, sized via parent (h-5 w-5 is the sidebar
+ * default), and use `currentColor` so they inherit the link's text
+ * colour — they turn white automatically when the link is active (brand
+ * background) without any extra prop wiring.
+ *
+ * Style: outline / stroke-based, 1.75 stroke width, rounded joins.
+ * Matches a generic heroicons-style aesthetic without adding a dep.
+ */
+import type { ViewName } from "@/lib/access";
+
+function IconBase({ children, label }: { children: React.ReactNode; label: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-5 w-5"
+      role="img"
+      aria-label={label}
+    >
+      {children}
+    </svg>
+  );
+}
+
+/** 2×2 grid of rounded panels — the canonical "dashboard" affordance. */
+function DashboardIcon() {
+  return (
+    <IconBase label="Dashboard icon">
+      <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" />
+      <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
+      <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
+      <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
+    </IconBase>
+  );
+}
+
+/** Lightbulb — universal "insights / ideas" mark. */
+function InsightsIcon() {
+  return (
+    <IconBase label="Insights icon">
+      <path d="M9 17.5h6" />
+      <path d="M10 20.5h4" />
+      <path d="M12 3.5a6 6 0 0 0-3.5 10.8c.5.4.8 1 .8 1.7h5.4c0-.7.3-1.3.8-1.7A6 6 0 0 0 12 3.5Z" />
+    </IconBase>
+  );
+}
+
+/** Chart with a trending-up arrow — "what's coming next". */
+function ForecastIcon() {
+  return (
+    <IconBase label="Forecast icon">
+      <path d="M3.5 20.5h17" />
+      <path d="M4 16l4.5-4.5 3.5 3.5 4.5-6" />
+      <path d="M14.5 9h3v3" />
+    </IconBase>
+  );
+}
+
+/** Inbox tray with a downward arrow — work coming "in". */
+function IntakeIcon() {
+  return (
+    <IconBase label="Intake icon">
+      <path d="M3.5 13.5v5a1 1 0 0 0 1 1h15a1 1 0 0 0 1-1v-5" />
+      <path d="M7.5 13.5h2l1 2h3l1-2h2" />
+      <path d="M12 3.5v8" />
+      <path d="M9 8.5l3 3 3-3" />
+    </IconBase>
+  );
+}
+
+/** Bolt / spark — Action Center is where ops actually does the work. */
+function ActionCenterIcon() {
+  return (
+    <IconBase label="Action Center icon">
+      <path d="M13 2.5 4 14h7l-1 7.5L20 10h-7l0-7.5Z" />
+    </IconBase>
+  );
+}
+
+/** Document with content lines — "reports". */
+function ReportsIcon() {
+  return (
+    <IconBase label="Reports icon">
+      <path d="M6 3.5h9l4 4v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1Z" />
+      <path d="M14.5 3.5v4h4.5" />
+      <path d="M8 13h8" />
+      <path d="M8 16.5h8" />
+      <path d="M8 9.5h3" />
+    </IconBase>
+  );
+}
+
+/** Cog — Settings. Outer 8-point gear + inner ring. */
+function SettingsIcon() {
+  return (
+    <IconBase label="Settings icon">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 14.5a1.7 1.7 0 0 0 .4 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.4 1.7 1.7 0 0 0-1.1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.4l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .4-1.9 1.7 1.7 0 0 0-1.6-1.1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.4-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.4h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1.1 1.6 1.7 1.7 0 0 0 1.9-.4l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.4 1.9v.1a1.7 1.7 0 0 0 1.6 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
+    </IconBase>
+  );
+}
+
+const ICONS: Record<ViewName, () => React.ReactElement> = {
+  "Dashboard":     DashboardIcon,
+  "Insights":      InsightsIcon,
+  "Forecast":      ForecastIcon,
+  "Intake":        IntakeIcon,
+  "Action Center": ActionCenterIcon,
+  "Reports":       ReportsIcon,
+  "Settings":      SettingsIcon,
+};
+
+/**
+ * Renders the icon for a given view. Used by the collapsed sidebar so
+ * each nav target is visually distinct at a glance. The icon inherits
+ * the parent's text colour via currentColor.
+ */
+export function ViewIcon({ view }: { view: ViewName }) {
+  const Icon = ICONS[view];
+  return <Icon />;
+}
