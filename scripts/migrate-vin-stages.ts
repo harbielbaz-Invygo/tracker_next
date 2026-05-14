@@ -2,6 +2,10 @@
  * One-shot migration: VIN chase moves out of `action_types` into its
  * own first-class `vin_chase_stages` + `batch_vin_stages` tables.
  *
+ *   0. CREATE TABLE IF NOT EXISTS for the two new tables + indexes.
+ *      Self-contained — does not require `npm run db:push` first.
+ *      (drizzle-kit push trips on unrelated schema drift; doing the
+ *      DDL inline keeps this safe.)
  *   1. Seed the 6 canonical stages (idempotent — skips if names exist).
  *   2. Identify VIN-chase `action_types` via the keyword classifier
  *      that previously routed them into the drawer's VIN cluster.
@@ -14,7 +18,12 @@
  *      row per canonical stage with status="waiting". Idempotent — uses
  *      the (batch_id, stage_id) unique index to skip duplicates.
  *
- * Run after `npm run db:push` has applied the new tables:
+ * Local run:
+ *     npx tsx scripts/migrate-vin-stages.ts
+ *
+ * Production (Turso) run — set env first so the script targets prod:
+ *     DATABASE_URL=libsql://your-db.turso.io \
+ *     TURSO_AUTH_TOKEN=eyJ… \
  *     npx tsx scripts/migrate-vin-stages.ts
  *
  * Safe to run multiple times; each step is idempotent.
@@ -51,6 +60,40 @@ function buildKeywordWhere(): string {
 }
 
 async function main() {
+  console.log("→ Ensuring schema (CREATE TABLE IF NOT EXISTS) …");
+  await db.run(sql.raw(`
+    CREATE TABLE IF NOT EXISTS vin_chase_stages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      waiting_label TEXT NOT NULL,
+      done_label TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `));
+  await db.run(sql.raw(`
+    CREATE TABLE IF NOT EXISTS batch_vin_stages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      stage_id INTEGER NOT NULL REFERENCES vin_chase_stages(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'waiting',
+      completed_at TEXT,
+      notes TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `));
+  await db.run(sql.raw(
+    `CREATE UNIQUE INDEX IF NOT EXISTS batch_vin_stage_uniq ON batch_vin_stages (batch_id, stage_id)`,
+  ));
+  await db.run(sql.raw(
+    `CREATE INDEX IF NOT EXISTS batch_vin_stages_batch_idx ON batch_vin_stages (batch_id)`,
+  ));
+  await db.run(sql.raw(
+    `CREATE INDEX IF NOT EXISTS batch_vin_stages_status_idx ON batch_vin_stages (status)`,
+  ));
+  console.log("  ✓ schema in place.");
+
   console.log("→ Seeding canonical VIN chase stages…");
   for (const stage of CANONICAL_STAGES) {
     await db
