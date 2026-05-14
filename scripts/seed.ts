@@ -92,24 +92,66 @@ const SEED_STAKEHOLDERS: { departmentName: string; name: string; sortOrder: numb
  *   - Post-VIN dealer/ops work: anchored to VIN actual, with realistic offsets
  *   - Delivery: anchored to the promised date (offsetDays ignored)
  */
+/**
+ * Two parallel flows that converge at Delivery:
+ *
+ *   Internal phase (parallel, customizable per batch) — cars get listed
+ *   on the app pre-VIN so customers can pre-book against dummies:
+ *     1 Car Specs
+ *     2 Pricing
+ *     3 SKU
+ *     4 App Listing   ← pre-VIN dummy listing
+ *
+ *   VIN-chase flow (linear, mandatory every batch) — turns dummies into
+ *   real cars ready for handover. Skip steps 5–6 when the dealer shared
+ *   VIN with the PO (`batches.vin_received_at_intake = true`):
+ *     5 Send Dealer Confirmation Email
+ *     6 VIN
+ *     7 Plate
+ *     8 Customs Card
+ *     9 Tracking System Installed
+ *    10 Car Inspection
+ *    11 Car Ready in Showroom
+ *
+ *   Final:
+ *    12 Delivery (depends on App Listing AND Car Ready in Showroom)
+ */
 const SEED_ACTION_TYPES = [
-  { name: "Car Specs",    waitingLabel: "Waiting Car Specs",    doneLabel: "Specs Received",    defaultDepartment: "Specs",      sortOrder: 1, offsetDays:  1, offsetAnchor: "submission" as const },
-  { name: "Pricing",      waitingLabel: "Waiting Pricing",      doneLabel: "Pricing Received",  defaultDepartment: "Pricing",    sortOrder: 2, offsetDays:  1, offsetAnchor: "submission" as const },
-  { name: "SKU",          waitingLabel: "Waiting SKU",          doneLabel: "SKU Created",       defaultDepartment: "Specs",      sortOrder: 3, offsetDays:  2, offsetAnchor: "submission" as const },
-  { name: "VIN",          waitingLabel: "Waiting VIN",          doneLabel: "VIN Assigned",      defaultDepartment: "Operations", sortOrder: 4, offsetDays:  3, offsetAnchor: "submission" as const },
-  { name: "Plate",        waitingLabel: "Waiting Plate",        doneLabel: "Plate Assigned",    defaultDepartment: "Operations", sortOrder: 5, offsetDays:  5, offsetAnchor: "vin"        as const },
-  { name: "Customs Card", waitingLabel: "Waiting Customs",      doneLabel: "Customs Received",  defaultDepartment: "Logistics",  sortOrder: 6, offsetDays:  7, offsetAnchor: "vin"        as const },
-  { name: "Inspection",   waitingLabel: "Waiting Inspection",   doneLabel: "Inspection Done",   defaultDepartment: "Operations", sortOrder: 7, offsetDays: 10, offsetAnchor: "vin"        as const },
-  { name: "App Listing",  waitingLabel: "Waiting App Listing",  doneLabel: "Listed in App",     defaultDepartment: "Operations", sortOrder: 8, offsetDays: 12, offsetAnchor: "vin"        as const },
-  { name: "Delivery",     waitingLabel: "Waiting Delivery",     doneLabel: "Delivered",         defaultDepartment: "Logistics",  sortOrder: 9, offsetDays:  0, offsetAnchor: "promised"   as const },
+  // Internal phase ────────────────────────────────────────────────
+  { name: "Car Specs",                    waitingLabel: "Waiting Car Specs",      doneLabel: "Specs Received",      defaultDepartment: "Specs",      sortOrder:  1, offsetDays:  1, offsetAnchor: "submission" as const },
+  { name: "Pricing",                      waitingLabel: "Waiting Pricing",        doneLabel: "Pricing Received",    defaultDepartment: "Pricing",    sortOrder:  2, offsetDays:  1, offsetAnchor: "submission" as const },
+  { name: "SKU",                          waitingLabel: "Waiting SKU",            doneLabel: "SKU Created",         defaultDepartment: "Specs",      sortOrder:  3, offsetDays:  2, offsetAnchor: "submission" as const },
+  { name: "App Listing",                  waitingLabel: "Waiting App Listing",    doneLabel: "Listed in App",       defaultDepartment: "Operations", sortOrder:  4, offsetDays:  5, offsetAnchor: "submission" as const },
+  // VIN-chase flow ────────────────────────────────────────────────
+  { name: "Send Dealer Confirmation Email", waitingLabel: "Waiting Dealer Email", doneLabel: "Email Sent",          defaultDepartment: "Operations", sortOrder:  5, offsetDays:  1, offsetAnchor: "submission" as const },
+  { name: "VIN",                          waitingLabel: "Waiting VIN",            doneLabel: "VIN Received",        defaultDepartment: "Operations", sortOrder:  6, offsetDays:  5, offsetAnchor: "submission" as const },
+  { name: "Plate",                        waitingLabel: "Waiting Plate",          doneLabel: "Plate Assigned",      defaultDepartment: "Operations", sortOrder:  7, offsetDays:  3, offsetAnchor: "vin"        as const },
+  { name: "Customs Card",                 waitingLabel: "Waiting Customs",        doneLabel: "Customs Received",    defaultDepartment: "Logistics",  sortOrder:  8, offsetDays:  5, offsetAnchor: "vin"        as const },
+  { name: "Tracking System Installed",    waitingLabel: "Waiting Tracking",       doneLabel: "Tracking Installed",  defaultDepartment: "Operations", sortOrder:  9, offsetDays:  6, offsetAnchor: "vin"        as const },
+  { name: "Car Inspection",               waitingLabel: "Waiting Inspection",     doneLabel: "Inspection Done",     defaultDepartment: "Operations", sortOrder: 10, offsetDays:  8, offsetAnchor: "vin"        as const },
+  { name: "Car Ready in Showroom",        waitingLabel: "Waiting Showroom Ready", doneLabel: "Ready in Showroom",   defaultDepartment: "Operations", sortOrder: 11, offsetDays: 10, offsetAnchor: "vin"        as const },
+  // Final ────────────────────────────────────────────────────────
+  { name: "Delivery",                     waitingLabel: "Waiting Delivery",       doneLabel: "Delivered",           defaultDepartment: "Logistics",  sortOrder: 12, offsetDays:  0, offsetAnchor: "promised"   as const },
 ];
 
-/** Dependency DAG. `child` cannot start until every entry in `parents` is done. */
+/**
+ * Dependency DAG. `child` cannot start until every entry in `parents` is done.
+ *
+ * The VIN-chase flow is a linear chain. The internal phase (Car Specs /
+ * Pricing / SKU / App Listing) runs in parallel with no internal deps.
+ * Delivery is the convergence point — both flows must reach it before
+ * the customer can take the car.
+ */
 const SEED_DEPENDENCIES: { child: string; parents: string[] }[] = [
-  { child: "Plate",        parents: ["VIN"] },
-  { child: "Customs Card", parents: ["Plate"] },
-  { child: "App Listing",  parents: ["VIN", "Plate"] },
-  { child: "Delivery",     parents: ["App Listing"] },
+  // VIN-chase chain
+  { child: "VIN",                       parents: ["Send Dealer Confirmation Email"] },
+  { child: "Plate",                     parents: ["VIN"] },
+  { child: "Customs Card",              parents: ["Plate"] },
+  { child: "Tracking System Installed", parents: ["Plate"] },
+  { child: "Car Inspection",            parents: ["Tracking System Installed"] },
+  { child: "Car Ready in Showroom",     parents: ["Car Inspection"] },
+  // Final convergence — both flows must complete
+  { child: "Delivery",                  parents: ["App Listing", "Car Ready in Showroom"] },
 ];
 
 const DEALERS = [
@@ -292,59 +334,74 @@ type ActionStatus = "waiting" | "blocked" | "done" | "skipped";
 const PROGRESS_PRESETS: Record<ActionPreset, Record<string, ActionStatus>> = {
   none: {},
   mid_specs_vin: {
-    "Car Specs":    "done",
-    "Pricing":      "done",
-    "SKU":          "done",
-    "VIN":          "waiting",
-    "Plate":        "blocked",
-    "Customs Card": "blocked",
-    "Inspection":   "waiting",   // no parent dep — anchored to VIN, but waiting
-    "App Listing":  "blocked",
-    "Delivery":     "blocked",
+    "Car Specs":                       "done",
+    "Pricing":                         "done",
+    "SKU":                             "done",
+    "App Listing":                     "waiting",      // pre-VIN dummy listing in flight
+    "Send Dealer Confirmation Email":  "done",
+    "VIN":                             "waiting",
+    "Plate":                           "blocked",
+    "Customs Card":                    "blocked",
+    "Tracking System Installed":       "blocked",
+    "Car Inspection":                  "blocked",
+    "Car Ready in Showroom":           "blocked",
+    "Delivery":                        "blocked",
   },
   mid_plate: {
-    "Car Specs":    "done",
-    "Pricing":      "done",
-    "SKU":          "done",
-    "VIN":          "done",
-    "Plate":        "done",
-    "Customs Card": "waiting",   // Plate just landed — Customs unblocked
-    "Inspection":   "done",
-    "App Listing":  "waiting",   // VIN + Plate done — App Listing unblocked
-    "Delivery":     "blocked",
+    "Car Specs":                       "done",
+    "Pricing":                         "done",
+    "SKU":                             "done",
+    "App Listing":                     "done",         // dummies are listed pre-VIN
+    "Send Dealer Confirmation Email":  "done",
+    "VIN":                             "done",
+    "Plate":                           "done",
+    "Customs Card":                    "waiting",      // Plate just landed — Customs unblocked
+    "Tracking System Installed":       "waiting",      // Plate just landed — Tracking unblocked
+    "Car Inspection":                  "blocked",      // waits on Tracking
+    "Car Ready in Showroom":           "blocked",      // waits on Inspection
+    "Delivery":                        "blocked",
   },
   near_done: {
-    "Car Specs":    "done",
-    "Pricing":      "done",
-    "SKU":          "done",
-    "VIN":          "done",
-    "Plate":        "done",
-    "Customs Card": "done",
-    "Inspection":   "done",
-    "App Listing":  "done",
-    "Delivery":     "waiting",   // ready to ship
+    "Car Specs":                       "done",
+    "Pricing":                         "done",
+    "SKU":                             "done",
+    "App Listing":                     "done",
+    "Send Dealer Confirmation Email":  "done",
+    "VIN":                             "done",
+    "Plate":                           "done",
+    "Customs Card":                    "done",
+    "Tracking System Installed":       "done",
+    "Car Inspection":                  "done",
+    "Car Ready in Showroom":           "done",
+    "Delivery":                        "waiting",      // ready to ship
   },
   all_done: {
-    "Car Specs":    "done",
-    "Pricing":      "done",
-    "SKU":          "done",
-    "VIN":          "done",
-    "Plate":        "done",
-    "Customs Card": "done",
-    "Inspection":   "done",
-    "App Listing":  "done",
-    "Delivery":     "done",
+    "Car Specs":                       "done",
+    "Pricing":                         "done",
+    "SKU":                             "done",
+    "App Listing":                     "done",
+    "Send Dealer Confirmation Email":  "done",
+    "VIN":                             "done",
+    "Plate":                           "done",
+    "Customs Card":                    "done",
+    "Tracking System Installed":       "done",
+    "Car Inspection":                  "done",
+    "Car Ready in Showroom":           "done",
+    "Delivery":                        "done",
   },
   cancelled_partial: {
-    "Car Specs":    "done",
-    "Pricing":      "done",
-    "SKU":          "done",
-    "VIN":          "done",
-    "Plate":        "skipped",
-    "Customs Card": "skipped",
-    "Inspection":   "skipped",
-    "App Listing":  "skipped",
-    "Delivery":     "skipped",
+    "Car Specs":                       "done",
+    "Pricing":                         "done",
+    "SKU":                             "done",
+    "App Listing":                     "skipped",
+    "Send Dealer Confirmation Email":  "done",
+    "VIN":                             "done",
+    "Plate":                           "skipped",
+    "Customs Card":                    "skipped",
+    "Tracking System Installed":       "skipped",
+    "Car Inspection":                  "skipped",
+    "Car Ready in Showroom":           "skipped",
+    "Delivery":                        "skipped",
   },
 };
 
