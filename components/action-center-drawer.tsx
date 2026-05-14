@@ -89,15 +89,23 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
     alertsByActionId.set(a.actionId, arr);
   }
 
-  // App Listing has been promoted to a prominent drawer panel; resolve
-  // its action row here so we can both render it specially AND filter
-  // it out of the generic ActionsList below. Match by name (case-
-  // insensitive) so a renamed type still resolves.
+  // Two prominent actions are promoted out of the generic action list
+  // into their own dedicated panels: App Listing (top of drawer, Phase D)
+  // and Delivery (bottom, Phase E). Resolve both rows here so we can
+  // render the panels with the right state AND filter them out of the
+  // ActionsList below. Name matches are case-insensitive so renamed
+  // action_types still resolve.
   const appListingAction = data.actions.find((a) =>
     a.actionTypeName.toLowerCase().includes("app listing"),
   );
-  const actionsForList = appListingAction
-    ? data.actions.filter((a) => a.id !== appListingAction.id)
+  const deliveryAction = data.actions.find(
+    (a) => a.actionTypeName.toLowerCase() === "delivery",
+  );
+  const excludedIds = new Set<number>();
+  if (appListingAction) excludedIds.add(appListingAction.id);
+  if (deliveryAction)   excludedIds.add(deliveryAction.id);
+  const actionsForList = excludedIds.size > 0
+    ? data.actions.filter((a) => !excludedIds.has(a.id))
     : data.actions;
 
   return (
@@ -123,6 +131,12 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
         onMutated={() => { refresh(); onMutation?.(); }}
         disabled={!!data.closedAt}
       />
+      {!data.closedAt && (
+        <CarDeliveryPanel
+          data={data}
+          onDelivered={() => { refresh(); onMutation?.(); }}
+        />
+      )}
     </div>
   );
 }
@@ -396,6 +410,274 @@ function BatchAlertsStrip({
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Car Delivery — prominent closing panel + confirmation modal
+// ──────────────────────────────────────────────────────────────────
+//
+// Phase E: the Delivery action is the symmetric partner to App Listing.
+// Pulling it out of the generic action list into a dedicated bottom-of-
+// drawer panel reflects its weight — it's the closing gate. The button
+// opens a confirmation modal asking ops to verify what actually shipped:
+// total delivered quantity + per-colour breakdown (when a colour matrix
+// exists). On submit, /api/batch-close persists the closure with
+// qty + colour data, marks the Delivery action done, and the drawer's
+// existing ClosedBanner takes over for the post-closure state.
+
+function CarDeliveryPanel({
+  data, onDelivered,
+}: {
+  data: DrawerData;
+  onDelivered: () => void;
+}) {
+  const [showModal, setShowModal] = useState(false);
+  return (
+    <>
+      <div className="mt-5 rounded-md border-2 border-green bg-green-pale/30 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-bold text-green-dark flex items-center gap-2">
+            <span aria-hidden="true">🚚</span>
+            Car Delivery
+          </p>
+          <p className="text-[0.7rem] text-ink-600 mt-0.5">
+            Closing gate — confirm delivered quantity and colours.
+            Closes the batch and locks all actions.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowModal(true)}
+          className="text-sm font-semibold px-4 py-2 rounded-md
+                     bg-green-dark text-white border border-green-dark
+                     hover:bg-green transition-colors"
+          title="Mark this batch delivered — opens the qty + colours confirmation"
+        >
+          🚚 Mark as delivered
+        </button>
+      </div>
+      {showModal && (
+        <CarDeliveryModal
+          data={data}
+          onClose={() => setShowModal(false)}
+          onDelivered={() => {
+            setShowModal(false);
+            onDelivered();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * Confirmation modal — captures the actual closing data:
+ *   • Closure date (datetime, default today, backdate allowed)
+ *   • Total delivered quantity (default = requestedQuantity)
+ *   • Per-colour delivered quantity (when colorMatrix is configured)
+ *
+ * On submit, fires POST /api/batch-close with reason="delivered".
+ */
+function CarDeliveryModal({
+  data, onClose, onDelivered,
+}: {
+  data: DrawerData;
+  onClose: () => void;
+  onDelivered: () => void;
+}) {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const [closedAt, setClosedAt] = useState<string>(todayIso);
+  const [deliveredQty, setDeliveredQty] = useState<number>(data.quantity);
+  const [colorQtys, setColorQtys] = useState<Record<string, number>>(
+    Object.fromEntries(
+      data.colorMatrix.map((c) => [c.color, c.deliveredQuantity || c.requestedQuantity]),
+    ),
+  );
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Color sum vs delivered qty — helpful sanity check. We don't block on
+  // mismatch (the dealer may have substituted colours and shipped the same
+  // total count), but a hint makes the mismatch obvious.
+  const colorSum = data.colorMatrix.reduce(
+    (sum, c) => sum + (colorQtys[c.color] ?? 0),
+    0,
+  );
+  const showColorMismatch =
+    data.colorMatrix.length > 0 && colorSum !== deliveredQty;
+
+  async function confirm() {
+    setPending(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/batch-close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchId: data.batchId,
+          reason: "delivered",
+          closedAt,
+          deliveredQuantity: deliveredQty,
+          colorConfirmations: data.colorMatrix.map((c) => ({
+            color: c.color,
+            deliveredQuantity: colorQtys[c.color] ?? 0,
+          })),
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onDelivered();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="deliver-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center px-4
+                 bg-midnight/60 backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-lg bg-white rounded-lg shadow-2xl border-2 border-green">
+        {/* Big green header */}
+        <div className="bg-green-pale border-b-2 border-green px-5 py-3 rounded-t-md">
+          <h3 id="deliver-modal-title" className="text-xl font-bold text-green-dark">
+            🚚 Confirm delivery
+          </h3>
+          <p className="text-xs text-ink-600 mt-0.5">
+            {data.batchCode} · {data.quantity}× {data.modelYear} · {data.dealerName}
+          </p>
+        </div>
+
+        <div className="px-5 py-4 space-y-4">
+          {/* Closure date */}
+          <label className="block">
+            <span className="block text-xs font-medium text-ink-600 mb-1">
+              Closure date
+            </span>
+            <input
+              type="date"
+              className="input tabular-nums"
+              value={closedAt}
+              onChange={(e) => setClosedAt(e.target.value)}
+              disabled={pending}
+            />
+            <span className="block text-[0.65rem] text-ink-500 mt-1">
+              Backdate if cars were delivered on a previous day.
+            </span>
+          </label>
+
+          {/* Total qty */}
+          <label className="block">
+            <span className="block text-xs font-medium text-ink-600 mb-1">
+              Delivered quantity
+              <span className="text-[0.65rem] font-normal text-ink-500 ml-1.5">
+                (requested {data.quantity})
+              </span>
+            </span>
+            <input
+              type="number"
+              min={0}
+              className="input tabular-nums"
+              value={deliveredQty}
+              onChange={(e) => setDeliveredQty(parseInt(e.target.value || "0", 10))}
+              disabled={pending}
+            />
+            {deliveredQty < data.quantity && (
+              <span className="block text-[0.65rem] text-flame-dark mt-1">
+                ⚠️ Partial delivery — {data.quantity - deliveredQty} unit(s) short of the request.
+              </span>
+            )}
+          </label>
+
+          {/* Per-colour breakdown */}
+          {data.colorMatrix.length > 0 ? (
+            <div>
+              <p className="text-xs font-medium text-ink-600 mb-1.5">
+                Colours delivered
+                {showColorMismatch && (
+                  <span className="text-[0.65rem] font-normal text-flame-dark ml-1.5">
+                    (sum {colorSum} ≠ delivered {deliveredQty})
+                  </span>
+                )}
+              </p>
+              <div className="rounded-md border border-ink-200 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-ink-50 text-[0.65rem] text-ink-500 uppercase tracking-wide">
+                    <tr>
+                      <th className="text-left px-3 py-1.5">Colour</th>
+                      <th className="text-right px-3 py-1.5">Requested</th>
+                      <th className="text-right px-3 py-1.5">Confirmed</th>
+                      <th className="text-right px-3 py-1.5">Delivered</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.colorMatrix.map((c) => (
+                      <tr key={c.color} className="border-t border-ink-200/60">
+                        <td className="px-3 py-1.5 font-medium text-midnight">{c.color}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-ink-500">{c.requestedQuantity}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-ink-500">{c.confirmedQuantity}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          <input
+                            type="number"
+                            min={0}
+                            className="input text-right tabular-nums text-sm py-0.5 px-1 w-20 ml-auto"
+                            value={colorQtys[c.color] ?? 0}
+                            onChange={(e) =>
+                              setColorQtys((curr) => ({
+                                ...curr,
+                                [c.color]: parseInt(e.target.value || "0", 10),
+                              }))
+                            }
+                            disabled={pending}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <p className="text-[0.7rem] text-ink-500 italic">
+              No colour matrix configured for this batch — total quantity only.
+            </p>
+          )}
+
+          {error && (
+            <p role="alert" className="text-sm text-flame-dark">{error}</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-3 bg-ink-50 rounded-b-md border-t border-ink-200">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={pending}
+            className="btn text-sm"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={pending || deliveredQty < 0}
+            className="text-sm font-semibold px-4 py-2 rounded-md text-white
+                       bg-green-dark hover:bg-green disabled:opacity-50
+                       border border-green-dark"
+          >
+            {pending ? "Confirming…" : "✅ Confirm delivery"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -699,7 +981,8 @@ function ActionsList({
   /**
    * When provided, render this subset instead of `data.actions`. Used by
    * the parent to filter out actions that have their own dedicated panel
-   * (e.g. App Listing as a prominent button). Falls back to `data.actions`.
+   * (e.g. App Listing or Delivery as prominent buttons). Falls back to
+   * `data.actions` when not provided.
    */
   actionsOverride?: ActionDetail[];
   /** Pre-grouped alerts by action id so each row knows its own. */

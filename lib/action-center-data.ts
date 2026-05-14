@@ -11,7 +11,7 @@
 import { eq, asc, inArray, and } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, alerts,
+  batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, alerts, batchColorMatrix,
 } from "@/lib/db/schema";
 import type { ActiveAlert } from "@/lib/alert-engine";
 import { highestSeverity } from "@/lib/alert-engine";
@@ -90,6 +90,14 @@ export interface OpenActionRef {
   delayDays: number;
 }
 
+/** Per-colour breakdown for a batch — drives the Car Delivery confirmation modal. */
+export interface BatchColorRow {
+  color: string;
+  requestedQuantity: number;
+  confirmedQuantity: number;
+  deliveredQuantity: number;
+}
+
 export interface ActionDetail {
   /** batchActions row id (PK for mutations) */
   id: number;
@@ -141,6 +149,14 @@ export interface DrawerData {
   departments: { id: number; name: string }[];
   /** Active (unresolved) alerts for this batch. */
   alerts: ActiveAlert[];
+  /**
+   * Per-colour breakdown rows for this batch. Drives the Car Delivery
+   * confirmation modal — ops fills in delivered quantity per colour at
+   * the closure moment. Empty array when no color matrix is configured.
+   */
+  colorMatrix: BatchColorRow[];
+  /** Currently-recorded delivered quantity on the batch (cumulative). */
+  deliveredQuantity: number;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -376,7 +392,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     sortOrder:                r.at.sortOrder,
   }));
 
-  const [allDepartments, batchAlerts] = await Promise.all([
+  const [allDepartments, batchAlerts, colorMatrixRows] = await Promise.all([
     db
       .select({ id: departments.id, name: departments.name })
       .from(departments)
@@ -385,6 +401,15 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
       .select()
       .from(alerts)
       .where(and(eq(alerts.batchId, b.id), eq(alerts.resolved, false))),
+    db
+      .select({
+        color:              batchColorMatrix.color,
+        requestedQuantity:  batchColorMatrix.requestedQuantity,
+        confirmedQuantity:  batchColorMatrix.confirmedQuantity,
+        deliveredQuantity:  batchColorMatrix.deliveredQuantity,
+      })
+      .from(batchColorMatrix)
+      .where(eq(batchColorMatrix.batchId, b.id)),
   ]);
 
   const { statusLabel } = statusFor(b);
@@ -411,6 +436,13 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
 
     actions,
     departments: allDepartments,
+    colorMatrix: colorMatrixRows.map((c) => ({
+      color: c.color,
+      requestedQuantity: c.requestedQuantity,
+      confirmedQuantity: c.confirmedQuantity ?? 0,
+      deliveredQuantity: c.deliveredQuantity ?? 0,
+    })),
+    deliveredQuantity: b.deliveredQuantity ?? 0,
     alerts: batchAlerts.map((a) => ({
       id:             a.id,
       fingerprint:    a.fingerprint,
