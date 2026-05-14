@@ -44,10 +44,19 @@ const ACTION_STATUS_OPTIONS: Array<"waiting" | "blocked" | "done" | "skipped"> =
   ["waiting", "blocked", "done", "skipped"];
 
 export default function SettingsBatches({ data }: Props) {
+  const router = useRouter();
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [search, setSearch]         = useState("");
   const [dealerFilter, setDealerFilter] = useState<string>("all");
   const [lifecycleFilter, setLifecycleFilter] = useState<"all" | "pre_po" | "post_po">("all");
+
+  // ── Bulk selection ────────────────────────────────────────────
+  // Set of selected batch IDs. The sticky action bar appears when
+  // size > 0. "Select all visible" toggles every currently-filtered row.
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -59,6 +68,89 @@ export default function SettingsBatches({ data }: Props) {
       return hay.includes(q);
     });
   }, [data.batches, search, dealerFilter, lifecycleFilter]);
+
+  const visibleIds = useMemo(() => filtered.map((b) => b.id), [filtered]);
+  const visibleSelectedCount = visibleIds.filter((id) => selectedIds.has(id)).length;
+  const allVisibleSelected = visibleIds.length > 0 && visibleSelectedCount === visibleIds.length;
+  const someVisibleSelected = visibleSelectedCount > 0 && !allVisibleSelected;
+
+  function toggleSelected(id: number) {
+    setSelectedIds((curr) => {
+      const next = new Set(curr);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function toggleSelectAllVisible() {
+    setSelectedIds((curr) => {
+      const next = new Set(curr);
+      if (allVisibleSelected) {
+        // Clear only the visible ones — preserve selections that
+        // exist on rows hidden by current filters.
+        for (const id of visibleIds) next.delete(id);
+      } else {
+        for (const id of visibleIds) next.add(id);
+      }
+      return next;
+    });
+  }
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  /**
+   * Delete every selected batch. Iterates serially so partial failures
+   * are clearly reported (and so we don't slam Turso with a parallel
+   * blast of deletes that share FK dependencies). Refreshes the server
+   * component once at the end so a successful batch wipe propagates.
+   */
+  async function deleteSelected() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!confirm(
+      `Delete ${ids.length} batch${ids.length === 1 ? "" : "es"}? ` +
+      `This also deletes each batch's actions, vehicles, milestones, and alerts. ` +
+      `Cannot be undone.`,
+    )) return;
+
+    setBulkBusy(true);
+    setBulkError(null);
+    setBulkProgress({ done: 0, total: ids.length });
+    const failures: { id: number; error: string }[] = [];
+    for (const id of ids) {
+      try {
+        const res = await fetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ resource: "batch", op: "delete", id }),
+        });
+        if (!res.ok) {
+          const txt = await res.text();
+          failures.push({ id, error: txt.slice(0, 200) });
+        }
+      } catch (e) {
+        failures.push({ id, error: e instanceof Error ? e.message : String(e) });
+      } finally {
+        setBulkProgress((p) => p ? { ...p, done: p.done + 1 } : p);
+      }
+    }
+    setBulkBusy(false);
+    setBulkProgress(null);
+    if (failures.length > 0) {
+      // Keep failed IDs selected so the operator can retry or
+      // investigate; clear the ones that succeeded.
+      const failedIds = new Set(failures.map((f) => f.id));
+      setSelectedIds(failedIds);
+      setBulkError(
+        `${failures.length} of ${ids.length} delete${ids.length === 1 ? "" : "s"} failed. ` +
+        `First error: ${failures[0].error}`,
+      );
+    } else {
+      setSelectedIds(new Set());
+    }
+    router.refresh();
+  }
 
   return (
     <CollapsibleCard
@@ -102,31 +194,102 @@ export default function SettingsBatches({ data }: Props) {
         </label>
       </div>
 
+      {/* Bulk-action bar — only visible when something is selected.
+          Sits above the table so the count + Delete button are always
+          findable without scrolling back to the top. */}
+      {selectedIds.size > 0 && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 px-3 py-2 rounded-md border-2 border-flame bg-flame-pale">
+          <p className="text-sm font-medium text-flame-dark">
+            <span className="tabular-nums">{selectedIds.size}</span>
+            {" "}batch{selectedIds.size === 1 ? "" : "es"} selected
+            {bulkProgress && (
+              <span className="ml-2 text-xs font-normal text-ink-600 tabular-nums">
+                · deleting {bulkProgress.done}/{bulkProgress.total}…
+              </span>
+            )}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={clearSelection}
+              disabled={bulkBusy}
+              className="btn text-xs"
+              title="Clear selection"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={deleteSelected}
+              disabled={bulkBusy}
+              className="text-xs font-semibold px-3 py-1.5 rounded-md text-white
+                         bg-flame-dark hover:bg-flame disabled:opacity-50
+                         border border-flame-dark"
+              title="Delete every selected batch (irreversible)"
+            >
+              {bulkBusy ? "Deleting…" : `🗑 Delete selected (${selectedIds.size})`}
+            </button>
+          </div>
+        </div>
+      )}
+      {bulkError && (
+        <p role="alert" className="mb-3 text-sm text-flame-dark bg-flame-pale border border-flame px-3 py-2 rounded-md">
+          {bulkError}
+        </p>
+      )}
+
       <div className="border border-ink-200 rounded-md overflow-hidden">
         {filtered.length === 0 ? (
           <p className="px-4 py-8 text-sm text-ink-500 text-center">
             No batches match the filters.
           </p>
         ) : (
-          <ul className="divide-y divide-ink-200">
-            {filtered.map((b) => (
-              <li key={b.id}>
-                <SummaryRow
-                  batch={b}
-                  expanded={expandedId === b.id}
-                  onToggle={() => setExpandedId((v) => (v === b.id ? null : b.id))}
+          <>
+            {/* Header row — "select all visible" checkbox + counts. */}
+            <div className="flex items-center gap-3 px-3 py-2 bg-ink-50 border-b border-ink-200">
+              <label
+                className="flex items-center gap-2 text-xs text-ink-600 cursor-pointer select-none"
+                title={allVisibleSelected ? "Clear all visible" : "Select all visible"}
+              >
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  ref={(el) => { if (el) el.indeterminate = someVisibleSelected; }}
+                  onChange={toggleSelectAllVisible}
+                  className="h-4 w-4 accent-brand"
+                  disabled={bulkBusy}
                 />
-                {expandedId === b.id && (
-                  <DetailForm
-                    key={b.id /* reset draft per-batch */}
+                <span>
+                  Select all
+                  <span className="text-ink-500 tabular-nums ml-1">
+                    ({filtered.length} visible)
+                  </span>
+                </span>
+              </label>
+            </div>
+            <ul className="divide-y divide-ink-200">
+              {filtered.map((b) => (
+                <li key={b.id}>
+                  <SummaryRow
                     batch={b}
-                    departments={data.departments}
-                    dealers={data.dealers}
+                    expanded={expandedId === b.id}
+                    onToggle={() => setExpandedId((v) => (v === b.id ? null : b.id))}
+                    selected={selectedIds.has(b.id)}
+                    onToggleSelect={() => toggleSelected(b.id)}
+                    selectDisabled={bulkBusy}
                   />
-                )}
-              </li>
-            ))}
-          </ul>
+                  {expandedId === b.id && (
+                    <DetailForm
+                      key={b.id /* reset draft per-batch */}
+                      batch={b}
+                      departments={data.departments}
+                      dealers={data.dealers}
+                    />
+                  )}
+                </li>
+              ))}
+            </ul>
+          </>
         )}
       </div>
     </CollapsibleCard>
@@ -138,11 +301,17 @@ export default function SettingsBatches({ data }: Props) {
 // ──────────────────────────────────────────────────────────────────
 
 function SummaryRow({
-  batch, expanded, onToggle,
+  batch, expanded, onToggle, selected, onToggleSelect, selectDisabled,
 }: {
   batch: BatchEditRow;
   expanded: boolean;
   onToggle: () => void;
+  /** True when this batch is part of the bulk selection. */
+  selected: boolean;
+  /** Toggle the selection for this batch (does NOT toggle expansion). */
+  onToggleSelect: () => void;
+  /** True while a bulk-delete is running — locks the checkbox. */
+  selectDisabled: boolean;
 }) {
   const actionStats = useMemo(() => {
     let waiting = 0, blocked = 0, done = 0;
@@ -154,31 +323,51 @@ function SummaryRow({
     return { waiting, blocked, done };
   }, [batch.actions]);
 
+  // The row is two clickable surfaces side-by-side: a checkbox for
+  // selection (does NOT toggle expansion), and the rest of the row
+  // (expansion toggle). Wrapped in a div, not a button, so the
+  // checkbox can be its own interactive element.
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={expanded}
+    <div
       className={cn(
-        "w-full text-left px-3 py-2.5 flex flex-wrap items-center gap-3",
-        "hover:bg-ink-50 focus-visible:bg-ink-50 outline-none",
-        "focus-visible:outline-2 focus-visible:outline-brand focus-visible:outline-offset-[-2px]",
+        "flex items-center gap-3 px-3 py-2.5",
+        "hover:bg-ink-50",
         expanded && "bg-brand-pastel hover:bg-brand-pastel",
+        selected && "bg-flame-pale/40 hover:bg-flame-pale/50",
       )}
     >
-      <span aria-hidden="true" className="text-ink-500">{expanded ? "▾" : "▸"}</span>
-      <code className="font-mono text-sm text-midnight">{batch.batchCode}</code>
-      <span className="text-xs text-ink-500">·</span>
-      <span className="text-sm text-midnight">{batch.dealerName}</span>
-      <span className="text-xs text-ink-500">·</span>
-      <span className="text-sm tabular-nums">{batch.requestedQuantity}× {batch.model ?? ""} {batch.year ?? ""}</span>
-      <span className="ml-auto flex items-center gap-2 text-xs">
-        <PhaseChip lifecycle={batch.lifecycleState} />
-        <span className="text-ink-500 tabular-nums">
-          {actionStats.done}/{batch.actions.length} done
+      <input
+        type="checkbox"
+        checked={selected}
+        onChange={onToggleSelect}
+        disabled={selectDisabled}
+        className="h-4 w-4 accent-flame-dark shrink-0 cursor-pointer"
+        aria-label={`Select batch ${batch.batchCode}`}
+        title={selected ? "Click to deselect" : "Click to select for bulk action"}
+      />
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        className={cn(
+          "flex-1 min-w-0 text-left flex flex-wrap items-center gap-3 outline-none",
+          "focus-visible:outline-2 focus-visible:outline-brand focus-visible:outline-offset-2 rounded",
+        )}
+      >
+        <span aria-hidden="true" className="text-ink-500">{expanded ? "▾" : "▸"}</span>
+        <code className="font-mono text-sm text-midnight">{batch.batchCode}</code>
+        <span className="text-xs text-ink-500">·</span>
+        <span className="text-sm text-midnight">{batch.dealerName}</span>
+        <span className="text-xs text-ink-500">·</span>
+        <span className="text-sm tabular-nums">{batch.requestedQuantity}× {batch.model ?? ""} {batch.year ?? ""}</span>
+        <span className="ml-auto flex items-center gap-2 text-xs">
+          <PhaseChip lifecycle={batch.lifecycleState} />
+          <span className="text-ink-500 tabular-nums">
+            {actionStats.done}/{batch.actions.length} done
+          </span>
         </span>
-      </span>
-    </button>
+      </button>
+    </div>
   );
 }
 
