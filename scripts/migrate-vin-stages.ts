@@ -60,6 +60,27 @@ function buildKeywordWhere(): string {
 }
 
 async function main() {
+  // Loudly announce which DB we're hitting so a wrong-target migration
+  // (most common failure: forgetting to override DATABASE_URL in
+  // PowerShell and hitting local file:./data/tracker.db instead of
+  // the Turso remote) is obvious from the first line of output.
+  const url = process.env.DATABASE_URL ?? "(unset)";
+  const masked = url.startsWith("libsql://")
+    ? url.replace(/^(libsql:\/\/[^.]{4})[^.]*/, "$1…")
+    : url;
+  const kind = url.startsWith("libsql://") || url.startsWith("https://") || url.startsWith("wss://")
+    ? "REMOTE (Turso)"
+    : url.startsWith("file:")
+    ? "LOCAL file"
+    : "unknown";
+  console.log(`→ Target: ${kind}  ${masked}`);
+  if (kind === "LOCAL file") {
+    console.log("  ⚠ This is your LOCAL DB. If you meant Turso, abort (Ctrl-C),");
+    console.log("    then in PowerShell: $env:DATABASE_URL='libsql://…'");
+    console.log("                        $env:TURSO_AUTH_TOKEN='…'");
+    console.log("                        npx tsx scripts/migrate-vin-stages.ts");
+  }
+
   console.log("→ Ensuring schema (CREATE TABLE IF NOT EXISTS) …");
   await db.run(sql.raw(`
     CREATE TABLE IF NOT EXISTS vin_chase_stages (
