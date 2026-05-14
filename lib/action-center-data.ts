@@ -15,6 +15,7 @@ import {
 } from "@/lib/db/schema";
 import type { ActiveAlert } from "@/lib/alert-engine";
 import { highestSeverity } from "@/lib/alert-engine";
+import { getLeadTimeDays } from "@/lib/rules";
 
 // ──────────────────────────────────────────────────────────────────
 // Public types
@@ -138,6 +139,12 @@ export interface DrawerData {
    * `batch_date_revisions`.
    */
   currentProjectedDeliveryDate: string | null;
+  /**
+   * The configurable Pre PO Ops Lead Time (Settings → Rules). Surfaced
+   * here so the Phase G recommend-shift banner can compute the safe
+   * runway: recommendedDate = today + prePoOpsLeadTimeDays.
+   */
+  prePoOpsLeadTimeDays: number;
   /** Pre-formatted status label ("🟢 On track", "🔴 Delayed +5d", etc.). */
   statusLabel: string;
 
@@ -399,7 +406,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     sortOrder:                r.at.sortOrder,
   }));
 
-  const [allDepartments, batchAlerts, colorMatrixRows] = await Promise.all([
+  const [allDepartments, batchAlerts, colorMatrixRows, leadTimeDays] = await Promise.all([
     db
       .select({ id: departments.id, name: departments.name })
       .from(departments)
@@ -417,6 +424,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
       })
       .from(batchColorMatrix)
       .where(eq(batchColorMatrix.batchId, b.id)),
+    getLeadTimeDays(),
   ]);
 
   const { statusLabel } = statusFor(b);
@@ -431,6 +439,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
 
     promisedDate: b.dealerPromisedDeliveryDate,
     currentProjectedDeliveryDate: b.currentProjectedDeliveryDate ?? null,
+    prePoOpsLeadTimeDays: leadTimeDays,
     statusLabel,
 
     closedAt:         b.closedAt ?? null,

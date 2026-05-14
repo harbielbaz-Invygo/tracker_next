@@ -108,6 +108,23 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
     ? data.actions.filter((a) => !excludedIds.has(a.id))
     : data.actions;
 
+  // Phase G: when a VIN-not-received alert is firing AND the batch is
+  // still open, suggest pushing availability to today + leadTime so the
+  // safe runway is restored. The banner one-click-opens the same
+  // DateShiftModal as the manual shift button — with the recommended
+  // date pre-filled.
+  const hasRunwayAlert = data.alerts.some(
+    (a) => a.alertType === "no_vin_before_avail" && !a.acknowledged,
+  );
+  const recommendedDate = (() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() + (data.prePoOpsLeadTimeDays ?? 21));
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  })();
+  const showRecommendShift = hasRunwayAlert && !data.closedAt;
+
   return (
     <div className="card">
       <DrawerHeader
@@ -126,6 +143,13 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
         onMutated={() => { refresh(); onMutation?.(); }}
         disabled={!!data.closedAt}
       />
+      {showRecommendShift && (
+        <RecommendShiftBanner
+          data={data}
+          recommendedDate={recommendedDate}
+          onShifted={() => { refresh(); onMutation?.(); }}
+        />
+      )}
       <ConfidenceRow data={data} onSaved={() => { refresh(); onMutation?.(); }} disabled={!!data.closedAt} />
       <ActionsList
         data={data}
@@ -804,6 +828,77 @@ function DrawerHeader({
  * and requires a deliberate action; an optional reason note goes onto
  * the batch for audit / Slack status checks.
  */
+// ──────────────────────────────────────────────────────────────────
+// Recommend-shift banner (Pattern C)
+// ──────────────────────────────────────────────────────────────────
+//
+// Phase G: when a "VIN not received before availability" alert is
+// firing on this batch, the engine knows the runway is too short to
+// honour the current promised date. Rather than auto-pushing it
+// (Pattern B) or asking ops to do the math (Pattern A), we surface a
+// banner that names the recommended new date (today + lead time) and
+// invites a one-click confirm — opens the Phase F shift modal with
+// the recommended date pre-filled. Ops still owns the decision; the
+// system removes the friction of remembering the math.
+
+function RecommendShiftBanner({
+  data, recommendedDate, onShifted,
+}: {
+  data: DrawerData;
+  recommendedDate: string;
+  onShifted: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const previous = data.currentProjectedDeliveryDate ?? data.promisedDate;
+  const DAY_MS_LOCAL = 24 * 60 * 60 * 1000;
+  const recDelay = Math.round(
+    (new Date(recommendedDate).getTime() - new Date(previous).getTime()) / DAY_MS_LOCAL,
+  );
+
+  return (
+    <div className="mb-4 rounded-md border-2 border-gold bg-gold-pale px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+      <div className="flex items-start gap-2 min-w-0 flex-1">
+        <span aria-hidden="true" className="text-lg leading-none mt-0.5">💡</span>
+        <div className="min-w-0">
+          <p className="text-sm font-bold text-gold-dark leading-snug">
+            Recommend shifting availability date
+          </p>
+          <p className="text-xs text-ink-700 leading-snug mt-0.5">
+            VIN not yet received and the safe runway has shrunk.
+            Push availability from{" "}
+            <span className="font-mono tabular-nums text-midnight">{previous}</span>{" "}
+            to{" "}
+            <span className="font-mono tabular-nums font-bold text-midnight">{recommendedDate}</span>{" "}
+            (today + {data.prePoOpsLeadTimeDays}d
+            {recDelay > 0 ? `, +${recDelay}d later` : recDelay < 0 ? `, ${recDelay}d earlier` : ", no change"})
+            to restore the runway.
+          </p>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="shrink-0 text-sm font-semibold px-3 py-1.5 rounded-md text-white
+                   bg-gold-dark hover:bg-gold border border-gold-dark"
+        title="Open the shift modal with the recommended date pre-filled"
+      >
+        📅 Apply shift
+      </button>
+      {open && (
+        <DateShiftModal
+          data={data}
+          recommendedDate={recommendedDate}
+          onClose={() => setOpen(false)}
+          onShifted={() => {
+            setOpen(false);
+            onShifted();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Date-shift modal — capture the projected-availability date shift
 // ──────────────────────────────────────────────────────────────────
