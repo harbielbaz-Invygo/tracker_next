@@ -16,6 +16,7 @@ import {
 import type { ActiveAlert } from "@/lib/alert-engine";
 import { highestSeverity } from "@/lib/alert-engine";
 import { getLeadTimeDays } from "@/lib/rules";
+import { isVinChaseName } from "@/lib/cluster-keywords";
 
 // ──────────────────────────────────────────────────────────────────
 // Public types
@@ -108,6 +109,22 @@ export interface BatchDeliveryLegRow {
   notes: string | null;
 }
 
+/**
+ * Canonical VIN-chase chain template — every action_type in the system
+ * whose name matches the VIN-chase keyword classifier. Sorted by
+ * action_types.sortOrder so the drawer can render the full chain in
+ * the correct order even when a specific batch only has some of the
+ * steps configured.
+ */
+export interface VinChaseTemplateStep {
+  actionTypeId: number;
+  name: string;
+  waitingLabel: string;
+  doneLabel: string;
+  sortOrder: number;
+  defaultDepartmentId: number | null;
+}
+
 /** Per-colour breakdown for a batch — drives the Car Delivery confirmation modal. */
 export interface BatchColorRow {
   color: string;
@@ -194,6 +211,14 @@ export interface DrawerData {
    * non-empty, the Car Delivery modal collects per-leg confirmations.
    */
   legs: BatchDeliveryLegRow[];
+  /**
+   * Canonical 6-step VIN chase chain — all action_types in the system
+   * matching the VIN-chase keyword classifier. Empty array when admin
+   * hasn't configured any VIN-chase-named action types yet. The drawer's
+   * stepper renders this as the spine; per-step state is derived by
+   * matching against `actions[]` by actionTypeId.
+   */
+  vinChaseTemplate: VinChaseTemplateStep[];
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -429,7 +454,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     sortOrder:                r.at.sortOrder,
   }));
 
-  const [allDepartments, batchAlerts, colorMatrixRows, leadTimeDays, deliveryLegs] = await Promise.all([
+  const [allDepartments, batchAlerts, colorMatrixRows, leadTimeDays, deliveryLegs, allActionTypes] = await Promise.all([
     db
       .select({ id: departments.id, name: departments.name })
       .from(departments)
@@ -470,7 +495,34 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
         throw err;
       }
     })(),
+    // Full action_types catalogue — used to build the VIN-chase template
+    // (canonical chain shown in the drawer even when not all steps are
+    // attached to this specific batch). Sorted by the admin-controlled
+    // sortOrder so the stepper renders in the right order.
+    db
+      .select({
+        id:                  actionTypes.id,
+        name:                actionTypes.name,
+        waitingLabel:        actionTypes.waitingLabel,
+        doneLabel:           actionTypes.doneLabel,
+        sortOrder:           actionTypes.sortOrder,
+        defaultDepartmentId: actionTypes.defaultDepartmentId,
+      })
+      .from(actionTypes)
+      .orderBy(asc(actionTypes.sortOrder)),
   ]);
+
+  // Filter the catalogue down to VIN-chase steps only — keyword match.
+  const vinChaseTemplate: VinChaseTemplateStep[] = allActionTypes
+    .filter((t) => isVinChaseName(t.name))
+    .map((t) => ({
+      actionTypeId:        t.id,
+      name:                t.name,
+      waitingLabel:        t.waitingLabel,
+      doneLabel:           t.doneLabel,
+      sortOrder:           t.sortOrder,
+      defaultDepartmentId: t.defaultDepartmentId ?? null,
+    }));
 
   const { statusLabel } = statusFor(b);
 
@@ -512,6 +564,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
       deliveredQuantity:  l.deliveredQuantity ?? 0,
       notes:              l.notes ?? null,
     })),
+    vinChaseTemplate,
     alerts: batchAlerts.map((a) => ({
       id:             a.id,
       fingerprint:    a.fingerprint,

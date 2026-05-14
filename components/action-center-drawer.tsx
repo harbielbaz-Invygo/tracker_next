@@ -1299,38 +1299,9 @@ function CancelModal({
 // Actions list
 // ──────────────────────────────────────────────────────────────────
 
-/**
- * Keywords that route an action into the "🔑 VIN chase" cluster.
- *
- * Originally this was an exact-match set against canonical names, but
- * production admins rename action_types freely (e.g. "Plate Waiting
- * from Dealer", "Tracking System Confirmation") so an exact match
- * misclassifies the same action across deployments. A case-insensitive
- * substring match is more forgiving — anything mentioning one of these
- * tokens belongs in VIN chase.
- *
- * Tokens were picked to be specific enough not to false-match common
- * internal-phase names (no token appears in "Car Specs", "Pricing",
- * "SKU", "Uploading Cars" etc.). App Listing + Delivery are filtered
- * upstream into their own panels and never reach this classifier.
- */
-const VIN_CHASE_KEYWORDS = [
-  "vin",
-  "plate",
-  "customs",
-  "tracking",
-  "inspection",
-  "showroom",
-  "confirmation email",   // "Send Dealer Confirmation Email"
-  "dealer email",         // alternate phrasing
-];
-
-function clusterFor(actionTypeName: string): "vin_chase" | "internal" {
-  const name = actionTypeName.toLowerCase();
-  return VIN_CHASE_KEYWORDS.some((kw) => name.includes(kw))
-    ? "vin_chase"
-    : "internal";
-}
+// Classifier moved to lib/cluster-keywords.ts so the server data layer
+// can build the canonical VIN-chase template using the same rules.
+import { clusterFor } from "@/lib/cluster-keywords";
 
 function ActionsList({
   data, actionsOverride, alertsByActionId, onMutated, layout, disabled = false,
@@ -1377,13 +1348,20 @@ function ActionsList({
           collapsible — click the header to toggle.
           VIN chase uses the stepper variant (strict linear, one active
           step). Internal phase uses the kanban variant (parallel work). */}
-      {vinChaseActions.length > 0 && (
+      {/* VIN-chase cluster renders the canonical template (every
+          action_type in the system matching VIN-chase keywords) even
+          when the current batch only has a subset attached. Steps
+          without a matching batch_action show as "upcoming · not on
+          this batch yet". This means we render the cluster whenever
+          either the template OR existing batch_actions are non-empty. */}
+      {(vinChaseActions.length > 0 || data.vinChaseTemplate.length > 0) && (
         <ClusterSection
           title="🔑 VIN chase"
           subtitle="Strict linear chain — only one step active at a time"
           accent="gold"
           variant="stepper"
           actions={vinChaseActions}
+          template={data.vinChaseTemplate}
           alertsByActionId={alertsByActionId}
           onMutated={onMutated}
           layout={layout}
@@ -1414,7 +1392,7 @@ function ActionsList({
  * Waiting/Blocked/Done/Skipped sub-grouping inside.
  */
 function ClusterSection({
-  title, subtitle, accent, variant, actions, alertsByActionId, onMutated, layout, disabled, lifecycleState,
+  title, subtitle, accent, variant, actions, template, alertsByActionId, onMutated, layout, disabled, lifecycleState,
 }: {
   title: string;
   subtitle: string;
@@ -1429,6 +1407,13 @@ function ClusterSection({
    */
   variant: "kanban" | "stepper";
   actions: ActionDetail[];
+  /**
+   * Canonical step template for the stepper variant — every
+   * VIN-chase action_type in the system. Steps without a matching
+   * batch_action render as upcoming placeholders. Ignored by the
+   * kanban variant. Defaults to [] for safety.
+   */
+  template?: DrawerData["vinChaseTemplate"];
   alertsByActionId: Map<number, ActiveAlert[]>;
   onMutated: () => void;
   layout: "vertical" | "kanban";
@@ -1447,9 +1432,16 @@ function ClusterSection({
   const accentText   = accent === "gold" ? "text-gold-dark" : "text-brand-dark";
 
   // Header summary: total + count of unfinished items so ops can see
-  // each cluster's at-a-glance health without scanning.
-  const total = actions.length;
-  const pending = groups.waiting.length + groups.blocked.length;
+  // each cluster's at-a-glance health without scanning. For the stepper
+  // variant we count template steps (so 1/6 reads correctly even if
+  // only 1 batch_action is attached today); kanban uses the actions
+  // list directly.
+  const total = variant === "stepper" && template && template.length > 0
+    ? template.length
+    : actions.length;
+  const pending = variant === "stepper" && template && template.length > 0
+    ? template.length - groups.done.length - groups.skipped.length
+    : groups.waiting.length + groups.blocked.length;
   const done = groups.done.length;
 
   // Each cluster is independently collapsible. Default expanded —
@@ -1504,6 +1496,7 @@ function ClusterSection({
           {variant === "stepper" ? (
             <VinChaseStepper
               actions={actions}
+              template={template ?? []}
               onMutated={onMutated}
               disabled={disabled}
             />
@@ -1609,40 +1602,91 @@ function ClusterBody({
 // past them to the next.
 
 function VinChaseStepper({
-  actions, onMutated, disabled,
+  actions, template, onMutated, disabled,
 }: {
   actions: ActionDetail[];
+  /**
+   * Canonical step template — every VIN-chase action_type in the
+   * system (admin-configured, keyword-matched). The stepper renders
+   * the FULL template so ops sees the whole chain even when only a
+   * subset is attached to this batch.
+   */
+  template: DrawerData["vinChaseTemplate"];
   onMutated: () => void;
   disabled: boolean;
 }) {
-  // Sort by sortOrder ascending — admin's configured chain order.
-  const ordered = [...actions].sort((a, b) => a.sortOrder - b.sortOrder);
-  // First not-done, not-skipped step is the active one.
-  const currentIdx = ordered.findIndex(
-    (a) => a.status !== "done" && a.status !== "skipped",
-  );
+  // Index the batch's actions by actionTypeId for O(1) lookup.
+  const actionByTypeId = new Map<number, ActionDetail>();
+  for (const a of actions) actionByTypeId.set(a.actionTypeId, a);
+
+  // If we have a template, render it as the spine. Otherwise fall back
+  // to whatever batch_actions exist (sortable by their own sortOrder).
+  // Template-driven rendering is the common case; the fallback exists
+  // only for legacy systems without VIN-chase action_types configured.
+  type Step = {
+    key: string;
+    stepNumber: number;
+    label: string;
+    doneLabel: string;
+    action: ActionDetail | null; // null = template step with no batch_action yet
+    sortOrder: number;
+  };
+  const steps: Step[] = template.length > 0
+    ? template.map((t, i) => ({
+        key:        `tpl-${t.actionTypeId}`,
+        stepNumber: i + 1,
+        label:      t.waitingLabel,
+        doneLabel:  t.doneLabel,
+        action:     actionByTypeId.get(t.actionTypeId) ?? null,
+        sortOrder:  t.sortOrder,
+      }))
+    : [...actions]
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .map((a, i) => ({
+          key:        `act-${a.id}`,
+          stepNumber: i + 1,
+          label:      a.waitingLabel,
+          doneLabel:  a.doneLabel,
+          action:     a,
+          sortOrder:  a.sortOrder,
+        }));
+
+  // First step whose action is not-done and not-skipped is "current".
+  // Template steps with no attached action are treated as upcoming
+  // (can't be marked done — nothing to mark).
+  const currentIdx = steps.findIndex((s) => {
+    if (!s.action) return false;
+    return s.action.status !== "done" && s.action.status !== "skipped";
+  });
 
   return (
     <ol className="space-y-2">
-      {ordered.map((action, i) => {
-        const isDone     = action.status === "done";
-        const isSkipped  = action.status === "skipped";
-        const isCurrent  = i === currentIdx;
+      {steps.map((s, i) => {
+        const status = s.action?.status;
+        const isDone    = status === "done";
+        const isSkipped = status === "skipped";
+        const isCurrent = i === currentIdx;
+        const isMissing = s.action === null;
+        // "upcoming" covers both genuinely later steps AND template
+        // steps not attached to this batch (no batch_action yet).
         const isUpcoming = !isDone && !isSkipped && !isCurrent;
         return (
-          <li key={action.id}>
+          <li key={s.key}>
             <VinStepperRow
-              stepNumber={i + 1}
-              action={action}
+              stepNumber={s.stepNumber}
+              label={s.label}
+              doneLabel={s.doneLabel}
+              action={s.action}
               state={
                 isDone     ? "done"
                 : isSkipped ? "skipped"
                 : isCurrent ? "current"
                 : "upcoming"
               }
+              missing={isMissing}
               onMutated={onMutated}
               disabled={disabled || isUpcoming}
-              showActions={isCurrent && !disabled}
+              showActions={isCurrent && !disabled && !isMissing}
             />
           </li>
         );
@@ -1652,11 +1696,16 @@ function VinChaseStepper({
 }
 
 function VinStepperRow({
-  stepNumber, action, state, onMutated, disabled, showActions,
+  stepNumber, label, doneLabel, action, state, missing, onMutated, disabled, showActions,
 }: {
   stepNumber: number;
-  action: ActionDetail;
+  label: string;
+  doneLabel: string;
+  /** Underlying batch_action, or null for template steps not attached to this batch. */
+  action: ActionDetail | null;
   state: "done" | "current" | "upcoming" | "skipped";
+  /** True when this step exists in the template but has no batch_action on the current batch. */
+  missing: boolean;
   onMutated: () => void;
   disabled: boolean;
   showActions: boolean;
@@ -1664,6 +1713,7 @@ function VinStepperRow({
   const [pending, setPending] = useState(false);
 
   async function setStatus(newStatus: "done" | "skipped") {
+    if (!action) return;
     setPending(true);
     try {
       const body: Record<string, unknown> = {
@@ -1695,10 +1745,10 @@ function VinStepperRow({
     skipped:  { rowCls: "bg-ink-100 border-ink-200 opacity-60", iconCls: "bg-ink-300 text-white",           icon: "⏭", labelCls: "text-ink-500 line-through" },
   }[state];
 
-  const labelText = state === "done" ? action.doneLabel : action.waitingLabel;
-  const ownerLabel = action.assignedStakeholderName
+  const labelText = state === "done" ? doneLabel : label;
+  const ownerLabel = action?.assignedStakeholderName
     ? `@${action.assignedStakeholderName}${action.departmentName ? ` · ${action.departmentName}` : ""}`
-    : action.departmentName ?? null;
+    : action?.departmentName ?? null;
 
   return (
     <div className={cn("flex items-start gap-3 px-3 py-2 rounded-md border", visuals.rowCls)}>
@@ -1717,13 +1767,13 @@ function VinStepperRow({
         </p>
         <p className="text-[0.7rem] text-ink-500 mt-0.5 flex flex-wrap items-center gap-x-2">
           {ownerLabel && <span>{ownerLabel}</span>}
-          {action.expectedDate && (
+          {action?.expectedDate && (
             <>
               {ownerLabel && <Sep />}
               <span className="tabular-nums">📅 {action.expectedDate}</span>
             </>
           )}
-          {state === "done" && action.completedAt && (
+          {state === "done" && action?.completedAt && (
             <>
               <Sep />
               <span className="tabular-nums text-green-dark">
@@ -1731,8 +1781,13 @@ function VinStepperRow({
               </span>
             </>
           )}
-          {state === "upcoming" && (
+          {state === "upcoming" && !missing && (
             <span className="italic text-ink-400">— waiting for the previous step</span>
+          )}
+          {missing && (
+            <span className="italic text-ink-400">
+              — not on this batch yet (add via Settings → Batches)
+            </span>
           )}
         </p>
       </div>
