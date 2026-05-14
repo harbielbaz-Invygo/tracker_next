@@ -10,11 +10,12 @@
  * If the dealer doesn't exist yet, we create one with the dealer name as
  * given and the first split's city as home_city.
  */
-import { and, eq, inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
   batches, dealers, batchActions, actionDependencies, actionTypes, batchDeliveryLegs,
+  vinChaseStages, batchVinStages,
 } from "@/lib/db/schema";
 import { makeBatchCode } from "@/lib/utils";
 import { getLeadTimeDays } from "@/lib/rules";
@@ -154,26 +155,29 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── When VIN already received with the PO, find the two VIN-chase
-  //    action types we'll pre-mark done. Match by full name first, then
-  //    fall back to a substring scan so a renamed type (e.g. "VIN
-  //    Assignment") still resolves. Null means the action type doesn't
-  //    exist in this DB — we silently skip pre-marking for that step.
-  let vinPreMarkTypeIds: { email: number | null; vin: number | null } = { email: null, vin: null };
-  if (body.vinReceivedAtIntake) {
-    const allTypes = await db.select({ id: actionTypes.id, name: actionTypes.name }).from(actionTypes);
-    const byNameLower = new Map(allTypes.map((t) => [t.name.toLowerCase(), t.id]));
-    function resolve(exactLc: string, substringLc: string): number | null {
-      const exact = byNameLower.get(exactLc);
-      if (exact) return exact;
-      const hit = allTypes.find((t) => t.name.toLowerCase().includes(substringLc));
-      return hit?.id ?? null;
+  // ── Load the canonical VIN chase stages once. Every new batch gets
+  //    a `batch_vin_stages` row per stage so the drawer's stepper has
+  //    state from creation. If the migration hasn't run on this DB
+  //    yet (no stages exist), we silently skip — drawer falls back to
+  //    an empty VIN-chase section.
+  const allVinStages = await (async () => {
+    try {
+      return await db.select({
+        id:   vinChaseStages.id,
+        name: vinChaseStages.name,
+      }).from(vinChaseStages);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table/i.test(msg)) return [];
+      throw err;
     }
-    vinPreMarkTypeIds = {
-      email: resolve("send dealer confirmation email", "dealer confirmation"),
-      vin:   resolve("vin", "vin"),
-    };
-  }
+  })();
+  // Find the "VIN Receiving" stage so we can pre-mark it when ops
+  // checked "VIN received at intake". Substring scan keeps it tolerant
+  // of admin renames as long as the new name still mentions VIN.
+  const vinReceivingStageId = allVinStages.find(
+    (s) => s.name.toLowerCase().includes("vin"),
+  )?.id ?? null;
 
   // ── Create batches × splits — single transaction ──────────────
   // If any insert below throws (FK violation, disk full, …), the whole
@@ -377,34 +381,23 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // ── VIN-at-intake pre-mark (unchanged) ──────────────────────
-      if (body.vinReceivedAtIntake) {
-        const pickedIds = new Set(body.actions.map((a) => a.actionTypeId));
-        const completedAtIso = `${body.po.date}T12:00:00Z`;
-        for (const typeId of [vinPreMarkTypeIds.email, vinPreMarkTypeIds.vin]) {
-          if (typeId == null) continue;
-          if (pickedIds.has(typeId)) {
-            await tx.update(batchActions)
-              .set({
-                status: "done",
-                completedAt: completedAtIso,
-                expectedDate: body.po.date,
-              })
-              .where(and(
-                eq(batchActions.batchId, batchRow.id),
-                eq(batchActions.actionTypeId, typeId),
-              ));
-          } else {
-            await tx.insert(batchActions).values({
-              batchId:      batchRow.id,
-              actionTypeId: typeId,
-              status:       "done",
-              completedAt:  completedAtIso,
-              expectedDate: body.po.date,
-              notes:        "Auto-completed: VIN received with the PO at intake.",
-            });
-          }
-        }
+      // ── VIN chase stages — one batch_vin_stages row per canonical
+      //    stage. Created here so the drawer's stepper has full state
+      //    on first render. If body.vinReceivedAtIntake is set, the
+      //    "VIN Receiving" stage starts as done (timestamped at PO
+      //    date noon UTC) instead of waiting.
+      const vinIntakeCompletedAt = `${body.po.date}T12:00:00Z`;
+      for (const stage of allVinStages) {
+        const isPreMarked = body.vinReceivedAtIntake && stage.id === vinReceivingStageId;
+        await tx.insert(batchVinStages).values({
+          batchId:     batchRow.id,
+          stageId:     stage.id,
+          status:      isPreMarked ? "done" : "waiting",
+          completedAt: isPreMarked ? vinIntakeCompletedAt : undefined,
+          notes:       isPreMarked
+            ? "Auto-completed: VIN received with the PO at intake."
+            : undefined,
+        });
       }
 
       out.push({

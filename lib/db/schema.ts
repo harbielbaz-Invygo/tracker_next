@@ -518,6 +518,58 @@ export const batchActions = sqliteTable("batch_actions", {
   byStakeholder: index("batch_actions_stakeholder_idx").on(t.assignedStakeholderId),
 }));
 
+// ─────────────────────────────────────────────────────────
+// VIN chase stages — a first-class, canonical chain that lives
+// independently from `action_types`. Originally we routed action_types
+// into a "VIN chase" cluster by substring matching their names
+// (vin / plate / customs / …) which was brittle: admins could rename a
+// row and silently break the chain, and the dependency / alert graph
+// got entangled with what should be a fixed linear workflow.
+//
+// Each row is one canonical step (e.g. "VIN", "Plate", "Customs").
+// Per-batch state lives in `batch_vin_stages`. Admins reorder + rename
+// + add stages from Settings; the drawer renders from this table
+// instead of filtering action_types.
+// ─────────────────────────────────────────────────────────
+export const vinChaseStages = sqliteTable("vin_chase_stages", {
+  id:           integer("id").primaryKey({ autoIncrement: true }),
+  /** Canonical key — unique. Used in code if a stage needs special-casing. */
+  name:         text("name").notNull().unique(),
+  /** Label shown while the stage is waiting (e.g. "Awaiting VIN from dealer"). */
+  waitingLabel: text("waiting_label").notNull(),
+  /** Label shown when the stage is done (e.g. "VIN received"). */
+  doneLabel:    text("done_label").notNull(),
+  /** Drag-orderable in Settings. Drives stepper render order. */
+  sortOrder:    integer("sort_order").notNull().default(0),
+  createdAt:    text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
+});
+
+// ─────────────────────────────────────────────────────────
+// Per-batch VIN chase state. One row per (batchId × stageId).
+// Created at Intake (all stages × the new batch) + backfilled for
+// pre-existing batches by the migration script. Status flips via
+// /api/vin-stage. No dependency DAG — the chain is strictly linear and
+// the drawer derives "current" from the first non-done stage.
+// ─────────────────────────────────────────────────────────
+export const batchVinStages = sqliteTable("batch_vin_stages", {
+  id:           integer("id").primaryKey({ autoIncrement: true }),
+  batchId:      integer("batch_id").notNull()
+                  .references(() => batches.id, { onDelete: "cascade" }),
+  stageId:      integer("stage_id").notNull()
+                  .references(() => vinChaseStages.id, { onDelete: "cascade" }),
+  status:       text("status", { enum: ["waiting", "done", "skipped"] })
+                  .notNull().default("waiting"),
+  /** ISO datetime — set when status flips to `done`. Powers reports. */
+  completedAt:  text("completed_at"),
+  notes:        text("notes"),
+  createdAt:    text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
+  updatedAt:    text("updated_at").default(sql`(CURRENT_TIMESTAMP)`),
+}, (t) => ({
+  uniq:    uniqueIndex("batch_vin_stage_uniq").on(t.batchId, t.stageId),
+  byBatch: index("batch_vin_stages_batch_idx").on(t.batchId),
+  byStatus:index("batch_vin_stages_status_idx").on(t.status),
+}));
+
 // Convenient TS types
 export type User              = typeof users.$inferSelect;
 export type Dealer            = typeof dealers.$inferSelect;
@@ -533,3 +585,5 @@ export type ActionDependency  = typeof actionDependencies.$inferSelect;
 export type BatchAction       = typeof batchActions.$inferSelect;
 export type BatchDateRevision = typeof batchDateRevisions.$inferSelect;
 export type BatchDeliveryLeg  = typeof batchDeliveryLegs.$inferSelect;
+export type VinChaseStage     = typeof vinChaseStages.$inferSelect;
+export type BatchVinStage     = typeof batchVinStages.$inferSelect;

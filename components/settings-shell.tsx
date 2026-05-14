@@ -34,6 +34,7 @@ export default function SettingsShell({ data, currentUserId }: Props) {
     <div className="space-y-3">
       <DepartmentsEditor data={data} />
       <ActionTypesEditor data={data} />
+      <VinChaseStagesEditor data={data} />
       <RulesEditor data={data} />
       <AlertRulesEditor data={data} />
       <UsersEditor users={data.users} currentUserId={currentUserId} />
@@ -1323,6 +1324,163 @@ function UsersEditor({
                 password: creating.password,
               });
               setCreating({ username: "", name: "", email: "", role: "ops", password: "" });
+            })())}
+          >+ Add</button>
+        </div>
+      </div>
+
+      {error && <p className="mt-3 text-sm text-flame-dark" role="alert">{error}</p>}
+    </CollapsibleCard>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// VinChaseStagesEditor — admin CRUD for the linear VIN chase chain.
+// ──────────────────────────────────────────────────────────────────
+//
+// The VIN chase chain is its own catalogue (see `vin_chase_stages` +
+// `batch_vin_stages` in schema.ts), independent of `action_types`. This
+// editor lets admin add / rename / reorder / delete stages without
+// touching the rest of the action graph.
+//
+// Creating a new stage backfills every existing batch with a waiting
+// row (server-side). Deleting cascades to batch_vin_stages via FK.
+
+function VinChaseStagesEditor({ data }: { data: SettingsData }) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  type Draft = { name: string; waitingLabel: string; doneLabel: string };
+  const [drafts, setDrafts] = useState<Record<number, Draft>>({});
+  const [creating, setCreating] = useState<Draft>({ name: "", waitingLabel: "", doneLabel: "" });
+
+  function fb(id: number): Draft {
+    const s = data.vinChaseStages.find((x) => x.id === id);
+    return { name: s?.name ?? "", waitingLabel: s?.waitingLabel ?? "", doneLabel: s?.doneLabel ?? "" };
+  }
+  function getDraft(id: number) { return drafts[id] ?? fb(id); }
+  function setDraft(id: number, patch: Partial<Draft>) {
+    setDrafts((d) => ({ ...d, [id]: { ...getDraft(id), ...patch } }));
+  }
+  function clearDraft(id: number) {
+    setDrafts((d) => { const next = { ...d }; delete next[id]; return next; });
+  }
+  function run(promise: Promise<void>) {
+    startTransition(async () => {
+      try { await promise; router.refresh(); }
+      catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    });
+  }
+  function move(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= data.vinChaseStages.length) return;
+    const next = [...data.vinChaseStages];
+    [next[index], next[target]] = [next[target], next[index]];
+    run((async () => {
+      // Renumber 10, 20, 30, ... so future inserts can squeeze between.
+      await Promise.all(next.map((s, i) =>
+        callApi({ resource: "vin-stage", op: "update", id: s.id, sortOrder: (i + 1) * 10 }),
+      ));
+    })());
+  }
+
+  return (
+    <CollapsibleCard
+      title="VIN Chase Stages"
+      description="The strict linear chain shown in the Action Center drawer's VIN chase section. Independent of Action Types — admins can add, rename, reorder, or delete stages here without affecting the rest of the action graph. Adding a new stage backfills every existing batch with a waiting row."
+    >
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+        {data.vinChaseStages.map((s, idx) => {
+          const fallback = fb(s.id);
+          const draft = getDraft(s.id);
+          const dirty = JSON.stringify(draft) !== JSON.stringify(fallback);
+          const isFirst = idx === 0;
+          const isLast = idx === data.vinChaseStages.length - 1;
+          return (
+            <div key={s.id} className="border border-ink-200 rounded-md p-3 bg-white flex flex-col gap-3">
+              <div className="grid grid-cols-[auto,1fr,auto] gap-2 items-end">
+                <div className="flex flex-col items-center gap-0.5">
+                  <button
+                    type="button" disabled={isFirst || pending} className="btn text-xs px-2 py-0.5"
+                    onClick={() => move(idx, -1)} aria-label={`Move ${s.name} up`} title="Move up"
+                  >▲</button>
+                  <span className="text-[0.65rem] font-medium text-ink-500 tabular-nums leading-none px-1 py-0.5"
+                        title={`Current sort_order: ${s.sortOrder}`}>{s.sortOrder}</span>
+                  <button
+                    type="button" disabled={isLast || pending} className="btn text-xs px-2 py-0.5"
+                    onClick={() => move(idx, 1)} aria-label={`Move ${s.name} down`} title="Move down"
+                  >▼</button>
+                </div>
+                <Field label="Name (canonical key)">
+                  <input className="input" value={draft.name}
+                         onChange={(e) => setDraft(s.id, { name: e.target.value })} />
+                </Field>
+                <div className="inline-flex gap-1.5 self-end">
+                  <button
+                    type="button" disabled={!dirty || pending} className="btn btn-primary text-xs"
+                    onClick={() => run((async () => {
+                      await callApi({
+                        resource: "vin-stage", op: "update",
+                        id: s.id,
+                        name:         draft.name.trim(),
+                        waitingLabel: draft.waitingLabel.trim(),
+                        doneLabel:    draft.doneLabel.trim(),
+                      });
+                      clearDraft(s.id);
+                    })())}
+                  >Save</button>
+                  <button
+                    type="button" disabled={pending} className="btn text-xs"
+                    onClick={() => {
+                      if (!confirm(`Delete VIN stage "${s.name}"? This removes it from every batch's chain.`)) return;
+                      run(callApi({ resource: "vin-stage", op: "delete", id: s.id }));
+                    }}
+                  >Delete</button>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Field label="Waiting label (shown while in progress)">
+                  <input className="input" value={draft.waitingLabel}
+                         onChange={(e) => setDraft(s.id, { waitingLabel: e.target.value })} />
+                </Field>
+                <Field label="Done label (shown when complete)">
+                  <input className="input" value={draft.doneLabel}
+                         onChange={(e) => setDraft(s.id, { doneLabel: e.target.value })} />
+                </Field>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* + Add a new stage */}
+      <div className="border-t border-ink-200 mt-4 pt-3">
+        <p className="text-xs font-medium text-ink-600 mb-2">+ Add stage</p>
+        <div className="grid grid-cols-1 md:grid-cols-[1fr,1fr,1fr,auto] gap-2 items-end">
+          <Field label="Name">
+            <input className="input" value={creating.name}
+                   onChange={(e) => setCreating((c) => ({ ...c, name: e.target.value }))} />
+          </Field>
+          <Field label="Waiting label">
+            <input className="input" value={creating.waitingLabel}
+                   onChange={(e) => setCreating((c) => ({ ...c, waitingLabel: e.target.value }))} />
+          </Field>
+          <Field label="Done label">
+            <input className="input" value={creating.doneLabel}
+                   onChange={(e) => setCreating((c) => ({ ...c, doneLabel: e.target.value }))} />
+          </Field>
+          <button
+            type="button" disabled={pending || !creating.name.trim()} className="btn btn-primary text-sm self-end"
+            onClick={() => run((async () => {
+              await callApi({
+                resource: "vin-stage", op: "create",
+                name:         creating.name.trim(),
+                waitingLabel: creating.waitingLabel.trim() || creating.name.trim(),
+                doneLabel:    creating.doneLabel.trim()    || creating.name.trim(),
+                sortOrder:    (data.vinChaseStages.length + 1) * 10,
+              });
+              setCreating({ name: "", waitingLabel: "", doneLabel: "" });
             })())}
           >+ Add</button>
         </div>

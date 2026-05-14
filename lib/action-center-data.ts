@@ -12,11 +12,11 @@ import { eq, asc, inArray, and } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, alerts, batchColorMatrix, batchDeliveryLegs,
+  vinChaseStages, batchVinStages,
 } from "@/lib/db/schema";
 import type { ActiveAlert } from "@/lib/alert-engine";
 import { highestSeverity } from "@/lib/alert-engine";
 import { getLeadTimeDays } from "@/lib/rules";
-import { isVinChaseName } from "@/lib/cluster-keywords";
 
 // ──────────────────────────────────────────────────────────────────
 // Public types
@@ -110,19 +110,26 @@ export interface BatchDeliveryLegRow {
 }
 
 /**
- * Canonical VIN-chase chain template — every action_type in the system
- * whose name matches the VIN-chase keyword classifier. Sorted by
- * action_types.sortOrder so the drawer can render the full chain in
- * the correct order even when a specific batch only has some of the
- * steps configured.
+ * One step of the VIN chase chain on a specific batch. Combines the
+ * canonical stage definition (from `vin_chase_stages`) with the batch's
+ * per-stage state (from `batch_vin_stages`). The drawer renders every
+ * stage every time — they're created at Intake and backfilled for
+ * pre-migration batches, so `state` is always non-null.
  */
-export interface VinChaseTemplateStep {
-  actionTypeId: number;
+export interface VinChaseStageDetail {
+  /** batch_vin_stages row id — PK for mutations via /api/vin-stage. */
+  id: number;
+  /** vin_chase_stages row id — stable handle for admin renames. */
+  stageId: number;
+  /** Canonical key, e.g. "VIN Receiving", "Plate". */
   name: string;
   waitingLabel: string;
   doneLabel: string;
   sortOrder: number;
-  defaultDepartmentId: number | null;
+  status: "waiting" | "done" | "skipped";
+  /** ISO datetime when status flipped to done. */
+  completedAt: string | null;
+  notes: string | null;
 }
 
 /** Per-colour breakdown for a batch — drives the Car Delivery confirmation modal. */
@@ -212,13 +219,12 @@ export interface DrawerData {
    */
   legs: BatchDeliveryLegRow[];
   /**
-   * Canonical 6-step VIN chase chain — all action_types in the system
-   * matching the VIN-chase keyword classifier. Empty array when admin
-   * hasn't configured any VIN-chase-named action types yet. The drawer's
-   * stepper renders this as the spine; per-step state is derived by
-   * matching against `actions[]` by actionTypeId.
+   * VIN chase chain for this specific batch — one item per canonical
+   * stage in `vin_chase_stages`, joined with the batch's row in
+   * `batch_vin_stages`. Ordered by stage.sortOrder. Drives the
+   * stepper UI directly; no further classifier work needed.
    */
-  vinChaseTemplate: VinChaseTemplateStep[];
+  vinChaseStages: VinChaseStageDetail[];
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -454,7 +460,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     sortOrder:                r.at.sortOrder,
   }));
 
-  const [allDepartments, batchAlerts, colorMatrixRows, leadTimeDays, deliveryLegs, allActionTypes] = await Promise.all([
+  const [allDepartments, batchAlerts, colorMatrixRows, leadTimeDays, deliveryLegs, vinStageRows] = await Promise.all([
     db
       .select({ id: departments.id, name: departments.name })
       .from(departments)
@@ -495,34 +501,47 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
         throw err;
       }
     })(),
-    // Full action_types catalogue — used to build the VIN-chase template
-    // (canonical chain shown in the drawer even when not all steps are
-    // attached to this specific batch). Sorted by the admin-controlled
-    // sortOrder so the stepper renders in the right order.
-    db
-      .select({
-        id:                  actionTypes.id,
-        name:                actionTypes.name,
-        waitingLabel:        actionTypes.waitingLabel,
-        doneLabel:           actionTypes.doneLabel,
-        sortOrder:           actionTypes.sortOrder,
-        defaultDepartmentId: actionTypes.defaultDepartmentId,
-      })
-      .from(actionTypes)
-      .orderBy(asc(actionTypes.sortOrder)),
+    // VIN chase chain for this batch — joins the canonical stage
+    // catalogue with the batch's per-stage state. Wrapped in
+    // try/catch so a DB that hasn't been migrated yet falls back to
+    // an empty chain rather than 500ing the whole drawer.
+    (async () => {
+      try {
+        return await db
+          .select({
+            id:           batchVinStages.id,
+            stageId:      vinChaseStages.id,
+            name:         vinChaseStages.name,
+            waitingLabel: vinChaseStages.waitingLabel,
+            doneLabel:    vinChaseStages.doneLabel,
+            sortOrder:    vinChaseStages.sortOrder,
+            status:       batchVinStages.status,
+            completedAt:  batchVinStages.completedAt,
+            notes:        batchVinStages.notes,
+          })
+          .from(batchVinStages)
+          .innerJoin(vinChaseStages, eq(batchVinStages.stageId, vinChaseStages.id))
+          .where(eq(batchVinStages.batchId, b.id))
+          .orderBy(asc(vinChaseStages.sortOrder));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/no such table/i.test(msg)) return [];
+        throw err;
+      }
+    })(),
   ]);
 
-  // Filter the catalogue down to VIN-chase steps only — keyword match.
-  const vinChaseTemplate: VinChaseTemplateStep[] = allActionTypes
-    .filter((t) => isVinChaseName(t.name))
-    .map((t) => ({
-      actionTypeId:        t.id,
-      name:                t.name,
-      waitingLabel:        t.waitingLabel,
-      doneLabel:           t.doneLabel,
-      sortOrder:           t.sortOrder,
-      defaultDepartmentId: t.defaultDepartmentId ?? null,
-    }));
+  const vinChainForBatch: VinChaseStageDetail[] = vinStageRows.map((r) => ({
+    id:           r.id,
+    stageId:      r.stageId,
+    name:         r.name,
+    waitingLabel: r.waitingLabel,
+    doneLabel:    r.doneLabel,
+    sortOrder:    r.sortOrder,
+    status:       r.status as VinChaseStageDetail["status"],
+    completedAt:  r.completedAt,
+    notes:        r.notes,
+  }));
 
   const { statusLabel } = statusFor(b);
 
@@ -564,7 +583,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
       deliveredQuantity:  l.deliveredQuantity ?? 0,
       notes:              l.notes ?? null,
     })),
-    vinChaseTemplate,
+    vinChaseStages: vinChainForBatch,
     alerts: batchAlerts.map((a) => ({
       id:             a.id,
       fingerprint:    a.fingerprint,
