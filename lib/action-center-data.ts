@@ -131,6 +131,13 @@ export interface DrawerData {
 
   /** Promised delivery date (ISO yyyy-mm-dd). */
   promisedDate: string;
+  /**
+   * Ops's current projected availability date (ISO yyyy-mm-dd). Null
+   * means no projection set yet — use `promisedDate` as the working
+   * value. Mutated by the Date-shift modal; each shift logged into
+   * `batch_date_revisions`.
+   */
+  currentProjectedDeliveryDate: string | null;
   /** Pre-formatted status label ("🟢 On track", "🔴 Delayed +5d", etc.). */
   statusLabel: string;
 
@@ -423,6 +430,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     lifecycleState: (b.lifecycleState ?? "post_po") as "pre_po" | "post_po",
 
     promisedDate: b.dealerPromisedDeliveryDate,
+    currentProjectedDeliveryDate: b.currentProjectedDeliveryDate ?? null,
     statusLabel,
 
     closedAt:         b.closedAt ?? null,
