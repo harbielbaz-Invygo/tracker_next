@@ -827,6 +827,11 @@ function DrawerHeader({
             ))}
           </p>
         )}
+        {/* Availability dates — the two numbers ops actually navigate by.
+            "PO" is the locked dealer-promised date (the contract).
+            "Ops" is the working projection (mutated by the shift modal).
+            The signed delta is colour-coded to match the status chip. */}
+        <AvailabilityDatesLine data={data} />
       </div>
       {!isClosed && (
         <div className="flex items-center gap-2">
@@ -871,6 +876,57 @@ function DrawerHeader({
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Two-date readout under the drawer header:
+ *   📅 PO availability  · 2026-04-15
+ *      Ops projection   · 2026-04-20 (+5d)
+ *
+ * The PO date is what the dealer committed to (locked). The Ops date is
+ * the live projection — mutated by the Shift Availability modal, each
+ * change logged into `batch_date_revisions`. The signed delta surfaces
+ * the slip/lead at a glance; colour matches the row status:
+ *   negative (early) → green   ·   zero → muted   ·   positive (late) → flame
+ *
+ * If ops never set a projection, we show "—" and treat the delta as
+ * zero (no slip yet).
+ */
+function AvailabilityDatesLine({ data }: { data: DrawerData }) {
+  const po = data.promisedDate;
+  const ops = data.currentProjectedDeliveryDate;
+  const DAY_MS_LOCAL = 24 * 60 * 60 * 1000;
+  const delta = po && ops
+    ? Math.round((new Date(ops).getTime() - new Date(po).getTime()) / DAY_MS_LOCAL)
+    : 0;
+  const deltaCls = delta > 0 ? "text-flame-dark"
+    : delta < 0 ? "text-green-dark"
+    : "text-ink-500";
+  const deltaText = delta === 0 ? "on plan"
+    : delta > 0 ? `+${delta}d late`
+    : `${delta}d early`;
+
+  return (
+    <p className="text-[0.7rem] text-ink-500 mt-1 flex flex-wrap items-baseline gap-x-3">
+      <span className="font-medium text-midnight" aria-hidden="true">📅</span>
+      <span>
+        <span className="font-medium text-midnight">PO availability:</span>{" "}
+        <span className="tabular-nums">{po}</span>
+      </span>
+      <span aria-hidden="true" className="text-ink-300">·</span>
+      <span>
+        <span className="font-medium text-midnight">Ops projection:</span>{" "}
+        {ops
+          ? <span className="tabular-nums">{ops}</span>
+          : <span className="italic text-ink-400">—</span>}
+      </span>
+      {ops && (
+        <span className={cn("tabular-nums font-medium", deltaCls)}>
+          {deltaText}
+        </span>
+      )}
+    </p>
   );
 }
 
