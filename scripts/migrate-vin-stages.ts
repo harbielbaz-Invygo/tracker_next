@@ -29,16 +29,27 @@
  *   the shell.)
  *
  * Safe to run multiple times; each step is idempotent.
+ *
+ * IMPLEMENTATION NOTE — why we dynamic-import @/lib/db:
+ *   ESM hoists static `import` statements to the top of the module,
+ *   so any `import { db } from "@/lib/db"` would run BEFORE this
+ *   file's top-level env-loader code. That triggers @/lib/env's
+ *   validation against process.env *before* we've had a chance to
+ *   populate it from .env.production, and the DB client boots
+ *   pointed at the local file fallback. Dynamic `await import()`
+ *   inside main() defers loading until after env vars are set.
  */
 import { readFileSync, existsSync } from "node:fs";
 
-// Auto-load env so the script targets the right DB. Order, first wins:
+// ──────────────────────────────────────────────────────────────────
+// 0. Env loading — MUST happen before any module that reads process.env
+// ──────────────────────────────────────────────────────────────────
+//
+// Order, first wins:
 //   1. process.env (already set in the shell)
 //   2. .env.production  (pulled from Vercel — convenient for prod migrations)
 //   3. .env.local
 //   4. .env
-// This matches drizzle.config.ts but adds .env.production so the
-// `vercel env pull` workflow lands here without manual var copy-paste.
 for (const envFile of [".env.production", ".env.local", ".env"]) {
   if (!existsSync(envFile)) continue;
   const content = readFileSync(envFile, "utf-8");
@@ -68,10 +79,6 @@ if (/<|>/.test(_dbUrl)) {
   console.error("   npx tsx scripts/migrate-vin-stages.ts\n");
   process.exit(1);
 }
-
-import { sql } from "drizzle-orm";
-import { db } from "@/lib/db";
-import { vinChaseStages, batchVinStages, batches } from "@/lib/db/schema";
 
 const CANONICAL_STAGES = [
   { name: "VIN Receiving",  waitingLabel: "Awaiting VIN from dealer",       doneLabel: "VIN received",        sortOrder: 10 },
@@ -117,10 +124,15 @@ async function main() {
   console.log(`→ Target: ${kind}  ${masked}`);
   if (kind === "LOCAL file") {
     console.log("  ⚠ This is your LOCAL DB. If you meant Turso, abort (Ctrl-C),");
-    console.log("    then in PowerShell: $env:DATABASE_URL='libsql://…'");
-    console.log("                        $env:TURSO_AUTH_TOKEN='…'");
-    console.log("                        npx tsx scripts/migrate-vin-stages.ts");
+    console.log("    then: npx vercel env pull .env.production --environment=production");
+    console.log("          npx tsx scripts/migrate-vin-stages.ts");
   }
+
+  // Dynamic imports — see header note. These MUST stay below the env
+  // loader above or the DB client boots with the wrong DATABASE_URL.
+  const { sql } = await import("drizzle-orm");
+  const { db } = await import("@/lib/db");
+  const { vinChaseStages, batchVinStages, batches } = await import("@/lib/db/schema");
 
   console.log("→ Ensuring schema (CREATE TABLE IF NOT EXISTS) …");
   await db.run(sql.raw(`
