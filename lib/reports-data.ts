@@ -16,7 +16,7 @@
 import { eq, asc } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  batchActions, actionTypes, departments, stakeholders, batches, dealers, batchColorMatrix,
+  batchActions, actionTypes, departments, stakeholders, batches, dealers, batchColorMatrix, batchDateRevisions,
 } from "@/lib/db/schema";
 import { daysBetween } from "@/lib/expected-date";
 
@@ -137,8 +137,21 @@ export interface CustomerImpactBatch {
   /** Days late: effectiveDate − promisedDate (always > 0 for affected batches). */
   delayDays: number;
 
-  /** quantity × delayDays — the headline customer-impact measure. */
+  /**
+   * Sum across `batch_date_revisions` of `bookingsAtShift × delayDays`
+   * per shift event — the precise customer-impact measure (Phase H).
+   * 0 when the batch has no recorded shifts (legacy batches or
+   * deliveries that landed late without an explicit ops shift).
+   */
   customerDaysImpact: number;
+
+  /**
+   * Peak bookings held against the batch at any shift moment (max of
+   * `bookingsAtShift` across this batch's revisions). Approximates the
+   * count of distinct customers exposed to the lateness. 0 when no
+   * revisions exist.
+   */
+  affectedBookings: number;
 
   /** Whether the impact is already realised or still projected. */
   state: "delivered_late" | "projected_late";
@@ -403,6 +416,38 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
     .innerJoin(batches, eq(batchColorMatrix.batchId, batches.id)),
   ]);
 
+  // Phase H: fetch every shift event (batch_date_revisions) so the
+  // customer-impact metric becomes precise per-shift instead of the
+  // earlier `quantity × total_delay` approximation. Defensive: if the
+  // table doesn't exist yet (Phase A migration not run on this DB),
+  // treat as empty so the rest of the report still loads.
+  const revisionsByBatch = new Map<number, { bookingsAtShift: number; delayDays: number }[]>();
+  try {
+    const revisions = await db
+      .select({
+        batchId:          batchDateRevisions.batchId,
+        bookingsAtShift:  batchDateRevisions.bookingsAtShift,
+        delayDays:        batchDateRevisions.delayDays,
+      })
+      .from(batchDateRevisions);
+    for (const r of revisions) {
+      const arr = revisionsByBatch.get(r.batchId) ?? [];
+      arr.push({
+        bookingsAtShift: r.bookingsAtShift ?? 0,
+        delayDays:       r.delayDays ?? 0,
+      });
+      revisionsByBatch.set(r.batchId, arr);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table/i.test(msg)) {
+      // eslint-disable-next-line no-console
+      console.warn("[reports] batch_date_revisions missing — customer-impact metric falls back to zero. Run `npm run db:push`.");
+    } else {
+      throw err;
+    }
+  }
+
   // ── Summary strip totals ────────────────────────────────────────────
   let deliveredOnTime = 0, deliveredLate = 0, cancelled = 0, open = 0;
   for (const b of allBatches) {
@@ -550,7 +595,23 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
     if (delayDays <= 0) continue; // on time or early — no customer impact
 
     const qty = b.requestedQty ?? 0;
-    const customerDaysImpact = qty * delayDays;
+
+    // Phase H: customer-days impact comes from the revisions log
+    // (bookings at shift × delay added by shift), summed per batch.
+    // Zero when no revisions exist for this batch — legacy / silently-
+    // late deliveries land here. Dealer reliability still records the
+    // raw date variance separately, so the signal isn't lost.
+    const revs = revisionsByBatch.get(b.id) ?? [];
+    let customerDaysImpact = 0;
+    let affectedBookings = 0;
+    for (const r of revs) {
+      if (r.bookingsAtShift > 0 && r.delayDays > 0) {
+        customerDaysImpact += r.bookingsAtShift * r.delayDays;
+      }
+      if (r.bookingsAtShift > affectedBookings) {
+        affectedBookings = r.bookingsAtShift;
+      }
+    }
 
     const severity: CustomerImpactBatch["severity"] =
       delayDays > 21 ? "severe"
@@ -569,6 +630,7 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
       effectiveDate,
       delayDays,
       customerDaysImpact,
+      affectedBookings,
       state,
       revisionCount: b.revisionCount ?? 0,
       severity,
@@ -593,7 +655,11 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
     if (b.severity === "severe")   severe++;
     if (b.state === "delivered_late") deliveredLateCount++;
     if (b.state === "projected_late") projectedLateCount++;
-    affectedCustomers += b.quantity;
+    // Phase H: affected customers = peak bookings held during shifts
+    // (closer to "distinct customers exposed") instead of raw qty.
+    // Fall back to qty when no revisions exist so the metric isn't
+    // zero on legacy data.
+    affectedCustomers += b.affectedBookings > 0 ? b.affectedBookings : b.quantity;
     customerDaysLost += b.customerDaysImpact;
     totalRePromises  += b.revisionCount;
     delaySum         += b.delayDays;
