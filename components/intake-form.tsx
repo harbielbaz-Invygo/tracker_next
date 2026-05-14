@@ -105,6 +105,13 @@ export default function IntakeForm({ options }: Props) {
   const [poNumber, setPoNumber] = useState<string>("");
   const [poDate,   setPoDate]   = useState<string>("");
   const [reference,setReference]= useState<string>("");
+  /**
+   * Captured at intake: did the dealer share the VIN numbers along with
+   * the PO PDF? When checked, the batch starts in post_vin mode and the
+   * first two steps of the VIN-chase flow (Send Dealer Confirmation
+   * Email + VIN) are pre-marked done at the PO date.
+   */
+  const [vinReceivedAtIntake, setVinReceivedAtIntake] = useState<boolean>(false);
 
   // Dealer: choose existing or type new
   const [dealerId, setDealerId] = useState<number | null>(null);
@@ -348,6 +355,7 @@ export default function IntakeForm({ options }: Props) {
               assignedStakeholderId,
             };
           }),
+        vinReceivedAtIntake,
         notes: notes.trim() || null,
       };
 
@@ -371,7 +379,7 @@ export default function IntakeForm({ options }: Props) {
     setParsed(null);
     setParseError(null);
     setSummary(null);
-    setPoNumber(""); setPoDate(""); setReference("");
+    setPoNumber(""); setPoDate(""); setReference(""); setVinReceivedAtIntake(false);
     setDealerId(null); setDealerName("");
     setItems([]);
     setNotes("");
@@ -528,6 +536,35 @@ export default function IntakeForm({ options }: Props) {
                 />
               </FormField>
             </div>
+
+            {/* VIN-at-intake fork — flips the batch into post_vin mode
+                and pre-marks the first two VIN-chase steps as done. */}
+            <label
+              className={cn(
+                "mt-3 flex items-start gap-2 rounded-md border px-3 py-2 cursor-pointer select-none transition-colors",
+                vinReceivedAtIntake
+                  ? "bg-green-pale border-green text-green-dark"
+                  : "bg-ink-50 border-ink-200 text-midnight hover:border-ink-300",
+              )}
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 accent-green shrink-0"
+                checked={vinReceivedAtIntake}
+                onChange={(e) => setVinReceivedAtIntake(e.target.checked)}
+              />
+              <span className="text-sm leading-snug">
+                <span className="font-medium">
+                  ✅ VIN already received with this PO
+                </span>
+                <span className="block text-[0.7rem] text-ink-600 mt-0.5">
+                  Tick this when the dealer shared VIN numbers along with the PO PDF.
+                  Batch will start in <strong>post-VIN</strong> mode (lower risk) and
+                  the first two VIN-chase steps (Send Dealer Confirmation Email + VIN)
+                  will be pre-marked done at the PO date.
+                </span>
+              </span>
+            </label>
           </div>
 
           {/* ── Step 3: Items × Splits ─────────────────────────── */}
