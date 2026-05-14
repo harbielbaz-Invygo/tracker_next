@@ -114,7 +114,7 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
   // DateShiftModal as the manual shift button — with the recommended
   // date pre-filled.
   const hasRunwayAlert = data.alerts.some(
-    (a) => a.alertType === "no_vin_before_avail" && !a.acknowledged,
+    (a) => a.alertType === "no_vin_before_avail",
   );
   const recommendedDate = (() => {
     const d = new Date();
@@ -145,7 +145,7 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
           <ClosedBanner data={data} />
         ) : null}
         {batchLevelAlerts.length > 0 && (
-          <BatchAlertsStrip alerts={batchLevelAlerts} onAcknowledged={refresh} />
+          <BatchAlertsStrip alerts={batchLevelAlerts} />
         )}
         <AppListingPanel
           action={appListingAction ?? null}
@@ -347,22 +347,6 @@ function AppListingPanel({
 
 import type { ActiveAlert } from "@/lib/alert-engine";
 
-/** Fire-and-forget POST to acknowledge an alert. Returns ok-flag. */
-async function acknowledgeAlert(alertId: number): Promise<boolean> {
-  try {
-    const res = await fetch("/api/alerts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "acknowledge", alertId }),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    return true;
-  } catch (e) {
-    alert(`Could not acknowledge: ${e instanceof Error ? e.message : String(e)}`);
-    return false;
-  }
-}
-
 /** Severity → emoji + colour classes. Used by both inline + strip renders. */
 function severityVisuals(s: ActiveAlert["severity"]) {
   return {
@@ -376,25 +360,17 @@ function severityVisuals(s: ActiveAlert["severity"]) {
 /**
  * Inline alert detail rendered immediately under an action row's meta line.
  * The action row itself already shows a severity badge on the title; this
- * block gives the full message, raised time, ack state, and the Ack button.
+ * block gives the full message + raised time. Alerts auto-resolve when
+ * the underlying action lands — no manual dismissal needed (Ack was
+ * dropped per ops feedback).
  */
-function AlertInline({ alert, onAcknowledged }: { alert: ActiveAlert; onAcknowledged: () => void }) {
-  const [pending, setPending] = useState(false);
+function AlertInline({ alert }: { alert: ActiveAlert }) {
   const v = severityVisuals(alert.severity);
-
-  async function onAck() {
-    setPending(true);
-    const ok = await acknowledgeAlert(alert.id);
-    setPending(false);
-    if (ok) onAcknowledged();
-  }
-
   return (
     <div
       className={cn(
         "mt-1.5 flex items-start gap-2 px-2.5 py-1.5 rounded-md border text-[0.7rem]",
         v.cls,
-        alert.acknowledged && "opacity-60",
       )}
       role="status"
     >
@@ -403,23 +379,8 @@ function AlertInline({ alert, onAcknowledged }: { alert: ActiveAlert; onAcknowle
         <p className="font-medium leading-snug">{alert.message}</p>
         <p className="text-[0.65rem] mt-0.5 opacity-70">
           Raised {alert.raisedAt.slice(0, 10)}
-          {alert.acknowledged && alert.acknowledgedBy && (
-            <> · Acked by <span className="font-medium">{alert.acknowledgedBy}</span></>
-          )}
         </p>
       </div>
-      {!alert.acknowledged && (
-        <button
-          type="button"
-          disabled={pending}
-          onClick={onAck}
-          className="shrink-0 text-[0.65rem] font-medium px-2 py-0.5 rounded border
-                     border-current bg-white/60 hover:bg-white transition-colors"
-          title="Acknowledge — mark that you've seen this alert"
-        >
-          {pending ? "…" : "Ack"}
-        </button>
-      )}
     </div>
   );
 }
@@ -430,10 +391,9 @@ function AlertInline({ alert, onAcknowledged }: { alert: ActiveAlert; onAcknowle
  * but a future "PO cancelled by dealer" type alert would land here.
  */
 function BatchAlertsStrip({
-  alerts, onAcknowledged,
+  alerts,
 }: {
   alerts: ActiveAlert[];
-  onAcknowledged: () => void;
 }) {
   return (
     <div>
@@ -443,7 +403,7 @@ function BatchAlertsStrip({
       <ul className="space-y-1.5">
         {alerts.map((a) => (
           <li key={a.id}>
-            <AlertInline alert={a} onAcknowledged={onAcknowledged} />
+            <AlertInline alert={a} />
           </li>
         ))}
       </ul>
@@ -1640,15 +1600,11 @@ function ActionRow({
 
   const labelText = tone === "done" ? action.doneLabel : action.waitingLabel;
 
-  // Pick the highest-severity unacknowledged alert for the row's visual
-  // treatment. Acknowledged-only rows still get a (faded) badge so the
-  // alert presence remains visible without screaming.
+  // Pick the highest-severity alert for the row's visual treatment.
   const SEV_RANK: Record<ActiveAlert["severity"], number> = { critical: 4, high: 3, medium: 2, info: 1 };
-  const sortedAlerts = [...alerts].sort((a, b) => {
-    // Unacknowledged first, then by severity desc.
-    if (a.acknowledged !== b.acknowledged) return a.acknowledged ? 1 : -1;
-    return SEV_RANK[b.severity] - SEV_RANK[a.severity];
-  });
+  const sortedAlerts = [...alerts].sort(
+    (a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity],
+  );
   const topAlert = sortedAlerts[0];
   const topVisuals = topAlert ? severityVisuals(topAlert.severity) : null;
 
@@ -1840,7 +1796,7 @@ function ActionRow({
       {topVisuals && (
         <span
           aria-hidden="true"
-          className={cn("text-sm shrink-0 leading-none", topAlert?.acknowledged && "opacity-50")}
+          className="text-sm shrink-0 leading-none"
           title={`${alerts.length} active alert${alerts.length === 1 ? "" : "s"}`}
         >
           {topVisuals.icon}
@@ -1854,7 +1810,7 @@ function ActionRow({
   const AlertsBlock = alerts.length > 0 ? (
     <div className="space-y-1.5">
       {sortedAlerts.map((a) => (
-        <AlertInline key={a.id} alert={a} onAcknowledged={onMutated} />
+        <AlertInline key={a.id} alert={a} />
       ))}
     </div>
   ) : null;

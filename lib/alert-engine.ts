@@ -37,9 +37,10 @@ export interface ActiveAlert {
   alertType: string;
   message: string;
   raisedAt: string;
-  acknowledged: boolean;
-  acknowledgedBy: string | null;
-  acknowledgedAt: string | null;
+  // Acknowledgment was dropped — alerts now have a single state
+  // (active vs auto-resolved when the underlying action lands). The
+  // acknowledged* columns still exist in the DB but no code reads
+  // them; a future migration can drop them safely.
 }
 
 /** Parse the `-action-{id}` suffix from a fingerprint, if any. */
@@ -271,7 +272,6 @@ export async function runAlertEngine(): Promise<AlertsByBatch> {
             audience:    "ops",
             raisedAt:    now,
             resolved:    false,
-            acknowledged: false,
           })),
         )
       : Promise.resolve(),
@@ -307,9 +307,6 @@ export async function runAlertEngine(): Promise<AlertsByBatch> {
       alertType:      a.alertType,
       message:        a.message,
       raisedAt:       a.raisedAt ?? now,
-      acknowledged:   a.acknowledged ?? false,
-      acknowledgedBy: a.acknowledgedBy ?? null,
-      acknowledgedAt: a.acknowledgedAt ?? null,
     });
     result.set(a.batchId, arr);
   }
@@ -357,8 +354,5 @@ export async function getAlertsForBatch(batchId: number): Promise<ActiveAlert[]>
     alertType:      a.alertType,
     message:        a.message,
     raisedAt:       a.raisedAt ?? new Date().toISOString(),
-    acknowledged:   a.acknowledged ?? false,
-    acknowledgedBy: a.acknowledgedBy ?? null,
-    acknowledgedAt: a.acknowledgedAt ?? null,
   }));
 }
