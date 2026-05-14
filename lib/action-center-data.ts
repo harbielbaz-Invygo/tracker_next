@@ -8,7 +8,7 @@
  * Aggregation happens in JS since the dataset is small (dozens of batches × 9
  * actions). For larger volumes, switch to GROUP BY in SQL.
  */
-import { eq, asc, inArray, and } from "drizzle-orm";
+import { eq, asc, inArray, and, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, alerts, batchColorMatrix, batchDeliveryLegs,
@@ -505,6 +505,20 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     // catalogue with the batch's per-stage state. Wrapped in
     // try/catch so a DB that hasn't been migrated yet falls back to
     // an empty chain rather than 500ing the whole drawer.
+    //
+    // Sort: we want done stages to display in REAL chronological
+    // order (the order they actually happened, captured in
+    // batch_vin_stages.completed_at), and waiting/skipped stages to
+    // display in catalogue order (vin_chase_stages.sort_order).
+    // That way, when admin reorders the catalogue, a delivered batch's
+    // history is untouched — only the visual position of upcoming
+    // stages on still-open batches changes.
+    //
+    // Trick: `completed_at IS NULL` evaluates to 0 (false) for done
+    // rows and 1 (true) for waiting/skipped — so done rows sort first.
+    // Then we sort by completed_at (real chronology), then by
+    // sort_order as the tiebreaker (covers a fresh batch where every
+    // completed_at is null).
     (async () => {
       try {
         return await db
@@ -522,7 +536,11 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
           .from(batchVinStages)
           .innerJoin(vinChaseStages, eq(batchVinStages.stageId, vinChaseStages.id))
           .where(eq(batchVinStages.batchId, b.id))
-          .orderBy(asc(vinChaseStages.sortOrder));
+          .orderBy(
+            sql`${batchVinStages.completedAt} IS NULL`,
+            asc(batchVinStages.completedAt),
+            asc(vinChaseStages.sortOrder),
+          );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (/no such table/i.test(msg)) return [];

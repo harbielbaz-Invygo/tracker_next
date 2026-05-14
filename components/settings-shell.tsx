@@ -1397,7 +1397,7 @@ function VinChaseStagesEditor({ data }: { data: SettingsData }) {
   return (
     <CollapsibleCard
       title="VIN Chase Stages"
-      description="The strict linear chain shown in the Action Center drawer's VIN chase section. Independent of Action Types — admins can add, rename, reorder, or delete stages here. Rename is always safe. Reorder + Add can shift the 'current' pointer on mid-flow batches but don't lose data. Delete is blocked when batches have done/skipped state on the stage (would erase completion history)."
+      description="The strict linear chain shown in the Action Center drawer's VIN chase section. Independent of Action Types — admins can add, rename, reorder, or delete stages here. Rename + Reorder are safe: completed (done) stages on every batch always display in real chronological order, so reorder only affects how upcoming stages on still-open batches appear. Add backfills only OPEN batches (delivered + cancelled batches are frozen). Delete is blocked when batches have done/skipped state on the stage."
     >
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
         {data.vinChaseStages.map((s, idx) => {
