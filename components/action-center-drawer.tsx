@@ -1277,6 +1277,26 @@ function ConfidenceRow({
 // Actions list
 // ──────────────────────────────────────────────────────────────────
 
+/**
+ * VIN-chase canonical names — case-insensitive matches. Actions whose
+ * names are in this set go into the "🔑 VIN chase" cluster; everything
+ * else falls into the "🏢 Internal phase" cluster. (App Listing and
+ * Delivery are already filtered upstream into their own panels.)
+ */
+const VIN_CHASE_NAMES = new Set([
+  "send dealer confirmation email",
+  "vin",
+  "plate",
+  "customs card",
+  "tracking system installed",
+  "car inspection",
+  "car ready in showroom",
+]);
+
+function clusterFor(actionTypeName: string): "vin_chase" | "internal" {
+  return VIN_CHASE_NAMES.has(actionTypeName.toLowerCase()) ? "vin_chase" : "internal";
+}
+
 function ActionsList({
   data, actionsOverride, alertsByActionId, onMutated, layout, disabled = false,
 }: {
@@ -1306,6 +1326,64 @@ function ActionsList({
     );
   }
 
+  // Phase I: partition actions into two clusters so the drawer reflects
+  // the two-flow mental model. Internal phase = parallel admin work
+  // (Specs / Pricing / SKU / etc.). VIN chase = linear dealer-side chain
+  // (Send Email → VIN → Plate → Customs → Tracking → Inspection → Showroom).
+  const internalActions = actions.filter((a) => clusterFor(a.actionTypeName) === "internal");
+  const vinChaseActions = actions.filter((a) => clusterFor(a.actionTypeName) === "vin_chase");
+
+  // Render both clusters; if a cluster is empty (rare — e.g. ops only
+  // picked VIN-chase actions at intake) it's skipped.
+  return (
+    <div className="space-y-6">
+      {internalActions.length > 0 && (
+        <ClusterSection
+          title="🏢 Internal phase"
+          subtitle="Specs · Pricing · SKU — runs in parallel"
+          accent="brand"
+          actions={internalActions}
+          alertsByActionId={alertsByActionId}
+          onMutated={onMutated}
+          layout={layout}
+          disabled={disabled}
+          lifecycleState={data.lifecycleState}
+        />
+      )}
+      {vinChaseActions.length > 0 && (
+        <ClusterSection
+          title="🔑 VIN chase"
+          subtitle="Linear chain — once VIN is in hand, the car moves toward the showroom"
+          accent="gold"
+          actions={vinChaseActions}
+          alertsByActionId={alertsByActionId}
+          onMutated={onMutated}
+          layout={layout}
+          disabled={disabled}
+          lifecycleState={data.lifecycleState}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * One cluster section — title bar with summary counts + the existing
+ * Waiting/Blocked/Done/Skipped sub-grouping inside.
+ */
+function ClusterSection({
+  title, subtitle, accent, actions, alertsByActionId, onMutated, layout, disabled, lifecycleState,
+}: {
+  title: string;
+  subtitle: string;
+  accent: "brand" | "gold";
+  actions: ActionDetail[];
+  alertsByActionId: Map<number, ActiveAlert[]>;
+  onMutated: () => void;
+  layout: "vertical" | "kanban";
+  disabled: boolean;
+  lifecycleState: DrawerData["lifecycleState"];
+}) {
   const groups = {
     waiting: actions.filter((a) => a.status === "waiting"),
     blocked: actions.filter((a) => a.status === "blocked"),
@@ -1313,6 +1391,66 @@ function ActionsList({
     skipped: actions.filter((a) => a.status === "skipped"),
   };
 
+  const accentBorder = accent === "gold" ? "border-gold/50" : "border-brand/40";
+  const accentBg     = accent === "gold" ? "bg-gold-pale/40" : "bg-brand-pastel/30";
+  const accentText   = accent === "gold" ? "text-gold-dark" : "text-brand-dark";
+
+  // Header summary: total + count of unfinished items so ops can see
+  // each cluster's at-a-glance health without scanning.
+  const total = actions.length;
+  const pending = groups.waiting.length + groups.blocked.length;
+  const done = groups.done.length;
+
+  return (
+    <section className={cn("rounded-md border-2", accentBorder, accentBg)}>
+      <header className="px-3 py-2 border-b border-current/15">
+        <div className="flex items-baseline justify-between gap-3">
+          <div>
+            <h3 className={cn("text-sm font-bold", accentText)}>{title}</h3>
+            <p className="text-[0.7rem] text-ink-500 leading-snug">{subtitle}</p>
+          </div>
+          <p className="text-[0.7rem] text-ink-600 tabular-nums whitespace-nowrap">
+            {done}/{total} done
+            {pending > 0 && (
+              <>
+                <span aria-hidden="true" className="mx-1 text-ink-400">·</span>
+                <span className={cn("font-medium", pending > 0 ? accentText : "")}>
+                  {pending} pending
+                </span>
+              </>
+            )}
+          </p>
+        </div>
+      </header>
+
+      <div className="p-3">
+        <ClusterBody
+          groups={groups}
+          alertsByActionId={alertsByActionId}
+          onMutated={onMutated}
+          layout={layout}
+          disabled={disabled}
+          lifecycleState={lifecycleState}
+        />
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Inner per-status grouping for a cluster. Mirrors the previous root
+ * ActionsList rendering but scoped to one cluster's groups.
+ */
+function ClusterBody({
+  groups, alertsByActionId, onMutated, layout, disabled, lifecycleState: _lifecycleState,
+}: {
+  groups: { waiting: ActionDetail[]; blocked: ActionDetail[]; done: ActionDetail[]; skipped: ActionDetail[] };
+  alertsByActionId: Map<number, ActiveAlert[]>;
+  onMutated: () => void;
+  layout: "vertical" | "kanban";
+  disabled: boolean;
+  lifecycleState: DrawerData["lifecycleState"];
+}) {
   // ── Kanban layout — three columns side-by-side, action cards stacked.
   if (layout === "kanban") {
     return (
