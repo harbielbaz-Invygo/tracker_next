@@ -197,32 +197,28 @@ export default function Sidebar({ role, name, username }: {
                     collapsed && locked && !active && "opacity-50",
                   )}
                 >
-                  {collapsed ? (
-                    // Per-view icon (sprite) replaces the access badge
-                    // in collapsed mode so each rail item is visually
-                    // distinct at a glance. We layer a tiny lock pip
-                    // bottom-right for inaccessible views to retain the
-                    // 🔒 information without taking horizontal space.
-                    <span className="relative inline-flex" aria-hidden="true">
-                      <ViewIcon view={view} />
-                      {locked && (
-                        <span
-                          className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5
-                                     rounded-full bg-white text-[0.55rem] leading-none
-                                     flex items-center justify-center
-                                     border border-ink-300 text-ink-600"
-                          title="Locked"
-                        >
-                          🔒
-                        </span>
-                      )}
-                    </span>
-                  ) : (
-                    <>
-                      <span className="mr-1" aria-hidden="true">{badge}</span>
-                      <span>{VIEW_LABELS[view]}</span>
-                    </>
-                  )}
+                  {/*
+                    Both modes now show the per-view sprite icon (was
+                    the access badge in expanded mode pre-PR). The lock
+                    pip in the bottom-right preserves the 🔒 signal
+                    without flattening the rail's distinctiveness — a
+                    sea of ✅s defeats the point of having icons at all.
+                  */}
+                  <span className="relative inline-flex shrink-0" aria-hidden="true">
+                    <ViewIcon view={view} />
+                    {locked && (
+                      <span
+                        className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5
+                                   rounded-full bg-white text-[0.55rem] leading-none
+                                   flex items-center justify-center
+                                   border border-ink-300 text-ink-600"
+                        title="Locked"
+                      >
+                        🔒
+                      </span>
+                    )}
+                  </span>
+                  {!collapsed && <span>{VIEW_LABELS[view]}</span>}
                 </Link>
               );
             })}
