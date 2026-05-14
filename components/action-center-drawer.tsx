@@ -132,45 +132,48 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
         onClosed={() => { refresh(); onMutation?.(); }}
         onShifted={() => { refresh(); onMutation?.(); }}
       />
-      {data.closedAt && data.closureReason ? (
-        <ClosedBanner data={data} />
-      ) : null}
-      {batchLevelAlerts.length > 0 && (
-        <BatchAlertsStrip alerts={batchLevelAlerts} onAcknowledged={refresh} />
-      )}
-      <AppListingPanel
-        action={appListingAction ?? null}
-        onMutated={() => { refresh(); onMutation?.(); }}
-        disabled={!!data.closedAt}
-      />
-      {showRecommendShift && (
-        <RecommendShiftBanner
-          data={data}
-          recommendedDate={recommendedDate}
-          onShifted={() => { refresh(); onMutation?.(); }}
+      {/* Drawer body — everything below the header shares the same
+          vertical rhythm (`space-y-6` = 24px) as the two cluster
+          sections do internally. Order:
+            1. Optional banners: closed / batch alerts / recommend-shift
+            2. App Listing  (status panel)
+            3. Car Delivery (closing action, surfaces FIRST when open)
+            4. VIN chase + Internal phase clusters (inside ActionsList)
+          Ops Confidence row removed for now per ops feedback. */}
+      <div className="space-y-6">
+        {data.closedAt && data.closureReason ? (
+          <ClosedBanner data={data} />
+        ) : null}
+        {batchLevelAlerts.length > 0 && (
+          <BatchAlertsStrip alerts={batchLevelAlerts} onAcknowledged={refresh} />
+        )}
+        <AppListingPanel
+          action={appListingAction ?? null}
+          onMutated={() => { refresh(); onMutation?.(); }}
+          disabled={!!data.closedAt}
         />
-      )}
-      {/* Drawer body order:
-            1. Car Delivery  — closing action surfaces FIRST so it's
-               always one click away. Hidden when the batch is closed.
-            2. VIN chase cluster — dealer-side execution chain.
-            3. Internal phase cluster — admin / internal work.
-          (Cluster order is handled inside ActionsList.) Ops Confidence
-          row removed for now per ops feedback. */}
-      {!data.closedAt && (
-        <CarDeliveryPanel
+        {showRecommendShift && (
+          <RecommendShiftBanner
+            data={data}
+            recommendedDate={recommendedDate}
+            onShifted={() => { refresh(); onMutation?.(); }}
+          />
+        )}
+        {!data.closedAt && (
+          <CarDeliveryPanel
+            data={data}
+            onDelivered={() => { refresh(); onMutation?.(); }}
+          />
+        )}
+        <ActionsList
           data={data}
-          onDelivered={() => { refresh(); onMutation?.(); }}
+          actionsOverride={actionsForList}
+          alertsByActionId={alertsByActionId}
+          layout={layout}
+          onMutated={() => { refresh(); onMutation?.(); }}
+          disabled={!!data.closedAt}
         />
-      )}
-      <ActionsList
-        data={data}
-        actionsOverride={actionsForList}
-        alertsByActionId={alertsByActionId}
-        layout={layout}
-        onMutated={() => { refresh(); onMutation?.(); }}
-        disabled={!!data.closedAt}
-      />
+      </div>
     </div>
   );
 }
@@ -215,7 +218,7 @@ function AppListingPanel({
 
   if (!action) {
     return (
-      <div className="mb-4 px-3 py-2 rounded-md border border-dashed border-ink-300 bg-ink-50 text-xs text-ink-500">
+      <div className="px-3 py-2 rounded-md border border-dashed border-ink-300 bg-ink-50 text-xs text-ink-500">
         <span className="font-medium text-midnight">📱 App Listing</span>
         <span className="ml-2">no App Listing action on this batch — add it via Settings → Batches.</span>
       </div>
@@ -263,7 +266,7 @@ function AppListingPanel({
 
   if (isDone && !editing) {
     return (
-      <div className="mb-5 rounded-md border-2 border-green bg-green-pale px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+      <div className="rounded-md border-2 border-green bg-green-pale px-4 py-3 flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-bold text-green-dark flex items-center gap-2">
           <span aria-hidden="true">📱</span>
           ✅ Cars listed in app
@@ -287,7 +290,7 @@ function AppListingPanel({
 
   // Edit / first-time mode — datetime picker + submit.
   return (
-    <div className="mb-5 rounded-md border-2 border-brand bg-brand-pastel/30 px-4 py-3">
+    <div className="rounded-md border-2 border-brand bg-brand-pastel/30 px-4 py-3">
       <p className="text-sm font-bold text-midnight mb-2 flex items-center gap-2">
         <span aria-hidden="true">📱</span>
         App Listing
@@ -433,7 +436,7 @@ function BatchAlertsStrip({
   onAcknowledged: () => void;
 }) {
   return (
-    <div className="mb-5">
+    <div>
       <p className="text-[0.7rem] font-medium text-ink-600 uppercase tracking-wide mb-2">
         Batch alerts ({alerts.length})
       </p>
@@ -470,7 +473,7 @@ function CarDeliveryPanel({
   const [showModal, setShowModal] = useState(false);
   return (
     <>
-      <div className="mt-5 rounded-md border-2 border-green bg-green-pale/30 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+      <div className="rounded-md border-2 border-green bg-green-pale/30 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm font-bold text-green-dark flex items-center gap-2">
             <span aria-hidden="true">🚚</span>
@@ -726,7 +729,7 @@ function ClosedBanner({ data }: { data: DrawerData }) {
     <div
       role="status"
       className={cn(
-        "mb-5 rounded-md border-2 px-4 py-3",
+        "rounded-md border-2 px-4 py-3",
         isCancelled
           ? "bg-flame-pale border-flame text-flame-dark"
           : "bg-green-pale border-green text-green-dark",
@@ -766,7 +769,7 @@ function DrawerHeader({
   const isClosed = !!data.closedAt;
 
   return (
-    <div className="flex flex-wrap items-baseline justify-between gap-3 mb-4">
+    <div className="flex flex-wrap items-baseline justify-between gap-3 mb-6">
       <div>
         <h2 className="text-lg font-bold text-midnight">
           🛠️ {data.modelYear}
@@ -862,7 +865,7 @@ function RecommendShiftBanner({
   );
 
   return (
-    <div className="mb-4 rounded-md border-2 border-gold bg-gold-pale px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+    <div className="rounded-md border-2 border-gold bg-gold-pale px-4 py-3 flex flex-wrap items-center justify-between gap-3">
       <div className="flex items-start gap-2 min-w-0 flex-1">
         <span aria-hidden="true" className="text-lg leading-none mt-0.5">💡</span>
         <div className="min-w-0">
