@@ -14,17 +14,16 @@
  * Phase D ports the request-details + commitment form here.
  */
 import AccessGate from "@/components/access-gate";
+import PageHeader from "@/components/page-header";
 
 export default function ForecastPage() {
   return (
     <AccessGate view="Forecast">
       <div>
-        <h1 className="text-3xl font-bold mb-1">🔮 Forecast</h1>
-        <p className="text-sm text-ink-500 mb-6 max-w-prose">
-          Pre-PO bets. Capture an upcoming batch before the PO is signed,
-          on Partnership&apos;s confidence. Used to track whether
-          confidence-driven bets actually hit their dates.
-        </p>
+        <PageHeader
+          view="Forecast"
+          subtitle={<>Pre-PO bets. Capture an upcoming batch before the PO is signed, on Partnership&apos;s confidence. Used to track whether confidence-driven bets actually hit their dates.</>}
+        />
 
         <div
           className="card !bg-gold-pale !border-gold-brand flex gap-3"

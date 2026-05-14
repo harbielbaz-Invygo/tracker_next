@@ -8,6 +8,7 @@
  * Access: Admin only (enforced by AccessGate; middleware kicks guests to /login).
  */
 import AccessGate from "@/components/access-gate";
+import PageHeader from "@/components/page-header";
 import SettingsShell from "@/components/settings-shell";
 import { getSettingsData } from "@/lib/settings-data";
 import { auth } from "@/lib/auth";
@@ -24,11 +25,10 @@ export default async function SettingsPage() {
   return (
     <AccessGate view="Settings">
       <div>
-        <h1 className="text-3xl font-bold mb-1">⚙️ Settings</h1>
-        <p className="text-sm text-ink-500 mb-6 max-w-prose">
-          Admin configuration. Departments, action types, dependency DAG, and
-          user accounts live here. Changes apply immediately.
-        </p>
+        <PageHeader
+          view="Settings"
+          subtitle="Admin configuration. Departments, action types, dependency DAG, and user accounts live here. Changes apply immediately."
+        />
         <SettingsShell data={data} currentUserId={currentUserId} />
       </div>
     </AccessGate>

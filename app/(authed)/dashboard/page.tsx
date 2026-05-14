@@ -12,6 +12,7 @@
  * Mirrors `tracker_v1/dashboard.py:view_dashboard`.
  */
 import DashboardShell from "@/components/dashboard-shell";
+import PageHeader from "@/components/page-header";
 import { getDashboardRows, summarize } from "@/lib/dashboard-data";
 
 export const dynamic = "force-dynamic";
@@ -23,10 +24,10 @@ export default async function DashboardPage() {
   if (rows.length === 0) {
     return (
       <div>
-        <h1 className="text-3xl font-bold mb-1">📊 Dashboard</h1>
-        <p className="text-sm text-ink-500 mb-6 max-w-prose">
-          Every batch in the onboarding journey will appear here once a Pre PO Upload is submitted.
-        </p>
+        <PageHeader
+          view="Dashboard"
+          subtitle="Every batch in the onboarding journey will appear here once a Pre PO Upload is submitted."
+        />
         <div className="card text-center py-10">
           <p className="text-base font-medium text-midnight mb-1">No batches yet</p>
           <p className="text-sm text-ink-500">

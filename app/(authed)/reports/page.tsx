@@ -9,6 +9,7 @@
  * Access: Ops + Admin (gated by AccessGate; middleware redirects guests).
  */
 import AccessGate from "@/components/access-gate";
+import PageHeader from "@/components/page-header";
 import ReportsShell from "@/components/reports-shell";
 import { getPerformanceReport } from "@/lib/reports-data";
 
@@ -20,12 +21,10 @@ export default async function ReportsPage() {
   return (
     <AccessGate view="Reports">
       <div>
-        <h1 className="text-3xl font-bold mb-1">📊 Reports</h1>
-        <p className="text-sm text-ink-500 mb-6 max-w-prose">
-          Performance — aggregated across every batch in the system. Delay = the
-          gap between an action&apos;s planned date (set at Intake or auto-shifted
-          when VIN slips) and its actual completion. Negative = ahead of plan.
-        </p>
+        <PageHeader
+          view="Reports"
+          subtitle={<>Performance — aggregated across every batch in the system. Delay = the gap between an action&apos;s planned date (set at Intake or auto-shifted when VIN slips) and its actual completion. Negative = ahead of plan.</>}
+        />
         <ReportsShell report={report} />
       </div>
     </AccessGate>

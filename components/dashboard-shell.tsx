@@ -13,6 +13,7 @@ import type {
   DashboardRow, StatusBucket, TimelineData, TimelineActivity,
 } from "@/lib/dashboard-data";
 import BatchTable from "./batch-table";
+import PageHeader from "./page-header";
 import TimelineSvg from "./timeline-svg";
 import { cn } from "@/lib/utils";
 
@@ -118,11 +119,10 @@ export default function DashboardShell({ rows, totals }: Props) {
   // ── Render ──────────────────────────────────────────────────
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-1">📊 Dashboard</h1>
-      <p className="text-sm text-ink-500 mb-6 max-w-prose">
-        Filter the requests below, then click a row to view its Plan vs Reality timeline.
-        Plan is locked at submission; Reality fills in as actuals come — gaps show where delays sit.
-      </p>
+      <PageHeader
+        view="Dashboard"
+        subtitle="Filter the requests below, then click a row to view its Plan vs Reality timeline. Plan is locked at submission; Reality fills in as actuals come — gaps show where delays sit."
+      />
 
       {/* Metric strip */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">

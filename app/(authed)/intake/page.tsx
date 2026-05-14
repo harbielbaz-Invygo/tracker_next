@@ -18,6 +18,7 @@
  * Access: Ops + Admin (enforced by middleware).
  */
 import IntakeForm from "@/components/intake-form";
+import PageHeader from "@/components/page-header";
 import { getIntakeOptions } from "@/lib/intake-data";
 
 export const dynamic = "force-dynamic";
@@ -26,11 +27,10 @@ export default async function IntakePage() {
   const options = await getIntakeOptions();
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-1">📦 Intake</h1>
-      <p className="text-sm text-ink-500 mb-6 max-w-prose">
-        Drop a signed PO PDF. Fields below auto-fill so Ops doesn&apos;t retype anything.
-        Pick the actions this batch needs and assign each to a department.
-      </p>
+      <PageHeader
+        view="Intake"
+        subtitle={<>Drop a signed PO PDF. Fields below auto-fill so Ops doesn&apos;t retype anything. Pick the actions this batch needs and assign each to a department.</>}
+      />
       <IntakeForm options={options} />
     </div>
   );
