@@ -50,17 +50,45 @@ import { readFileSync, existsSync } from "node:fs";
 //   2. .env.production  (pulled from Vercel — convenient for prod migrations)
 //   3. .env.local
 //   4. .env
+//
+// Verbose by design: prints which files were found and which keys we
+// set from each. Catches the case where `.env.production` exists but
+// doesn't actually contain DATABASE_URL (Vercel project mis-config).
+console.log("→ Loading env files (first wins):");
 for (const envFile of [".env.production", ".env.local", ".env"]) {
-  if (!existsSync(envFile)) continue;
+  if (!existsSync(envFile)) {
+    console.log(`    ${envFile}: not found`);
+    continue;
+  }
   const content = readFileSync(envFile, "utf-8");
+  const setFromThisFile: string[] = [];
+  const skipped: string[] = [];
   for (const line of content.split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/i);
     if (!m) continue;
     const [, key, rawValue] = m;
-    if (process.env[key]) continue; // earlier wins
+    if (process.env[key]) {
+      skipped.push(key);
+      continue;
+    }
     const v = rawValue.replace(/^"(.*)"$/s, "$1").replace(/^'(.*)'$/s, "$1");
     process.env[key] = v;
+    setFromThisFile.push(key);
   }
+  console.log(`    ${envFile}: set ${setFromThisFile.length} key(s)` +
+              (setFromThisFile.length ? ` [${setFromThisFile.join(", ")}]` : "") +
+              (skipped.length ? `; skipped ${skipped.length} already-set` : ""));
+}
+// Spot-check: is DATABASE_URL actually present after env loading?
+if (!process.env.DATABASE_URL) {
+  console.error("\n❌ DATABASE_URL is still unset after env loading.");
+  console.error("   Check that .env.production actually contains a line like:");
+  console.error("       DATABASE_URL=\"libsql://your-db.turso.io\"");
+  console.error("   If not, the Vercel project may store the URL under a different");
+  console.error("   key (e.g. TURSO_DATABASE_URL). Pull and inspect:");
+  console.error("       npx vercel env pull .env.production --environment=production");
+  console.error("       Get-Content .env.production | Select-String DATABASE|TURSO\n");
+  process.exit(1);
 }
 
 // Fail FAST on the common foot-gun: pasting a placeholder like
