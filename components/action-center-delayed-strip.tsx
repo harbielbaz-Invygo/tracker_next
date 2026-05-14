@@ -62,7 +62,9 @@ interface DelayGroup {
 
 export default function ActionCenterDelayedStrip({ rows, active, onChange }: Props) {
   const groups = aggregateByDelay(rows);
-  const [expanded, setExpanded] = useState(true);
+  // Default collapsed — Action Center top is busy with the batches table
+  // already; expand on click when ops wants to drill into delays.
+  const [expanded, setExpanded] = useState(false);
 
   if (groups.length === 0) return null;
 
