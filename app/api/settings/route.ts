@@ -707,7 +707,35 @@ async function handleVinStage(b: Extract<Body, { resource: "vin-stage" }>) {
   }
 
   if (b.op === "delete") {
-    // FK cascade on batch_vin_stages takes care of per-batch rows.
+    // Safety guard: deleting a stage cascades through batch_vin_stages
+    // and wipes the per-batch history (status="done" + completedAt
+    // timestamps). We refuse the delete if ANY batch has non-waiting
+    // state on this stage, so historical "when was Plate completed"
+    // data can't be silently lost via a UI mis-click. Admin has to
+    // explicitly flip those rows back to waiting first (or, for a
+    // genuine purge, edit the DB directly with full awareness).
+    const usedRows = await db.select({ id: batchVinStages.id, status: batchVinStages.status })
+      .from(batchVinStages)
+      .where(eq(batchVinStages.stageId, b.id));
+    const nonWaiting = usedRows.filter((r) => r.status !== "waiting");
+    if (nonWaiting.length > 0) {
+      const doneCount    = nonWaiting.filter((r) => r.status === "done").length;
+      const skippedCount = nonWaiting.filter((r) => r.status === "skipped").length;
+      return NextResponse.json(
+        {
+          error:
+            `Cannot delete: ${nonWaiting.length} batch(es) have non-waiting state on this stage ` +
+            `(${doneCount} done, ${skippedCount} skipped). ` +
+            `Deleting would erase their per-batch history (completedAt timestamps). ` +
+            `Revert those batches' state to waiting first, or rename the stage instead.`,
+          nonWaitingCount: nonWaiting.length,
+          doneCount,
+          skippedCount,
+        },
+        { status: 409 },
+      );
+    }
+    // Only waiting (or no) rows — safe to cascade.
     await db.delete(vinChaseStages).where(eq(vinChaseStages.id, b.id));
     return NextResponse.json({ ok: true });
   }
