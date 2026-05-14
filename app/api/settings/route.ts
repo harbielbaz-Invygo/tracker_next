@@ -13,7 +13,7 @@
  * relies on that gate. (Phase: re-check role here once role propagates
  * to the request handler context.)
  */
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
@@ -670,18 +670,24 @@ async function handleVinStage(b: Extract<Body, { resource: "vin-stage" }>) {
       doneLabel:    b.doneLabel.trim(),
       sortOrder:    b.sortOrder ?? 0,
     }).returning();
-    // Backfill: every existing batch gets a `batch_vin_stages` row for
-    // this new stage with status="waiting". Without this, batches
-    // created before the stage existed would render an incomplete chain.
-    const allBatches = await db.select({ id: batches.id }).from(batches);
-    for (const ba of allBatches) {
+    // Backfill: every OPEN batch gets a `batch_vin_stages` row for
+    // this new stage with status="waiting". Closed batches (delivered
+    // or cancelled — `closed_at IS NOT NULL`) are intentionally
+    // skipped: their chain is frozen at the moment they closed, and
+    // growing it after the fact would distort the historical record
+    // shown in the drawer.
+    const openBatches = await db
+      .select({ id: batches.id })
+      .from(batches)
+      .where(sql`${batches.closedAt} IS NULL`);
+    for (const ba of openBatches) {
       await db.insert(batchVinStages).values({
         batchId: ba.id,
         stageId: row.id,
         status:  "waiting",
       }).onConflictDoNothing();
     }
-    return NextResponse.json({ ok: true, row });
+    return NextResponse.json({ ok: true, row, backfilledBatches: openBatches.length });
   }
 
   if (b.op === "update") {
