@@ -11,7 +11,7 @@
 import { eq, asc, inArray, and } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, alerts, batchColorMatrix,
+  batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, alerts, batchColorMatrix, batchDeliveryLegs,
 } from "@/lib/db/schema";
 import type { ActiveAlert } from "@/lib/alert-engine";
 import { highestSeverity } from "@/lib/alert-engine";
@@ -89,6 +89,23 @@ export interface OpenActionRef {
    * delayDays === 0 don't appear there.
    */
   delayDays: number;
+}
+
+/**
+ * Per-city delivery leg for a batch (Phase α of grouping rework).
+ *
+ * Multi-leg batches arise when the intake-grouper merges splits
+ * sharing (model, year, date, commercial terms) but with different
+ * cities. The legs table is the source of truth for per-city quantity
+ * and per-city delivery confirmation. Single-leg batches still have
+ * one row here for consistency.
+ */
+export interface BatchDeliveryLegRow {
+  id: number;
+  city: string;
+  requestedQuantity: number;
+  deliveredQuantity: number;
+  notes: string | null;
 }
 
 /** Per-colour breakdown for a batch — drives the Car Delivery confirmation modal. */
@@ -171,6 +188,12 @@ export interface DrawerData {
   colorMatrix: BatchColorRow[];
   /** Currently-recorded delivered quantity on the batch (cumulative). */
   deliveredQuantity: number;
+  /**
+   * Per-city delivery legs for this batch. Empty array when the batch
+   * was created before Phase α (legacy single-city batches). When
+   * non-empty, the Car Delivery modal collects per-leg confirmations.
+   */
+  legs: BatchDeliveryLegRow[];
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -406,7 +429,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     sortOrder:                r.at.sortOrder,
   }));
 
-  const [allDepartments, batchAlerts, colorMatrixRows, leadTimeDays] = await Promise.all([
+  const [allDepartments, batchAlerts, colorMatrixRows, leadTimeDays, deliveryLegs] = await Promise.all([
     db
       .select({ id: departments.id, name: departments.name })
       .from(departments)
@@ -425,6 +448,28 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
       .from(batchColorMatrix)
       .where(eq(batchColorMatrix.batchId, b.id)),
     getLeadTimeDays(),
+    // Defensive: legs table is Phase α. If the migration hasn't been
+    // applied to this DB yet, return empty array — drawer falls back
+    // to the legacy single-city display.
+    (async () => {
+      try {
+        return await db
+          .select({
+            id:                 batchDeliveryLegs.id,
+            city:               batchDeliveryLegs.city,
+            requestedQuantity:  batchDeliveryLegs.requestedQuantity,
+            deliveredQuantity:  batchDeliveryLegs.deliveredQuantity,
+            notes:              batchDeliveryLegs.notes,
+          })
+          .from(batchDeliveryLegs)
+          .where(eq(batchDeliveryLegs.batchId, b.id))
+          .orderBy(asc(batchDeliveryLegs.id));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/no such table/i.test(msg)) return [];
+        throw err;
+      }
+    })(),
   ]);
 
   const { statusLabel } = statusFor(b);
@@ -460,6 +505,13 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
       deliveredQuantity: c.deliveredQuantity ?? 0,
     })),
     deliveredQuantity: b.deliveredQuantity ?? 0,
+    legs: deliveryLegs.map((l) => ({
+      id:                 l.id,
+      city:               l.city,
+      requestedQuantity:  l.requestedQuantity,
+      deliveredQuantity:  l.deliveredQuantity ?? 0,
+      notes:              l.notes ?? null,
+    })),
     alerts: batchAlerts.map((a) => ({
       id:             a.id,
       fingerprint:    a.fingerprint,

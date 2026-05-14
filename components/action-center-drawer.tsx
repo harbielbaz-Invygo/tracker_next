@@ -492,18 +492,31 @@ function CarDeliveryModal({
       data.colorMatrix.map((c) => [c.color, c.deliveredQuantity || c.requestedQuantity]),
     ),
   );
+  // Phase γ — per-leg delivered quantity. Initialised from the existing
+  // delivered value or full requested (best guess "delivered the lot").
+  const [legQtys, setLegQtys] = useState<Record<number, number>>(
+    Object.fromEntries(
+      data.legs.map((l) => [l.id, l.deliveredQuantity || l.requestedQuantity]),
+    ),
+  );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Color sum vs delivered qty — helpful sanity check. We don't block on
-  // mismatch (the dealer may have substituted colours and shipped the same
-  // total count), but a hint makes the mismatch obvious.
+  // Color sum vs delivered qty — helpful sanity check.
   const colorSum = data.colorMatrix.reduce(
     (sum, c) => sum + (colorQtys[c.color] ?? 0),
     0,
   );
   const showColorMismatch =
     data.colorMatrix.length > 0 && colorSum !== deliveredQty;
+
+  // Same for legs: sum across legs should equal total delivered.
+  const legSum = data.legs.reduce(
+    (sum, l) => sum + (legQtys[l.id] ?? 0),
+    0,
+  );
+  const showLegMismatch =
+    data.legs.length > 0 && legSum !== deliveredQty;
 
   async function confirm() {
     setPending(true);
@@ -520,6 +533,10 @@ function CarDeliveryModal({
           colorConfirmations: data.colorMatrix.map((c) => ({
             color: c.color,
             deliveredQuantity: colorQtys[c.color] ?? 0,
+          })),
+          legConfirmations: data.legs.map((l) => ({
+            id: l.id,
+            deliveredQuantity: legQtys[l.id] ?? 0,
           })),
         }),
       });
@@ -594,6 +611,56 @@ function CarDeliveryModal({
               </span>
             )}
           </label>
+
+          {/* Per-leg breakdown (Phase γ) — only for multi-leg batches.
+              Single-leg batches don't need this section; the total
+              quantity above already says everything. */}
+          {data.legs.length > 1 && (
+            <div>
+              <p className="text-xs font-medium text-ink-600 mb-1.5">
+                Per city
+                {showLegMismatch && (
+                  <span className="text-[0.65rem] font-normal text-flame-dark ml-1.5">
+                    (sum {legSum} ≠ delivered {deliveredQty})
+                  </span>
+                )}
+              </p>
+              <div className="rounded-md border border-ink-200 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-ink-50 text-[0.65rem] text-ink-500 uppercase tracking-wide">
+                    <tr>
+                      <th className="text-left px-3 py-1.5">City</th>
+                      <th className="text-right px-3 py-1.5">Requested</th>
+                      <th className="text-right px-3 py-1.5">Delivered</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.legs.map((l) => (
+                      <tr key={l.id} className="border-t border-ink-200/60">
+                        <td className="px-3 py-1.5 font-medium text-midnight">{l.city}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-ink-500">{l.requestedQuantity}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          <input
+                            type="number"
+                            min={0}
+                            className="input text-right tabular-nums text-sm py-0.5 px-1 w-20 ml-auto"
+                            value={legQtys[l.id] ?? 0}
+                            onChange={(e) =>
+                              setLegQtys((curr) => ({
+                                ...curr,
+                                [l.id]: parseInt(e.target.value || "0", 10),
+                              }))
+                            }
+                            disabled={pending}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Per-colour breakdown */}
           {data.colorMatrix.length > 0 ? (
@@ -744,6 +811,22 @@ function DrawerHeader({
             {data.lifecycleState === "pre_po" ? "Pre-PO" : "Post-PO"}
           </span>
         </p>
+        {/* Multi-city batches (Phase α/β grouping) — show per-leg
+            breakdown so ops sees where the cars are going at a glance. */}
+        {data.legs.length > 1 && (
+          <p className="text-[0.7rem] text-ink-500 mt-1 flex flex-wrap gap-x-2">
+            <span className="font-medium text-midnight">🚚 {data.legs.length} legs:</span>
+            {data.legs.map((leg, i) => (
+              <span key={leg.id} className="tabular-nums">
+                {leg.city} ({leg.requestedQuantity}
+                {leg.deliveredQuantity > 0 && (
+                  <> · {leg.deliveredQuantity} delivered</>
+                )})
+                {i < data.legs.length - 1 && <span className="text-ink-400 ml-1">·</span>}
+              </span>
+            ))}
+          </p>
+        )}
       </div>
       {!isClosed && (
         <div className="flex items-center gap-2">

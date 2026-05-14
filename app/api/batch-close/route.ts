@@ -20,7 +20,7 @@
 import { and, eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { batches, batchActions, batchColorMatrix, actionTypes } from "@/lib/db/schema";
+import { batches, batchActions, batchColorMatrix, actionTypes, batchDeliveryLegs } from "@/lib/db/schema";
 import { requireAuth, apiError } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
@@ -36,6 +36,12 @@ interface CloseBody {
   deliveredQuantity?: number;
   /** Per-colour confirmations (only used when reason="delivered"). */
   colorConfirmations?: { color: string; deliveredQuantity: number }[];
+  /**
+   * Per-leg delivered quantity (only used when reason="delivered").
+   * Updates batch_delivery_legs.delivered_quantity for each leg.
+   * Phase γ — multi-city batches need per-city accounting at close.
+   */
+  legConfirmations?: { id: number; deliveredQuantity: number }[];
 }
 
 export async function POST(req: NextRequest) {
@@ -82,6 +88,27 @@ export async function POST(req: NextRequest) {
             eq(batchColorMatrix.batchId, body.batchId),
             eq(batchColorMatrix.color, c.color),
           ));
+      }
+    }
+
+    // 2b. Delivered: persist per-leg deliveredQuantity (Phase γ).
+    //     Defensive — table may be missing on older DBs that pre-date α.
+    if (body.reason === "delivered" && body.legConfirmations?.length) {
+      try {
+        for (const l of body.legConfirmations) {
+          if (!Number.isFinite(l.id) || !Number.isFinite(l.deliveredQuantity)) continue;
+          await tx.update(batchDeliveryLegs)
+            .set({ deliveredQuantity: Math.max(0, Math.floor(l.deliveredQuantity)) })
+            .where(and(
+              eq(batchDeliveryLegs.id, l.id),
+              eq(batchDeliveryLegs.batchId, body.batchId),
+            ));
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/no such table/i.test(msg)) throw err;
+        // eslint-disable-next-line no-console
+        console.warn("[batch-close] batch_delivery_legs missing — leg deliveries skipped. Run the Phase α migration.");
       }
     }
 
