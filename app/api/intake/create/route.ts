@@ -10,7 +10,7 @@
  * If the dealer doesn't exist yet, we create one with the dealer name as
  * given and the first split's city as home_city.
  */
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
@@ -62,6 +62,13 @@ interface CreateBody {
     /** Stakeholder (within the department) responsible for this action; nullable. */
     assignedStakeholderId?: number | null;
   }[];
+  /**
+   * True when ops confirmed at intake that the dealer shared VIN numbers
+   * along with the PO PDF. Persists as `batches.vin_received_at_intake`
+   * and pre-marks the first two VIN-chase steps (Send Dealer Confirmation
+   * Email + VIN) as done at the PO date.
+   */
+  vinReceivedAtIntake?: boolean;
   notes?: string | null;
 }
 
@@ -147,6 +154,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ── When VIN already received with the PO, find the two VIN-chase
+  //    action types we'll pre-mark done. Match by full name first, then
+  //    fall back to a substring scan so a renamed type (e.g. "VIN
+  //    Assignment") still resolves. Null means the action type doesn't
+  //    exist in this DB — we silently skip pre-marking for that step.
+  let vinPreMarkTypeIds: { email: number | null; vin: number | null } = { email: null, vin: null };
+  if (body.vinReceivedAtIntake) {
+    const allTypes = await db.select({ id: actionTypes.id, name: actionTypes.name }).from(actionTypes);
+    const byNameLower = new Map(allTypes.map((t) => [t.name.toLowerCase(), t.id]));
+    function resolve(exactLc: string, substringLc: string): number | null {
+      const exact = byNameLower.get(exactLc);
+      if (exact) return exact;
+      const hit = allTypes.find((t) => t.name.toLowerCase().includes(substringLc));
+      return hit?.id ?? null;
+    }
+    vinPreMarkTypeIds = {
+      email: resolve("send dealer confirmation email", "dealer confirmation"),
+      vin:   resolve("vin", "vin"),
+    };
+  }
+
   // ── Create batches × splits — single transaction ──────────────
   // If any insert below throws (FK violation, disk full, …), the whole
   // submission rolls back so we never leave half-created batches.
@@ -226,6 +254,11 @@ export async function POST(req: NextRequest) {
           lifecycleState: "post_po",
           feasibilityStatus,
 
+          // Ops confirmed at intake that the dealer shared VIN numbers
+          // with the PO PDF. Drives downstream pre-marking of the first
+          // two VIN-chase steps + reduces initial risk score.
+          vinReceivedAtIntake: body.vinReceivedAtIntake ?? false,
+
           notes: body.notes ?? undefined,
         }).returning({ id: batches.id });
 
@@ -256,6 +289,42 @@ export async function POST(req: NextRequest) {
             status,
             expectedDate: expectedDate ?? undefined,
           });
+        }
+
+        // ── VIN-at-intake fork ──────────────────────────────────────
+        // When ops confirmed at intake that the dealer shared VIN
+        // numbers with the PO, ensure the first two VIN-chase steps
+        // (Send Dealer Confirmation Email + VIN) exist on this batch
+        // and are marked done at the PO date. If ops already picked
+        // either at intake, we UPDATE the row we just inserted; if
+        // not, we INSERT a fresh done row.
+        if (body.vinReceivedAtIntake) {
+          const pickedIds = new Set(body.actions.map((a) => a.actionTypeId));
+          const completedAtIso = `${body.po.date}T12:00:00Z`;
+          for (const typeId of [vinPreMarkTypeIds.email, vinPreMarkTypeIds.vin]) {
+            if (typeId == null) continue;
+            if (pickedIds.has(typeId)) {
+              await tx.update(batchActions)
+                .set({
+                  status: "done",
+                  completedAt: completedAtIso,
+                  expectedDate: body.po.date,
+                })
+                .where(and(
+                  eq(batchActions.batchId, batchRow.id),
+                  eq(batchActions.actionTypeId, typeId),
+                ));
+            } else {
+              await tx.insert(batchActions).values({
+                batchId:      batchRow.id,
+                actionTypeId: typeId,
+                status:       "done",
+                completedAt:  completedAtIso,
+                expectedDate: body.po.date,
+                notes:        "Auto-completed: VIN received with the PO at intake.",
+              });
+            }
+          }
         }
 
         out.push({
