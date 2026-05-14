@@ -1374,12 +1374,15 @@ function ActionsList({
     <div className="space-y-6">
       {/* User-requested order: VIN chase first (dealer-side execution),
           Internal phase second (admin work). Both clusters are now
-          collapsible — click the header to toggle. */}
+          collapsible — click the header to toggle.
+          VIN chase uses the stepper variant (strict linear, one active
+          step). Internal phase uses the kanban variant (parallel work). */}
       {vinChaseActions.length > 0 && (
         <ClusterSection
           title="🔑 VIN chase"
-          subtitle="Linear chain — once VIN is in hand, the car moves toward the showroom"
+          subtitle="Strict linear chain — only one step active at a time"
           accent="gold"
+          variant="stepper"
           actions={vinChaseActions}
           alertsByActionId={alertsByActionId}
           onMutated={onMutated}
@@ -1393,6 +1396,7 @@ function ActionsList({
           title="🏢 Internal phase"
           subtitle="Specs · Pricing · SKU — runs in parallel"
           accent="brand"
+          variant="kanban"
           actions={internalActions}
           alertsByActionId={alertsByActionId}
           onMutated={onMutated}
@@ -1410,11 +1414,20 @@ function ActionsList({
  * Waiting/Blocked/Done/Skipped sub-grouping inside.
  */
 function ClusterSection({
-  title, subtitle, accent, actions, alertsByActionId, onMutated, layout, disabled, lifecycleState,
+  title, subtitle, accent, variant, actions, alertsByActionId, onMutated, layout, disabled, lifecycleState,
 }: {
   title: string;
   subtitle: string;
   accent: "brand" | "gold";
+  /**
+   * `kanban`  — actions render as Waiting/Blocked/Done sub-groups
+   *             (used for Internal phase where work runs in parallel).
+   * `stepper` — actions render as a numbered chain with one active
+   *             step at a time (used for VIN chase, which is strictly
+   *             linear: VIN → Plate → Customs → Tracking → Inspection
+   *             → Showroom Ready).
+   */
+  variant: "kanban" | "stepper";
   actions: ActionDetail[];
   alertsByActionId: Map<number, ActiveAlert[]>;
   onMutated: () => void;
@@ -1488,14 +1501,22 @@ function ClusterSection({
 
       {expanded && (
         <div className="p-3">
-          <ClusterBody
-            groups={groups}
-            alertsByActionId={alertsByActionId}
-            onMutated={onMutated}
-            layout={layout}
-            disabled={disabled}
-            lifecycleState={lifecycleState}
-          />
+          {variant === "stepper" ? (
+            <VinChaseStepper
+              actions={actions}
+              onMutated={onMutated}
+              disabled={disabled}
+            />
+          ) : (
+            <ClusterBody
+              groups={groups}
+              alertsByActionId={alertsByActionId}
+              onMutated={onMutated}
+              layout={layout}
+              disabled={disabled}
+              lifecycleState={lifecycleState}
+            />
+          )}
         </div>
       )}
     </section>
@@ -1567,6 +1588,175 @@ function ClusterBody({
         <ActionGroup
           title="Skipped" tone="skipped" actions={groups.skipped} alertsByActionId={alertsByActionId} onMutated={onMutated} disabled={disabled} collapsibleByDefault
         />
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// VIN-chase stepper — strict linear flow renderer
+// ──────────────────────────────────────────────────────────────────
+//
+// Unlike the Internal phase (which is a parallel kanban), the VIN
+// chase is a fixed 6-step chain: VIN → Plate → Customs → Tracking
+// Installed → Car Inspection → Car Ready in Showroom. Only ONE step
+// is active at a time. Earlier steps render as completed (✓), the
+// current step is interactive, later steps are upcoming (greyed).
+//
+// Step ordering uses `action_types.sortOrder` (admin-configurable in
+// Settings → Action Types). The "current" step is the first non-done
+// non-skipped action. Skipped steps don't block the chain — we skip
+// past them to the next.
+
+function VinChaseStepper({
+  actions, onMutated, disabled,
+}: {
+  actions: ActionDetail[];
+  onMutated: () => void;
+  disabled: boolean;
+}) {
+  // Sort by sortOrder ascending — admin's configured chain order.
+  const ordered = [...actions].sort((a, b) => a.sortOrder - b.sortOrder);
+  // First not-done, not-skipped step is the active one.
+  const currentIdx = ordered.findIndex(
+    (a) => a.status !== "done" && a.status !== "skipped",
+  );
+
+  return (
+    <ol className="space-y-2">
+      {ordered.map((action, i) => {
+        const isDone     = action.status === "done";
+        const isSkipped  = action.status === "skipped";
+        const isCurrent  = i === currentIdx;
+        const isUpcoming = !isDone && !isSkipped && !isCurrent;
+        return (
+          <li key={action.id}>
+            <VinStepperRow
+              stepNumber={i + 1}
+              action={action}
+              state={
+                isDone     ? "done"
+                : isSkipped ? "skipped"
+                : isCurrent ? "current"
+                : "upcoming"
+              }
+              onMutated={onMutated}
+              disabled={disabled || isUpcoming}
+              showActions={isCurrent && !disabled}
+            />
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function VinStepperRow({
+  stepNumber, action, state, onMutated, disabled, showActions,
+}: {
+  stepNumber: number;
+  action: ActionDetail;
+  state: "done" | "current" | "upcoming" | "skipped";
+  onMutated: () => void;
+  disabled: boolean;
+  showActions: boolean;
+}) {
+  const [pending, setPending] = useState(false);
+
+  async function setStatus(newStatus: "done" | "skipped") {
+    setPending(true);
+    try {
+      const body: Record<string, unknown> = {
+        batchActionId: action.id,
+        newStatus,
+      };
+      if (newStatus === "done") {
+        body.newCompletedAt = new Date().toISOString();
+      }
+      const res = await fetch("/api/batch-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onMutated();
+    } catch (e) {
+      alert(`Could not update: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  // Visual tokens per state.
+  const visuals = {
+    done:     { rowCls: "bg-green-pale border-green",           iconCls: "bg-green-dark text-white",        icon: "✓",  labelCls: "text-green-dark" },
+    current:  { rowCls: "bg-brand-pastel border-brand shadow",  iconCls: "bg-brand text-white",             icon: "●",  labelCls: "text-midnight" },
+    upcoming: { rowCls: "bg-white border-ink-200 opacity-50",   iconCls: "bg-ink-100 text-ink-500",         icon: "",   labelCls: "text-ink-500" },
+    skipped:  { rowCls: "bg-ink-100 border-ink-200 opacity-60", iconCls: "bg-ink-300 text-white",           icon: "⏭", labelCls: "text-ink-500 line-through" },
+  }[state];
+
+  const labelText = state === "done" ? action.doneLabel : action.waitingLabel;
+  const ownerLabel = action.assignedStakeholderName
+    ? `@${action.assignedStakeholderName}${action.departmentName ? ` · ${action.departmentName}` : ""}`
+    : action.departmentName ?? null;
+
+  return (
+    <div className={cn("flex items-start gap-3 px-3 py-2 rounded-md border", visuals.rowCls)}>
+      <div className="flex flex-col items-center gap-0.5 shrink-0 pt-0.5">
+        <span className={cn(
+          "h-6 w-6 rounded-full flex items-center justify-center text-xs font-bold leading-none",
+          visuals.iconCls,
+        )}>
+          {visuals.icon || stepNumber}
+        </span>
+        <span className="text-[0.6rem] text-ink-400 tabular-nums">{stepNumber}</span>
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className={cn("text-sm font-medium leading-snug", visuals.labelCls)}>
+          {labelText}
+        </p>
+        <p className="text-[0.7rem] text-ink-500 mt-0.5 flex flex-wrap items-center gap-x-2">
+          {ownerLabel && <span>{ownerLabel}</span>}
+          {action.expectedDate && (
+            <>
+              {ownerLabel && <Sep />}
+              <span className="tabular-nums">📅 {action.expectedDate}</span>
+            </>
+          )}
+          {state === "done" && action.completedAt && (
+            <>
+              <Sep />
+              <span className="tabular-nums text-green-dark">
+                ✓ {fmtLocalDateTime(action.completedAt)}
+              </span>
+            </>
+          )}
+          {state === "upcoming" && (
+            <span className="italic text-ink-400">— waiting for the previous step</span>
+          )}
+        </p>
+      </div>
+      {showActions && (
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            disabled={pending || disabled}
+            onClick={() => setStatus("done")}
+            className="btn btn-primary text-xs"
+            title="Mark this step done and advance to the next"
+          >
+            {pending ? "…" : "✓ Mark done"}
+          </button>
+          <button
+            type="button"
+            disabled={pending || disabled}
+            onClick={() => setStatus("skipped")}
+            className="btn text-xs"
+            title="Skip this step — the next step still becomes active"
+          >
+            Skip
+          </button>
+        </div>
       )}
     </div>
   );
