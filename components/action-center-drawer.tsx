@@ -1300,23 +1300,36 @@ function CancelModal({
 // ──────────────────────────────────────────────────────────────────
 
 /**
- * VIN-chase canonical names — case-insensitive matches. Actions whose
- * names are in this set go into the "🔑 VIN chase" cluster; everything
- * else falls into the "🏢 Internal phase" cluster. (App Listing and
- * Delivery are already filtered upstream into their own panels.)
+ * Keywords that route an action into the "🔑 VIN chase" cluster.
+ *
+ * Originally this was an exact-match set against canonical names, but
+ * production admins rename action_types freely (e.g. "Plate Waiting
+ * from Dealer", "Tracking System Confirmation") so an exact match
+ * misclassifies the same action across deployments. A case-insensitive
+ * substring match is more forgiving — anything mentioning one of these
+ * tokens belongs in VIN chase.
+ *
+ * Tokens were picked to be specific enough not to false-match common
+ * internal-phase names (no token appears in "Car Specs", "Pricing",
+ * "SKU", "Uploading Cars" etc.). App Listing + Delivery are filtered
+ * upstream into their own panels and never reach this classifier.
  */
-const VIN_CHASE_NAMES = new Set([
-  "send dealer confirmation email",
+const VIN_CHASE_KEYWORDS = [
   "vin",
   "plate",
-  "customs card",
-  "tracking system installed",
-  "car inspection",
-  "car ready in showroom",
-]);
+  "customs",
+  "tracking",
+  "inspection",
+  "showroom",
+  "confirmation email",   // "Send Dealer Confirmation Email"
+  "dealer email",         // alternate phrasing
+];
 
 function clusterFor(actionTypeName: string): "vin_chase" | "internal" {
-  return VIN_CHASE_NAMES.has(actionTypeName.toLowerCase()) ? "vin_chase" : "internal";
+  const name = actionTypeName.toLowerCase();
+  return VIN_CHASE_KEYWORDS.some((kw) => name.includes(kw))
+    ? "vin_chase"
+    : "internal";
 }
 
 function ActionsList({
