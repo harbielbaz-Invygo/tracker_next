@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { InsightsData } from "@/lib/insights-data";
 import type {
-  DepartmentRow, StakeholderRow, DealerReliabilityRow,
+  DepartmentRow, StakeholderRow, DealerReliabilityRow, CityReliabilityRow,
   CustomerImpactReport, CustomerImpactBatch,
 } from "@/lib/reports-data";
 import type { DashboardRow, TimelineData, StatusBucket } from "@/lib/dashboard-data";
@@ -28,7 +28,7 @@ interface Props {
   data: InsightsData;
 }
 
-type TrustTab = "dealer" | "ops" | "risk";
+type TrustTab = "dealer" | "ops" | "cities" | "risk";
 
 export default function InsightsShell({ data }: Props) {
   const [trustTab, setTrustTab] = useState<TrustTab>("dealer");
@@ -319,12 +319,14 @@ function TrustPanel({
       <div role="tablist" className="flex border-b border-ink-200 bg-ink-50">
         <TrustTabButton id="dealer" active={active} onChange={onChange} label="Dealer Reliability" />
         <TrustTabButton id="ops"    active={active} onChange={onChange} label="Ops Performance" />
+        <TrustTabButton id="cities" active={active} onChange={onChange} label="Cities" />
         <TrustTabButton id="risk"   active={active} onChange={onChange} label="Risk Engine" />
       </div>
 
       <div className="p-3">
         {active === "dealer" && <DealerTab rows={report.dealerReliability} />}
         {active === "ops"    && <OpsTab depts={report.departments} stakeholders={report.stakeholders} />}
+        {active === "cities" && <CitiesTab rows={report.cityReliability} />}
         {active === "risk"   && <RiskTab report={report} />}
       </div>
     </section>
@@ -528,7 +530,86 @@ function DelayValue({ days, bold = false }: { days: number | null; bold?: boolea
   return <span className={cn(cls, bold && "font-semibold")}>{text}</span>;
 }
 
-// Tab 3 — Risk engine effectiveness
+// Tab 3 — Cities (Phase δ): per-city delivery reliability.
+function CitiesTab({ rows }: { rows: CityReliabilityRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <p className="text-sm text-ink-500 italic px-2 py-4">
+        No city data yet. This lens populates once batches with delivery
+        legs land (Phase α/β output).
+      </p>
+    );
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-xs font-medium text-ink-600 border-b border-ink-200">
+            <Th>City</Th>
+            <Th align="right">Batches</Th>
+            <Th align="right">Delivered</Th>
+            <Th align="right">Cars requested</Th>
+            <Th align="right">Cars delivered</Th>
+            <Th align="right">Qty %</Th>
+            <Th align="right">Date %</Th>
+            <Th align="right">Variance</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((c) => (
+            <tr key={c.city} className="border-b border-ink-200/60">
+              <Td>
+                <div className="font-medium text-midnight">{c.city}</div>
+              </Td>
+              <Td align="right" tabular>{c.totalBatches}</Td>
+              <Td align="right" tabular>
+                {c.deliveredBatches > 0
+                  ? <span className="text-green-dark">{c.deliveredBatches}</span>
+                  : <span className="text-ink-400">0</span>}
+              </Td>
+              <Td align="right" tabular>{c.carsRequested}</Td>
+              <Td align="right" tabular>{c.carsDelivered}</Td>
+              <Td align="right" tabular>
+                {c.qtyFulfillmentRate == null
+                  ? <span className="text-ink-400">—</span>
+                  : <span className={cn(
+                      "font-medium",
+                      c.qtyFulfillmentRate >= 90 ? "text-green-dark"
+                        : c.qtyFulfillmentRate >= 70 ? "text-gold-dark"
+                        : "text-flame-dark",
+                    )}>{c.qtyFulfillmentRate}%</span>}
+              </Td>
+              <Td align="right" tabular>
+                {c.dateReliabilityRate == null
+                  ? <span className="text-ink-400">—</span>
+                  : <span className={cn(
+                      "font-medium",
+                      c.dateReliabilityRate >= 90 ? "text-green-dark"
+                        : c.dateReliabilityRate >= 70 ? "text-gold-dark"
+                        : "text-flame-dark",
+                    )}>{c.dateReliabilityRate}%</span>}
+              </Td>
+              <Td align="right" tabular>
+                {c.avgDateVarianceDays == null
+                  ? <span className="text-ink-400">—</span>
+                  : <span className={cn(
+                      "font-medium tabular-nums",
+                      c.avgDateVarianceDays > 0 ? "text-flame-dark"
+                        : c.avgDateVarianceDays < 0 ? "text-green-dark"
+                        : "text-ink-500",
+                    )}>
+                      {c.avgDateVarianceDays > 0 ? `+${c.avgDateVarianceDays}` : c.avgDateVarianceDays}d
+                    </span>}
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Tab 4 — Risk engine effectiveness
 function RiskTab({ report }: { report: InsightsData["report"] }) {
   const { customerImpact } = report;
   return (
