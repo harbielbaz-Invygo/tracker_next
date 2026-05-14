@@ -657,6 +657,29 @@ async function handleAlertRule(b: Extract<Body, { resource: "alert-rule" }>) {
 }
 
 async function handleVinStage(b: Extract<Body, { resource: "vin-stage" }>) {
+  // Defensive: if the runtime DB doesn't have the new tables yet (e.g.
+  // production hasn't had the migration script run), every op below
+  // would throw "no such table: vin_chase_stages". Catch that early
+  // and surface a clear 503 with remediation instructions so admin
+  // doesn't see a raw SQLite error in the editor's red banner.
+  try {
+    await db.select({ id: vinChaseStages.id }).from(vinChaseStages).limit(1);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table/i.test(msg)) {
+      return NextResponse.json(
+        {
+          error:
+            "VIN Chase Stages tables don't exist on this DB yet. Run the migration: " +
+            "`npx tsx scripts/migrate-vin-stages.ts` (set DATABASE_URL + TURSO_AUTH_TOKEN " +
+            "to your Turso credentials first).",
+        },
+        { status: 503 },
+      );
+    }
+    throw err;
+  }
+
   if (b.op === "create") {
     if (!b.name?.trim() || !b.waitingLabel?.trim() || !b.doneLabel?.trim()) {
       return NextResponse.json(

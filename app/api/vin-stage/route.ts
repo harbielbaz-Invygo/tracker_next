@@ -59,14 +59,29 @@ export async function POST(req: NextRequest) {
     ? (body.newCompletedAt ?? new Date().toISOString())
     : null;
 
-  await db
-    .update(batchVinStages)
-    .set({
-      status:      body.newStatus,
-      completedAt,
-      updatedAt:   new Date().toISOString(),
-    })
-    .where(eq(batchVinStages.id, id));
+  try {
+    await db
+      .update(batchVinStages)
+      .set({
+        status:      body.newStatus,
+        completedAt,
+        updatedAt:   new Date().toISOString(),
+      })
+      .where(eq(batchVinStages.id, id));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table/i.test(msg)) {
+      return NextResponse.json(
+        {
+          error:
+            "batch_vin_stages table doesn't exist on this DB. Run the migration: " +
+            "`npx tsx scripts/migrate-vin-stages.ts`.",
+        },
+        { status: 503 },
+      );
+    }
+    throw err;
+  }
 
   return NextResponse.json({ ok: true });
 }
