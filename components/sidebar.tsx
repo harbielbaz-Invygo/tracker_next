@@ -17,6 +17,7 @@ import { usePathname } from "next/navigation";
 import { signOut } from "next-auth/react";
 import { useEffect, useState } from "react";
 import { ALL_VIEWS, ACCESS, VIEW_LABELS, canAccess, type Role, type ViewName } from "@/lib/access";
+import { ViewIcon } from "@/components/view-icons";
 import { cn } from "@/lib/utils";
 
 // Stable mapping ViewName → URL slug
@@ -179,6 +180,10 @@ export default function Sidebar({ role, name, username }: {
               const href = VIEW_TO_PATH[view];
               const active = pathname === href;
               const badge = accessBadge(view, role);
+              // Locked views are kept visible (server-side gating still
+              // applies), but we visually deprioritise them in collapsed
+              // mode so the rail still telegraphs "you can't enter here".
+              const locked = badge === "🔒";
               return (
                 <Link
                   key={view}
@@ -189,10 +194,29 @@ export default function Sidebar({ role, name, username }: {
                     "nav-btn",
                     active && "nav-btn-active",
                     collapsed && "justify-center px-0",
+                    collapsed && locked && !active && "opacity-50",
                   )}
                 >
                   {collapsed ? (
-                    <span aria-hidden="true" className="text-base leading-none">{badge}</span>
+                    // Per-view icon (sprite) replaces the access badge
+                    // in collapsed mode so each rail item is visually
+                    // distinct at a glance. We layer a tiny lock pip
+                    // bottom-right for inaccessible views to retain the
+                    // 🔒 information without taking horizontal space.
+                    <span className="relative inline-flex" aria-hidden="true">
+                      <ViewIcon view={view} />
+                      {locked && (
+                        <span
+                          className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5
+                                     rounded-full bg-white text-[0.55rem] leading-none
+                                     flex items-center justify-center
+                                     border border-ink-300 text-ink-600"
+                          title="Locked"
+                        >
+                          🔒
+                        </span>
+                      )}
+                    </span>
                   ) : (
                     <>
                       <span className="mr-1" aria-hidden="true">{badge}</span>
