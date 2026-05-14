@@ -18,6 +18,7 @@ export type Role = "admin" | "ops" | "guest";
 
 export const ALL_VIEWS = [
   "Dashboard",
+  "Insights",
   "Forecast",
   "Intake",
   "Action Center",
@@ -29,6 +30,10 @@ export type ViewName = (typeof ALL_VIEWS)[number];
 /** Access map. */
 export const ACCESS: Record<ViewName, Role[] | "public"> = {
   "Dashboard":     "public",
+  // New unified view (Dashboard + Reports proposal). Same audience as
+  // the underlying surfaces it merges — read-only ops + admin. We can
+  // open it up to guest later once the design lands.
+  "Insights":      ["ops", "admin"],
   "Forecast":      ["ops", "admin"],
   "Intake":        ["ops", "admin"],
   "Action Center": ["ops", "admin"],
@@ -39,6 +44,7 @@ export const ACCESS: Record<ViewName, Role[] | "public"> = {
 /** Sidebar display labels. Equal to names since the rename. */
 export const VIEW_LABELS: Record<ViewName, string> = {
   "Dashboard":     "Dashboard",
+  "Insights":      "Insights",
   "Forecast":      "Forecast",
   "Intake":        "Intake",
   "Action Center": "Action Center",
