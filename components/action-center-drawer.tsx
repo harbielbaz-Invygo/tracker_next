@@ -1806,14 +1806,10 @@ function ActionRow({
     </p>
   );
 
-  // Inline alert details — one block per alert, rendered under the meta.
-  const AlertsBlock = alerts.length > 0 ? (
-    <div className="space-y-1.5">
-      {sortedAlerts.map((a) => (
-        <AlertInline key={a.id} alert={a} />
-      ))}
-    </div>
-  ) : null;
+  // The inline alert detail block was dropped — the row already signals
+  // lateness via the severity icon on the title + the `+Xd` chip in the
+  // meta line, so the pill was redundant. The severity icon stays as a
+  // quick scan signal; the `alerts` array is still consulted for it.
 
   if (compact) {
     // Kanban card: meta + buttons stacked vertically so a narrow column fits.
@@ -1821,25 +1817,19 @@ function ActionRow({
       <div className={cn("rounded-md border bg-white px-3 py-2", borderTone)}>
         {Title}
         {Meta}
-        {AlertsBlock}
         <div className="mt-2">{Buttons}</div>
       </div>
     );
   }
 
   // Vertical (default): meta + buttons side by side, wrap on narrow.
-  // When alerts are present, the alert block needs full row width — so we
-  // wrap the title/meta/buttons in a top row and the alert block sits below.
   return (
-    <div className={cn("px-3 py-2 rounded-md border bg-white", borderTone)}>
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex-1 min-w-[10rem]">
-          {Title}
-          {Meta}
-        </div>
-        {Buttons}
+    <div className={cn("flex flex-wrap items-center gap-3 px-3 py-2 rounded-md border bg-white", borderTone)}>
+      <div className="flex-1 min-w-[10rem]">
+        {Title}
+        {Meta}
       </div>
-      {AlertsBlock}
+      {Buttons}
     </div>
   );
 }
