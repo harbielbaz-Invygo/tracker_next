@@ -15,6 +15,7 @@
  */
 import AccessGate from "@/components/access-gate";
 import ActionCenterShell from "@/components/action-center-shell";
+import PageHeader from "@/components/page-header";
 import { getActionCenterRows, summarizeActionCenter } from "@/lib/action-center-data";
 import { runAlertEngine } from "@/lib/alert-engine";
 
@@ -31,10 +32,10 @@ export default async function ActionCenterPage() {
     return (
       <AccessGate view="Action Center">
         <div>
-          <h1 className="text-3xl font-bold mb-1">🛠️ Action Center</h1>
-          <p className="text-sm text-ink-500 mb-6 max-w-prose">
-            Every batch in flight, sortable by action required and by department.
-          </p>
+          <PageHeader
+            view="Action Center"
+            subtitle="Every batch in flight, sortable by action required and by department."
+          />
           <div className="card text-center py-10">
             <p className="text-base font-medium text-midnight mb-1">No batches yet</p>
             <p className="text-sm text-ink-500">

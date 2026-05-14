@@ -13,6 +13,7 @@ import ActionCenterTable from "./action-center-table";
 import ActionCenterBatchList from "./action-center-batch-list";
 import ActionCenterDrawer from "./action-center-drawer";
 import ActionCenterDelayedStrip, { type AggregateFilter } from "./action-center-delayed-strip";
+import PageHeader from "./page-header";
 import { cn } from "@/lib/utils";
 
 type ViewMode = "stacked" | "side-by-side";
@@ -122,11 +123,10 @@ export default function ActionCenterShell({ rows, totals }: Props) {
 
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-1">🛠️ Action Center</h1>
-      <p className="text-sm text-ink-500 mb-6 max-w-prose">
-        Every batch in flight, sorted by action required. Pick a batch to update its
-        action statuses and capture Ops&apos; current confidence.
-      </p>
+      <PageHeader
+        view="Action Center"
+        subtitle={<>Every batch in flight, sorted by action required. Pick a batch to update its action statuses and capture Ops&apos; current confidence.</>}
+      />
 
       {/* Metric strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">

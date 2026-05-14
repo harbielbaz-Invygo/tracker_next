@@ -21,6 +21,7 @@ import type {
 } from "@/lib/reports-data";
 import type { DashboardRow, TimelineData, StatusBucket } from "@/lib/dashboard-data";
 import BatchTable from "./batch-table";
+import PageHeader from "./page-header";
 import TimelineSvg from "./timeline-svg";
 import { cn } from "@/lib/utils";
 
@@ -35,14 +36,11 @@ export default function InsightsShell({ data }: Props) {
 
   return (
     <div className="space-y-6">
-      <header>
-        <h1 className="text-3xl font-bold mb-1">📊 Insights</h1>
-        <p className="text-sm text-ink-500 max-w-prose">
-          The unified view — leadership-level health up top, drilling into
-          customer impact, the three trust lenses, and the per-batch
-          Plan-vs-Reality timeline at the bottom.
-        </p>
-      </header>
+      <PageHeader
+        view="Insights"
+        subtitle="The unified view — leadership-level health up top, drilling into customer impact, the three trust lenses, and the per-batch Plan-vs-Reality timeline at the bottom."
+        className="mb-0"
+      />
 
       <HeroRow hero={data.hero} />
 
