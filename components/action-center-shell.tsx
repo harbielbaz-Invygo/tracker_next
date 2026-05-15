@@ -287,37 +287,34 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         className="grid grid-cols-1 gap-4 lg:gap-0 h-[min(76vh,820px)] min-h-[480px] lg:[grid-template-columns:var(--ac-cols)]"
         style={{ "--ac-cols": `${leftWidth}px 14px 1fr` } as React.CSSProperties}
       >
-          {/* Left column — search + completion-view toggle row, then
-              batch list. The toggle sits on the same line as the search
-              (flex-wrap kicks in if the column is too narrow to fit
-              both, in which case the toggle wraps below the search). */}
+          {/* Left column — search above the batch list. The completion-view
+              toggle that used to live next to the search moved into the
+              right column header so the narrow left column has more room
+              for the search input. */}
           <div className="flex flex-col gap-2 min-h-0">
-            <div className="flex items-center gap-2 flex-wrap shrink-0">
-              <label className="flex-1 min-w-[160px]">
-                <span className="sr-only">Search batches</span>
-                <div className="relative">
-                  <input
-                    type="search"
-                    className="input pr-9 text-sm"
-                    placeholder="🔎 Search PO, dealer, model…"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                  />
-                  {search && (
-                    <button
-                      type="button"
-                      aria-label="Clear search"
-                      onClick={() => setSearch("")}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 hover:text-midnight
-                                 text-sm rounded px-1.5 py-0.5"
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              </label>
-              <CompletionViewToggle value={completionView} onChange={setCompletionView} />
-            </div>
+            <label className="block shrink-0">
+              <span className="sr-only">Search batches</span>
+              <div className="relative">
+                <input
+                  type="search"
+                  className="input pr-9 text-sm"
+                  placeholder="🔎 Search PO, dealer, model…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                {search && (
+                  <button
+                    type="button"
+                    aria-label="Clear search"
+                    onClick={() => setSearch("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 hover:text-midnight
+                               text-sm rounded px-1.5 py-0.5"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            </label>
             <div className="flex-1 min-h-0">
               <ActionCenterBatchList
                 rows={filtered}
@@ -349,24 +346,33 @@ export default function ActionCenterShell({ rows, totals }: Props) {
                             group-active:bg-brand-dark transition-colors" />
           </div>
 
-          <div className="overflow-auto rounded-lg lg:ml-2">
-            {selected ? (
-              <ActionCenterDrawer
-                key={selected}
-                batchCode={selected}
-                onMutation={onMutation}
-                layout="kanban"
-              />
-            ) : (
-              <div className="card h-full flex flex-col items-center justify-center text-center text-sm text-ink-500">
-                <p className="text-base font-medium text-midnight mb-1">
-                  Pick a batch
-                </p>
-                <p>
-                  Select a batch from the list to update its actions and capture Ops&apos; confidence.
-                </p>
-              </div>
-            )}
+          {/* Right column — completion-view toggle sits above the drawer
+              box. Even though it filters the batch LIST on the left,
+              hosting it here gives both elements more horizontal room
+              and matches the visual rhythm of the drawer header below. */}
+          <div className="flex flex-col gap-2 min-h-0 lg:ml-2">
+            <div className="flex items-center shrink-0">
+              <CompletionViewToggle value={completionView} onChange={setCompletionView} />
+            </div>
+            <div className="flex-1 min-h-0 overflow-auto rounded-lg">
+              {selected ? (
+                <ActionCenterDrawer
+                  key={selected}
+                  batchCode={selected}
+                  onMutation={onMutation}
+                  layout="kanban"
+                />
+              ) : (
+                <div className="card h-full flex flex-col items-center justify-center text-center text-sm text-ink-500">
+                  <p className="text-base font-medium text-midnight mb-1">
+                    Pick a batch
+                  </p>
+                  <p>
+                    Select a batch from the list to update its actions and capture Ops&apos; confidence.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
     </div>
