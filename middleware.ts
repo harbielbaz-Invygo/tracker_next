@@ -1,7 +1,8 @@
 /**
- * Route guard. The Dashboard is public (matches the Streamlit version);
- * every other authed page redirects to /login when the user has no session.
- * Per-page role gating is handled inside the page component itself.
+ * Route guard. Insights is the public landing (mirrors the role the
+ * legacy Dashboard used to play); every other authed page redirects
+ * to /login when the user has no session. Per-page role gating is
+ * handled inside the page component itself.
  *
  * Edge-runtime safe: imports `authConfig` (no DB), not `auth.ts` (uses
  * better-sqlite3 which the Edge runtime can't load).
@@ -11,7 +12,9 @@ import { authConfig } from "@/lib/auth.config";
 
 const { auth } = NextAuth(authConfig);
 
-const PUBLIC_PATHS = new Set<string>(["/", "/login", "/dashboard"]);
+// `/dashboard` stays public so legacy bookmarks still resolve even
+// though it's no longer in the sidebar.
+const PUBLIC_PATHS = new Set<string>(["/", "/login", "/dashboard", "/insights"]);
 
 export default auth((req) => {
   const path = req.nextUrl.pathname;

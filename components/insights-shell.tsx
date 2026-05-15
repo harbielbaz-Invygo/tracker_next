@@ -14,13 +14,14 @@
  * — wire it through the data layer in a follow-up once the shape lands.
  */
 import { useEffect, useMemo, useState } from "react";
-import type { InsightsData } from "@/lib/insights-data";
+import type { InsightsData, ClosureSummary } from "@/lib/insights-data";
 import type {
   DepartmentRow, StakeholderRow, DealerReliabilityRow, CityReliabilityRow,
   CustomerImpactReport, CustomerImpactBatch,
 } from "@/lib/reports-data";
 import type { DashboardRow, TimelineData, StatusBucket } from "@/lib/dashboard-data";
 import BatchTable from "./batch-table";
+import CompactMetric from "./compact-metric";
 import PageHeader from "./page-header";
 import TimelineSvg from "./timeline-svg";
 import { PeriodSelect } from "./period-select";
@@ -63,6 +64,8 @@ export default function InsightsShell({ data, period }: Props) {
           Generated {new Date(data.generatedAt).toLocaleString()}
         </span>
       </div>
+
+      <ClosureStrip closure={data.closure} />
 
       <CustomerImpactBlock impact={data.report.customerImpact} />
 
@@ -127,6 +130,68 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
         value={hero.cancelled.toLocaleString()}
         accent={hero.cancelled > 0 ? "flame" : "neutral"}
         sub="batches the dealer pulled"
+      />
+    </section>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Closure + volume strip — mirrors the Action Center summary tiles so
+// the same operational headline numbers (Total cars, Listed, Delivered,
+// Partly, Cancelled) are reachable from the unified Insights view.
+// ──────────────────────────────────────────────────────────────────
+
+function ClosureStrip({ closure }: { closure: ClosureSummary }) {
+  const pct = (n: number) =>
+    closure.totalQuantity === 0 ? 0 : Math.round((n / closure.totalQuantity) * 100);
+  return (
+    <section
+      aria-label="Closure and volume summary"
+      className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2"
+    >
+      <CompactMetric
+        label="Total PO cars"
+        value={closure.totalQuantity}
+        accent="ink"
+        valueColor="text-midnight"
+        subtitle={`across ${closure.totalBatches} ${closure.totalBatches === 1 ? "batch" : "batches"}`}
+        title="Total cars across every batch in scope (gross — includes cancelled units)."
+      />
+      <CompactMetric
+        label="Listed on app"
+        value={closure.listed}
+        accent="brand"
+        valueColor="text-brand-dark"
+        subtitle={`${closure.carsListed} / ${closure.totalQuantity} cars · ${pct(closure.carsListed)}%`}
+        title="Batches marked live in the customer app. Subtitle: cars in those batches as a share of total PO quantity."
+      />
+      <CompactMetric
+        label="Delivered"
+        value={closure.delivered}
+        accent="green"
+        valueColor="text-green-dark"
+        subtitle={`${closure.carsDelivered} / ${closure.totalQuantity} cars · ${pct(closure.carsDelivered)}%`}
+        title="Batches formally closed as delivered. Subtitle: cars actually shipped as a share of total PO quantity."
+      />
+      <CompactMetric
+        label="Partly delivered"
+        value={closure.partlyDelivered}
+        accent="gold"
+        valueColor="text-gold-dark"
+        subtitle={closure.partlyDelivered > 0
+          ? `${closure.carsPartlyDelivered} shipped · ${closure.carsPartlyRequested - closure.carsPartlyDelivered} cancelled`
+          : "—"}
+        title="Batches where some units shipped but not all — includes in-flight partials and cancelled-after-partial."
+      />
+      <CompactMetric
+        label="Cancelled"
+        value={closure.cancelled}
+        accent="flame"
+        valueColor="text-flame-dark"
+        subtitle={closure.cancelled > 0
+          ? `${closure.carsCancelled} ${closure.carsCancelled === 1 ? "car" : "cars"} cancelled`
+          : "—"}
+        title="Batches closed with a cancellation reason. Subtitle: gross car count across cancelled batches."
       />
     </section>
   );

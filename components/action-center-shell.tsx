@@ -13,6 +13,7 @@ import { isFullySettled } from "@/lib/action-center-predicates";
 import ActionCenterBatchList from "./action-center-batch-list";
 import ActionCenterDrawer from "./action-center-drawer";
 import ActionCenterDelayedStrip, { type AggregateFilter } from "./action-center-delayed-strip";
+import CompactMetric from "./compact-metric";
 import PageHeader from "./page-header";
 import { cn } from "@/lib/utils";
 
@@ -555,49 +556,7 @@ function HeroMetric({ label, value, tone, title }: {
   );
 }
 
-type CompactAccent = "green" | "brand" | "gold" | "flame" | "ink";
-
-const COMPACT_ACCENT_CLASSES: Record<CompactAccent, string> = {
-  green: "border-l-2 border-l-green",
-  brand: "border-l-2 border-l-brand",
-  gold:  "border-l-2 border-l-gold",
-  flame: "border-l-2 border-l-flame",
-  ink:   "border-l-2 border-l-ink-300",
-};
-
-function CompactMetric({ label, value, valueColor, title, subtitle, accent }: {
-  label: string;
-  value: number;
-  valueColor?: string;
-  title?: string;
-  /** Optional second line — used to show the car-level breakdown
-   *  (e.g. "200 / 340 cars · 59%") under tiles that have one. */
-  subtitle?: string;
-  /** Colored left-edge stripe matching the tile's semantic role. */
-  accent?: CompactAccent;
-}) {
-  return (
-    <div
-      title={title}
-      className={cn(
-        "px-3 py-2 rounded-md bg-ink-50 border border-ink-100",
-        COMPACT_ACCENT_CLASSES[accent ?? "ink"],
-      )}
-    >
-      <div className="flex items-baseline justify-between gap-3">
-        <span className="text-xs font-medium text-ink-600">{label}</span>
-        <span className={cn("text-lg font-semibold tabular-nums", valueColor ?? "text-midnight")}>
-          {value}
-        </span>
-      </div>
-      {subtitle && (
-        <p className="text-[0.65rem] text-ink-500 mt-0.5 tabular-nums leading-tight">
-          {subtitle}
-        </p>
-      )}
-    </div>
-  );
-}
+// CompactMetric moved to ./compact-metric for reuse on Insights.
 
 // ── Select ─────────────────────────────────────────────────────
 
