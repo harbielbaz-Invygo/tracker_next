@@ -15,6 +15,7 @@ import type {
   PerformanceReport, DepartmentRow, StakeholderRow, DealerReliabilityRow,
   CustomerImpactReport, CustomerImpactBatch,
 } from "@/lib/reports-data";
+import { Sparkline } from "./sparkline";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -163,6 +164,7 @@ function PerformanceTable({
                 <Th align="right">Active</Th>
                 <Th align="right">Skipped</Th>
                 <Th align="right">On-time rate</Th>
+                <Th align="right" title="12-week on-time-rate trend">Trend (12w)</Th>
                 <Th align="right">Avg delay</Th>
                 <Th align="right">Worst</Th>
                 <Th align="right">Delayed batches</Th>
@@ -189,6 +191,22 @@ function PerformanceTable({
                         baseline={cohortOnTimeRate}
                         higherIsBetter
                         unit="%"
+                      />
+                    </div>
+                  </Td>
+                  <Td align="right" tabular>
+                    {/* 12-week on-time-rate trend per owner. Smaller
+                        sparkline (60×16) sized for table density;
+                        stroke colour follows the row's CURRENT rate
+                        tone for consistency with the cohort visualisation. */}
+                    <div className="inline-flex justify-end">
+                      <Sparkline
+                        values={row.onTimeRateWeekly}
+                        stroke={rowSparkStroke(row.onTimeRate)}
+                        width={60}
+                        height={16}
+                        baseline={null}
+                        ariaLabel={`${primary} on-time rate trend, last 12 weeks`}
                       />
                     </div>
                   </Td>
@@ -339,83 +357,15 @@ function OnTimeRateHero({
 }
 
 /**
- * Tiny SVG sparkline. `values` is the series — null entries render as
- * gaps in the line (no point drawn, segment skipped). Normalises to
- * the [0, 100] range since the only caller today is the on-time rate
- * (a percentage). 96×24 viewbox keeps it compact next to the hero
- * digit; render bigger by passing wider className.
+ * Pick a stroke colour for a per-row Sparkline based on the row's
+ * CURRENT on-time rate. Three tiers match the OnTimeChip thresholds
+ * so the sparkline reads as a continuation of the rate chip's tone.
  */
-function Sparkline({
-  values, stroke, className,
-}: {
-  values: (number | null)[];
-  stroke: string;
-  className?: string;
-}) {
-  const W = 96;
-  const H = 24;
-  const PAD = 2;
-  const innerW = W - PAD * 2;
-  const innerH = H - PAD * 2;
-  // Fixed 0-100 domain — these are rate percentages.
-  const yFor = (v: number) => PAD + innerH - (v / 100) * innerH;
-  const xFor = (i: number) => PAD + (values.length <= 1 ? 0 : (i / (values.length - 1)) * innerW);
-
-  // Build the polyline path. Skip null entries — they break the line
-  // (start a new subpath after each gap).
-  let d = "";
-  let onPath = false;
-  values.forEach((v, i) => {
-    if (v === null) { onPath = false; return; }
-    d += `${onPath ? " L" : "M"}${xFor(i).toFixed(1)} ${yFor(v).toFixed(1)}`;
-    onPath = true;
-  });
-
-  // Marker dots on non-null points so isolated weeks (one bucket
-  // surrounded by gaps) still register visually.
-  const dots = values
-    .map((v, i) => v === null ? null : { x: xFor(i), y: yFor(v) })
-    .filter((p): p is { x: number; y: number } => p !== null);
-
-  // If the whole series is null, render an empty SVG (keeps layout
-  // stable) plus a tiny "no data" hint.
-  if (dots.length === 0) {
-    return (
-      <span className={cn("text-[0.6rem] text-ink-400 italic", className)}>
-        no trend yet
-      </span>
-    );
-  }
-
-  return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      width={W}
-      height={H}
-      className={cn("shrink-0", className)}
-      aria-label="12-week trend"
-      role="img"
-    >
-      {/* baseline at 50% — visual anchor */}
-      <line
-        x1={PAD} y1={yFor(50)}
-        x2={W - PAD} y2={yFor(50)}
-        stroke="#E5E7EB"
-        strokeDasharray="2 2"
-      />
-      <path
-        d={d}
-        fill="none"
-        stroke={stroke}
-        strokeWidth={1.5}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      {dots.map((p, i) => (
-        <circle key={i} cx={p.x} cy={p.y} r={1.5} fill={stroke} />
-      ))}
-    </svg>
-  );
+function rowSparkStroke(rate: number | null): string {
+  if (rate === null) return "#9CA3AF"; // ink — no signal
+  if (rate >= 90)    return "#5C8A2B"; // green-dark
+  if (rate >= 70)    return "#A87600"; // gold-dark
+  return "#A04600";                    // flame-dark — keep flame for "below 70%" performance
 }
 
 /** Compact second-tier metric pill — mirrors the Dashboard pattern. */
