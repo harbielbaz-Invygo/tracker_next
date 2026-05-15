@@ -119,6 +119,17 @@ function SettingsIcon({ className }: IconProps) {
   );
 }
 
+/** Info — a lowercase "i" inside a circle. Mark for the About page. */
+function AboutIcon({ className }: IconProps) {
+  return (
+    <IconBase label="About icon" className={className}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5" />
+      <circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none" />
+    </IconBase>
+  );
+}
+
 const ICONS: Record<ViewName, (p: IconProps) => React.ReactElement> = {
   "Dashboard":     DashboardIcon,
   "Insights":      InsightsIcon,
@@ -127,6 +138,7 @@ const ICONS: Record<ViewName, (p: IconProps) => React.ReactElement> = {
   "Action Center": ActionCenterIcon,
   "Reports":       ReportsIcon,
   "Settings":      SettingsIcon,
+  "About":         AboutIcon,
 };
 
 /**
