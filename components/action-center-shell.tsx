@@ -265,12 +265,12 @@ export default function ActionCenterShell({ rows, totals }: Props) {
           columns on narrow screens; all six fit one row on lg+. */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 mb-6">
         <CompactMetric
-          label="Total cars"
+          label="Total PO cars"
           value={totals.totalQuantity}
           accent="ink"
           valueColor="text-midnight"
           subtitle={`across ${totals.total} ${totals.total === 1 ? "batch" : "batches"}`}
-          title="Total cars across every batch in this Action Center (gross — includes cancelled units)."
+          title="Total cars across every PO in this Action Center (gross — includes cancelled units)."
         />
         <CompactMetric
           label="Listed on app"
@@ -286,9 +286,9 @@ export default function ActionCenterShell({ rows, totals }: Props) {
           accent="green"
           valueColor="text-green-dark"
           subtitle={totals.fullyDone > 0
-            ? `${totals.carsReady} ${totals.carsReady === 1 ? "car" : "cars"} in pipeline`
+            ? `${totals.carsReady} ${totals.carsReady === 1 ? "car" : "cars"} ready`
             : "—"}
-          title="Batches where every internal action AND every VIN chase stage is done or skipped. Just waiting for Mark as Delivered."
+          title="Batches where every internal action AND every VIN chase stage is done or skipped. Just waiting for Mark as Delivered. Subtitle: cars ready to ship across those batches."
         />
         <CompactMetric
           label="Delivered"
@@ -304,9 +304,9 @@ export default function ActionCenterShell({ rows, totals }: Props) {
           accent="gold"
           valueColor="text-gold-dark"
           subtitle={totals.partlyDelivered > 0
-            ? `${totals.carsPartlyDelivered} / ${totals.carsPartlyRequested} cars shipped`
+            ? `${totals.carsPartlyDelivered} shipped · ${totals.carsPartlyRequested - totals.carsPartlyDelivered} cancelled`
             : "—"}
-          title="Batches where some units shipped but not all — includes in-flight partials and cancelled-after-partial."
+          title="Batches where some units shipped but not all — includes in-flight partials and cancelled-after-partial. Subtitle: cars actually shipped vs cars short of the request across those batches."
         />
         <CompactMetric
           label="Cancelled"
@@ -314,7 +314,7 @@ export default function ActionCenterShell({ rows, totals }: Props) {
           accent="flame"
           valueColor="text-flame-dark"
           subtitle={totals.cancelled > 0
-            ? `${totals.carsCancelled} ${totals.carsCancelled === 1 ? "car" : "cars"} affected`
+            ? `${totals.carsCancelled} ${totals.carsCancelled === 1 ? "car" : "cars"} cancelled`
             : "—"}
           title="Batches closed with a cancellation reason. Subtitle: gross car count across cancelled batches."
         />
