@@ -12,8 +12,10 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   DashboardRow, StatusBucket, TimelineData, TimelineActivity,
 } from "@/lib/dashboard-data";
+import type { ReportPeriod } from "@/lib/reports-period";
 import BatchTable from "./batch-table";
 import PageHeader from "./page-header";
+import { PeriodSelect } from "./period-select";
 import { Sparkline } from "./sparkline";
 import TimelineSvg from "./timeline-svg";
 import { cn } from "@/lib/utils";
@@ -27,6 +29,8 @@ interface Props {
    * communicates "are we delivering late more often or less often?".
    */
   lateWeekly: number[];
+  /** Active period filter from the URL (scopes the row + totals). */
+  period: ReportPeriod;
 }
 
 const STATUS_OPTIONS: { value: StatusBucket; label: string }[] = [
@@ -51,7 +55,7 @@ const VIN_PHASE_OPTIONS = [
 ] as const;
 type VinPhaseOption = (typeof VIN_PHASE_OPTIONS)[number]["value"];
 
-export default function DashboardShell({ rows, totals, lateWeekly }: Props) {
+export default function DashboardShell({ rows, totals, lateWeekly, period }: Props) {
   // ── Filter state ────────────────────────────────────────────
   const [search,        setSearch]       = useState<string>("");
   const [dealerFilter, setDealerFilter] = useState<string>("all");
@@ -130,6 +134,14 @@ export default function DashboardShell({ rows, totals, lateWeekly }: Props) {
         view="Dashboard"
         subtitle="Filter the requests below, then click a row to view its Plan vs Reality timeline. Plan is locked at submission; Reality fills in as actuals come — gaps show where delays sit."
       />
+
+      {/* Period selector — scopes the table + metric tiles to the chosen
+          window. The Delayed-hero sparkline keeps its 12-week range
+          regardless (it's its own trend lens, independent of the
+          table-row period). Same control as on /reports for consistency. */}
+      <div className="flex items-center justify-end mb-3">
+        <PeriodSelect active={period} />
+      </div>
 
       {/* Metric hierarchy — one HERO, two secondary, two compact.
           The audit's "2-second" rule: what should a user see first?

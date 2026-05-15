@@ -14,14 +14,29 @@
 import DashboardShell from "@/components/dashboard-shell";
 import PageHeader from "@/components/page-header";
 import { getDashboardRows, summarize, getLateDeliveriesWeekly } from "@/lib/dashboard-data";
+import type { ReportPeriod } from "@/lib/reports-period";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardPage() {
+const VALID_PERIODS: ReportPeriod[] = ["30d", "90d", "6m", "all"];
+
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ period?: string }>;
+}) {
+  const sp = await searchParams;
+  const raw = sp.period;
+  const period: ReportPeriod = VALID_PERIODS.includes(raw as ReportPeriod)
+    ? (raw as ReportPeriod)
+    : "all";
+
   // Pull rows + the 12-week late-deliveries trend in parallel so the
-  // sparkline data lands at the same time as the table.
+  // sparkline data lands at the same time as the table. The period
+  // filter scopes which BATCHES are shown; the sparkline always covers
+  // the last 12 weeks regardless (it's its own trend window).
   const [rows, lateWeekly] = await Promise.all([
-    getDashboardRows(),
+    getDashboardRows(period),
     getLateDeliveriesWeekly(),
   ]);
   const totals = summarize(rows);
@@ -43,5 +58,5 @@ export default async function DashboardPage() {
     );
   }
 
-  return <DashboardShell rows={rows} totals={totals} lateWeekly={lateWeekly} />;
+  return <DashboardShell rows={rows} totals={totals} lateWeekly={lateWeekly} period={period} />;
 }
