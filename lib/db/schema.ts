@@ -177,6 +177,16 @@ export const batches = sqliteTable("batches", {
    */
   vinReceivedAtIntake: integer("vin_received_at_intake", { mode: "boolean" })
                        .notNull().default(false),
+  /**
+   * Customer-facing milestone — the moment cars went live in the
+   * customer app and pre-bookings became possible. First-class column
+   * on the batch row (was: an action_type whose batch_action carried
+   * the completedAt). Decoupled from action_types so admin can't
+   * rename or delete it through Settings — it's a fixed concept in
+   * the system, just like `closedAt`. Mutated only via
+   * /api/batch-app-listing. Null = not yet listed.
+   */
+  appListedAt:         text("app_listed_at"),
 
   notes:      text("notes"),
   createdAt:  text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
