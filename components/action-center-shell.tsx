@@ -128,24 +128,41 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         subtitle={<>Every batch in flight, sorted by action required. Pick a batch to update its action statuses and capture Ops&apos; current confidence.</>}
       />
 
-      {/* Metric strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <Metric label="Active batches"   value={totals.total} />
-        <Metric label="Waiting actions"  value={totals.withWaiting} />
-        <Metric label="Delayed"          value={totals.delayed} valueColor="text-flame-dark" />
-        <Metric label="Ready to deliver" value={totals.fullyDone} valueColor="text-green-dark" />
-      </div>
-
-      {/* Delayed-work strip — single triage surface. Chips bucketed by HOW
-          MANY DAYS late an open action is, with Action / Department /
-          Stakeholder sub-aggregations inside each delay-day group.
-          Compound filter: chip click narrows the table to batches whose
-          matching action is exactly that many days late. */}
+      {/* Delayed-work strip — promoted to the top per the design
+          audit. This is the genuine hero of the Action Center: ops
+          opens this page to find what's slipping, and the chip
+          filter (by Action / Department / Stakeholder, bucketed by
+          days late) is the killer triage surface. Surfacing it above
+          the KPI tiles + the regular filters puts triage first. */}
       <div className="mb-4">
         <ActionCenterDelayedStrip
           rows={topLevelFiltered}
           active={aggregateFilter}
           onChange={setAggregateFilter}
+        />
+      </div>
+
+      {/* Metric hierarchy — Delayed is the only number that drives
+          action; everything else is context. Use the same hero +
+          compact pattern as the Dashboard for consistency. */}
+      <div className="grid grid-cols-1 md:grid-cols-[2fr,1fr,1fr] gap-4 mb-3">
+        <HeroMetric
+          label="Delayed batches"
+          value={totals.delayed}
+          tone={totals.delayed > 0 ? "alert" : "ok"}
+          title={totals.delayed > 0
+            ? `${totals.delayed} batches are past their dealer-promised availability date`
+            : "No batches are past their promised date"}
+        />
+        <Metric label="Active batches"  value={totals.total} valueColor="text-midnight" />
+        <Metric label="Waiting actions" value={totals.withWaiting} />
+      </div>
+      <div className="grid grid-cols-1 mb-6">
+        <CompactMetric
+          label="Ready to deliver"
+          value={totals.fullyDone}
+          valueColor="text-green-dark"
+          title="Batches where every internal action AND every VIN chase stage is done or skipped. Just waiting for Mark as Delivered."
         />
       </div>
 
@@ -320,13 +337,69 @@ function ToggleButton({
   );
 }
 
-// ── Metric tile ─────────────────────────────────────────────────
+// ── Metric tiles — hero / standard / compact ──────────────────
+//
+// Same hierarchy primitives as the Dashboard. Hero = 2× weight,
+// standard = baseline, compact = quiet pill.
 
-function Metric({ label, value, valueColor }: { label: string; value: number; valueColor?: string }) {
+function Metric({ label, value, valueColor, title }: {
+  label: string;
+  value: number;
+  valueColor?: string;
+  title?: string;
+}) {
   return (
-    <div className="metric">
+    <div className="metric" title={title}>
       <span className="metric-label">{label}</span>
       <span className={cn("metric-value", valueColor)}>{value}</span>
+    </div>
+  );
+}
+
+function HeroMetric({ label, value, tone, title }: {
+  label: string;
+  value: number;
+  tone: "alert" | "ok";
+  title?: string;
+}) {
+  const ok = tone === "ok" || value === 0;
+  return (
+    <div
+      title={title}
+      className={cn(
+        "card border-l-4 px-5 py-4 flex flex-col gap-1",
+        ok ? "border-l-green bg-green-pale/30" : "border-l-flame bg-flame-pale/30",
+      )}
+    >
+      <span className="text-xs font-semibold uppercase tracking-wide text-ink-600">
+        {label}
+      </span>
+      <span className={cn(
+        "text-4xl font-bold tabular-nums leading-none",
+        ok ? "text-green-dark" : "text-flame-dark",
+      )}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function CompactMetric({ label, value, valueColor, title }: {
+  label: string;
+  value: number;
+  valueColor?: string;
+  title?: string;
+}) {
+  return (
+    <div
+      title={title}
+      className="flex items-baseline justify-between gap-3 px-3 py-2 rounded-md
+                 bg-ink-50 border border-ink-100"
+    >
+      <span className="text-xs font-medium text-ink-600">{label}</span>
+      <span className={cn("text-lg font-semibold tabular-nums", valueColor ?? "text-midnight")}>
+        {value}
+      </span>
     </div>
   );
 }

@@ -113,10 +113,28 @@ function BatchCard({
 }) {
   const isClosed   = row.closedAt != null;
   const isCancelled = row.closureReason === "cancelled";
+  // Urgency stripe — a thin coloured left edge that makes overdue
+  // batches scannable in a long list. Three buckets:
+  //   ≥ 7 days late → flame (critical)
+  //   1–6 days late → gold (warning)
+  //   else          → no stripe
+  // Closed batches always get neutral; the closure chip already
+  // carries that meaning.
+  const urgency = !isClosed
+    ? row.delayDays >= 7 ? "critical"
+      : row.delayDays >= 1 ? "warning"
+      : "none"
+    : "none";
+  const urgencyStripe = {
+    critical: "border-l-4 border-l-flame",
+    warning:  "border-l-4 border-l-gold",
+    none:     "border-l-4 border-l-transparent",
+  }[urgency];
   return (
     <div
       className={cn(
         "relative",
+        urgencyStripe,
         selected ? "bg-brand-pastel" : "hover:bg-ink-50",
         isClosed && !selected && "opacity-70",   // subdue closed batches
       )}
