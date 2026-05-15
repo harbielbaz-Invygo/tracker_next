@@ -124,16 +124,31 @@ export default function DashboardShell({ rows, totals }: Props) {
         subtitle="Filter the requests below, then click a row to view its Plan vs Reality timeline. Plan is locked at submission; Reality fills in as actuals come — gaps show where delays sit."
       />
 
-      {/* Metric strip */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-        <Metric label="Active batches"     value={totals.active} />
-        <Metric label="On track"           value={totals.onTrack} valueColor="text-green-dark" />
-        <Metric label="Delayed"            value={totals.delayed} valueColor="text-flame-dark" />
-        <Metric label="Delivered"          value={totals.delivered} valueColor="text-ink-600" />
-        <Metric
+      {/* Metric hierarchy — one HERO, two secondary, two compact.
+          The audit's "2-second" rule: what should a user see first?
+          On a Dashboard, the at-a-glance signal of HEALTH is the
+          number of delayed batches — that's the alert. Active and
+          On-track are secondary context. Delivered + Pre-VIN
+          critical are background data ops can drill into. */}
+      <div className="grid grid-cols-1 md:grid-cols-[2fr,1fr,1fr] gap-4 mb-3">
+        <HeroMetric
+          label="Delayed"
+          value={totals.delayed}
+          tone={totals.delayed > 0 ? "alert" : "ok"}
+          title={totals.delayed > 0
+            ? `${totals.delayed} batches are past their dealer-promised availability date`
+            : "No batches are past their promised date"}
+        />
+        <Metric label="Active batches" value={totals.active} valueColor="text-midnight" />
+        <Metric label="On track"       value={totals.onTrack} valueColor="text-green-dark" />
+      </div>
+      {/* Compact second-tier — context, not alerts. */}
+      <div className="grid grid-cols-2 gap-4 mb-6">
+        <CompactMetric label="Delivered"        value={totals.delivered} />
+        <CompactMetric
           label="⚠️ Pre-VIN critical"
           value={totals.highRisk}
-          valueColor={totals.highRisk > 0 ? "text-flame-dark" : "text-ink-400"}
+          valueColor={totals.highRisk > 0 ? "text-flame-dark" : "text-ink-500"}
           title="Active batches that are pre-VIN with ≤ 14 days to availability — need immediate action"
         />
       </div>
@@ -263,6 +278,69 @@ function Metric({
     <div className="metric" title={title}>
       <span className="metric-label">{label}</span>
       <span className={cn("metric-value", valueColor)}>{value}</span>
+    </div>
+  );
+}
+
+/**
+ * Hero metric — 2x visual weight of a standard Metric tile. Used for
+ * the single most important number on a page (e.g. Delayed count on
+ * the Dashboard). Tone-coloured accent border + larger digit.
+ */
+function HeroMetric({
+  label, value, tone, title,
+}: {
+  label: string;
+  value: number;
+  /** "alert" = flame border + flame digit; "ok" = green border + green digit. */
+  tone: "alert" | "ok";
+  title?: string;
+}) {
+  const ok = tone === "ok" || value === 0;
+  return (
+    <div
+      title={title}
+      className={cn(
+        "card border-l-4 px-5 py-4 flex flex-col gap-1",
+        ok ? "border-l-green bg-green-pale/30" : "border-l-flame bg-flame-pale/30",
+      )}
+    >
+      <span className="text-xs font-semibold uppercase tracking-wide text-ink-600">
+        {label}
+      </span>
+      <span className={cn(
+        "text-4xl font-bold tabular-nums leading-none",
+        ok ? "text-green-dark" : "text-flame-dark",
+      )}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Compact metric — half the visual weight of a standard Metric. Used
+ * for context numbers that ops can glance at but shouldn't be the
+ * main focus.
+ */
+function CompactMetric({
+  label, value, valueColor, title,
+}: {
+  label: string;
+  value: number;
+  valueColor?: string;
+  title?: string;
+}) {
+  return (
+    <div
+      title={title}
+      className="flex items-baseline justify-between gap-3 px-3 py-2 rounded-md
+                 bg-ink-50 border border-ink-100"
+    >
+      <span className="text-xs font-medium text-ink-600">{label}</span>
+      <span className={cn("text-lg font-semibold tabular-nums", valueColor ?? "text-midnight")}>
+        {value}
+      </span>
     </div>
   );
 }
