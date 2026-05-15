@@ -14,7 +14,7 @@ const { auth } = NextAuth(authConfig);
 
 // `/dashboard` stays public so legacy bookmarks still resolve even
 // though it's no longer in the sidebar.
-const PUBLIC_PATHS = new Set<string>(["/", "/login", "/dashboard", "/insights"]);
+const PUBLIC_PATHS = new Set<string>(["/", "/login", "/dashboard", "/insights", "/about"]);
 
 export default auth((req) => {
   const path = req.nextUrl.pathname;
