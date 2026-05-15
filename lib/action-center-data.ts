@@ -234,6 +234,16 @@ export interface DrawerData {
    * stepper UI directly; no further classifier work needed.
    */
   vinChaseStages: VinChaseStageDetail[];
+  /**
+   * action_types.id of the canonical "App Listing" row, looked up by
+   * case-insensitive substring match. Null when no such action_type
+   * exists. Used by the standalone App Listing panel: when the batch
+   * has no App Listing batch_action yet, the panel button hits an
+   * upsert endpoint with this id so ops doesn't have to manually
+   * add the action via Settings → Batches first (matches the UX of
+   * the Car Delivery panel, which works the same way).
+   */
+  appListingActionTypeId: number | null;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -602,6 +612,17 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     notes:        r.notes,
   }));
 
+  // Resolve the App Listing action_type id once (substring match — admin
+  // may have customised the canonical name). Passed to the drawer so the
+  // standalone panel can upsert a batch_action on click without ops
+  // having to manually attach the action via Settings → Batches first.
+  const [appListingType] = await db
+    .select({ id: actionTypes.id })
+    .from(actionTypes)
+    .where(sql`LOWER(${actionTypes.name}) LIKE '%app listing%'`)
+    .limit(1);
+  const appListingActionTypeId = appListingType?.id ?? null;
+
   const { statusLabel } = statusFor(b);
 
   return {
@@ -643,6 +664,7 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
       notes:              l.notes ?? null,
     })),
     vinChaseStages: vinChainForBatch,
+    appListingActionTypeId,
     alerts: batchAlerts.map((a) => ({
       id:             a.id,
       fingerprint:    a.fingerprint,

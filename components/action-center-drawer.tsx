@@ -149,6 +149,8 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
         )}
         <AppListingPanel
           action={appListingAction ?? null}
+          batchId={data.batchId}
+          appListingActionTypeId={data.appListingActionTypeId}
           onMutated={() => { refresh(); onMutation?.(); }}
           disabled={!!data.closedAt}
         />
@@ -199,9 +201,14 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
  *     edit mode for adjustments.
  */
 function AppListingPanel({
-  action, onMutated, disabled,
+  action, batchId, appListingActionTypeId, onMutated, disabled,
 }: {
+  /** Existing batch_action row when the action was already attached at intake. */
   action: ActionDetail | null;
+  /** Needed for the upsert path when `action` is null. */
+  batchId: number;
+  /** action_types.id resolved server-side; null if no "App Listing" type exists. */
+  appListingActionTypeId: number | null;
   onMutated: () => void;
   disabled: boolean;
 }) {
@@ -210,28 +217,25 @@ function AppListingPanel({
   const [pending, setPending] = useState(false);
 
   // Reset edit state when the selected batch changes (drawer reuses the
-  // component but `action.id` shifts).
+  // component but `action.id` / batchId shifts).
   useEffect(() => {
     setEditing(false);
     setDraftAt("");
-  }, [action?.id]);
+  }, [action?.id, batchId]);
 
-  if (!action) {
-    return (
-      <div className="px-3 py-2 rounded-md border border-dashed border-ink-300 bg-ink-50 text-xs text-ink-500">
-        <span className="font-medium text-midnight">📱 App Listing</span>
-        <span className="ml-2">no App Listing action on this batch — add it via Settings → Batches.</span>
-      </div>
-    );
+  // Defensive: if no App Listing action_type exists in the catalogue
+  // AND no batch_action is attached, there's no way to mark the
+  // milestone — quietly hide the panel to keep the drawer clean.
+  // (Admin would need to add an App Listing action_type in Settings →
+  // Action Types to bring the panel back.)
+  if (!action && appListingActionTypeId == null) {
+    return null;
   }
 
-  // Local non-null alias — narrowing from the guard above doesn't carry
-  // into the nested function declarations below.
-  const a = action;
-  const isDone = a.status === "done";
+  const isDone = action?.status === "done";
 
   function openEdit() {
-    const seed = isDone && a.completedAt ? a.completedAt : new Date().toISOString();
+    const seed = isDone && action?.completedAt ? action.completedAt : new Date().toISOString();
     // datetime-local wants "YYYY-MM-DDTHH:MM" in LOCAL time (no offset).
     const d = new Date(seed);
     if (!Number.isNaN(d.getTime())) {
@@ -241,18 +245,39 @@ function AppListingPanel({
     setEditing(true);
   }
 
-  async function submit() {
+  /**
+   * One-click "mark as listed" — used by the prominent CTA. Defaults
+   * the timestamp to NOW (matches the Mark-as-delivered button which
+   * opens a modal but defaults to today). If ops needs to backdate
+   * they can edit the timestamp afterwards via the ✎ Edit button.
+   *
+   * Two paths converge here:
+   *   • action exists  → POST batchActionId + newStatus="done" (same
+   *     as the existing flow)
+   *   • action absent  → POST op="upsert_done" with the resolved
+   *     action_type id → server creates the batch_action AND marks
+   *     it done in one transaction
+   */
+  async function markListed(timestampIso?: string) {
     setPending(true);
     try {
-      const completedIso = draftAt ? new Date(draftAt).toISOString() : new Date().toISOString();
+      const completedIso = timestampIso ?? new Date().toISOString();
+      const body = action
+        ? {
+            batchActionId:  action.id,
+            newStatus:      "done",
+            newCompletedAt: completedIso,
+          }
+        : {
+            op:             "upsert_done",
+            batchId,
+            actionTypeId:   appListingActionTypeId,
+            newCompletedAt: completedIso,
+          };
       const res = await fetch("/api/batch-action", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          batchActionId: a.id,
-          newStatus: "done",
-          newCompletedAt: completedIso,
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(await res.text());
       setEditing(false);
@@ -264,21 +289,28 @@ function AppListingPanel({
     }
   }
 
+  // ── Done state — green banner with edit affordance ───────────────
   if (isDone && !editing) {
     return (
-      <div className="rounded-md border-2 border-green bg-green-pale px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm font-bold text-green-dark flex items-center gap-2">
-          <span aria-hidden="true">📱</span>
-          ✅ Cars listed in app
-          <span className="font-medium text-green-dark/80 tabular-nums">
-            · {action.completedAt ? fmtLocalDateTime(action.completedAt) : "—"}
-          </span>
-        </p>
+      <div className="rounded-md border-2 border-green bg-green-pale/30 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-bold text-green-dark flex items-center gap-2">
+            <span aria-hidden="true">📱</span>
+            App Listing
+          </p>
+          <p className="text-[0.7rem] text-ink-600 mt-0.5">
+            ✅ Cars listed in app
+            <span className="ml-1 font-medium tabular-nums">
+              · {action?.completedAt ? fmtLocalDateTime(action.completedAt) : "—"}
+            </span>
+          </p>
+        </div>
         {!disabled && (
           <button
             type="button"
             onClick={openEdit}
-            className="text-xs font-medium text-green-dark hover:text-midnight underline-offset-2 hover:underline"
+            className="text-xs font-medium text-green-dark hover:text-midnight
+                       underline-offset-2 hover:underline"
             title="Edit the timestamp of when cars were listed"
           >
             ✎ Edit timestamp
@@ -288,41 +320,36 @@ function AppListingPanel({
     );
   }
 
-  // Edit / first-time mode — datetime picker + submit.
-  return (
-    <div className="rounded-md border-2 border-brand bg-brand-pastel/30 px-4 py-3">
-      <p className="text-sm font-bold text-midnight mb-2 flex items-center gap-2">
-        <span aria-hidden="true">📱</span>
-        App Listing
-        <span className="text-xs font-medium text-ink-500">
-          {isDone ? "Editing timestamp…" : "Mark cars listed in app"}
-        </span>
-      </p>
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          type="datetime-local"
-          className="input text-sm py-1"
-          value={draftAt}
-          onChange={(e) => setDraftAt(e.target.value)}
-          disabled={pending || disabled}
-          // Pre-fill on mount if not opened via openEdit.
-          ref={(el) => {
-            if (el && !draftAt && !editing) {
-              const d = new Date();
-              const pad = (n: number) => String(n).padStart(2, "0");
-              setDraftAt(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`);
-            }
-          }}
-        />
-        <button
-          type="button"
-          onClick={submit}
-          disabled={pending || disabled || !draftAt}
-          className="btn btn-primary text-sm px-3 py-1.5"
-        >
-          {pending ? "Saving…" : isDone ? "✓ Update" : "📱 Mark cars listed"}
-        </button>
-        {isDone && (
+  // ── Edit mode — datetime picker + submit ─────────────────────────
+  if (editing) {
+    return (
+      <div className="rounded-md border-2 border-brand bg-brand-pastel/30 px-4 py-3">
+        <p className="text-sm font-bold text-midnight mb-2 flex items-center gap-2">
+          <span aria-hidden="true">📱</span>
+          App Listing
+          <span className="text-xs font-medium text-ink-500">
+            {isDone ? "Editing timestamp…" : "Set listing time"}
+          </span>
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="datetime-local"
+            className="input text-sm py-1"
+            value={draftAt}
+            onChange={(e) => setDraftAt(e.target.value)}
+            disabled={pending || disabled}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              const iso = draftAt ? new Date(draftAt).toISOString() : new Date().toISOString();
+              markListed(iso);
+            }}
+            disabled={pending || disabled || !draftAt}
+            className="btn btn-primary text-sm px-3 py-1.5"
+          >
+            {pending ? "Saving…" : isDone ? "✓ Update" : "📱 Mark as listed"}
+          </button>
           <button
             type="button"
             onClick={() => setEditing(false)}
@@ -331,12 +358,53 @@ function AppListingPanel({
           >
             Cancel
           </button>
-        )}
+        </div>
+        <p className="text-[0.7rem] text-ink-500 mt-1.5">
+          Set the date and time customers first saw the cars on the app.
+          Defaults to now; backdate as needed.
+        </p>
       </div>
-      <p className="text-[0.7rem] text-ink-500 mt-1.5">
-        Set the date and time customers first saw the cars on the app.
-        Defaults to now; backdate as needed.
-      </p>
+    );
+  }
+
+  // ── Not-done state — prominent standalone CTA (mirrors Car Delivery) ──
+  return (
+    <div className="rounded-md border-2 border-brand bg-brand-pastel/30 px-4 py-3
+                    flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <p className="text-sm font-bold text-brand-dark flex items-center gap-2">
+          <span aria-hidden="true">📱</span>
+          App Listing
+        </p>
+        <p className="text-[0.7rem] text-ink-600 mt-0.5">
+          Customer-visible milestone — mark when cars are listed in the app.
+          Pre-bookings can start once this fires.
+        </p>
+      </div>
+      {!disabled && (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => markListed()}
+            disabled={pending}
+            className="text-sm font-semibold px-4 py-2 rounded-md
+                       bg-brand text-white border border-brand
+                       hover:bg-brand-dark transition-colors"
+            title="Mark as listed using right now as the timestamp"
+          >
+            {pending ? "Saving…" : "📱 Mark as listed"}
+          </button>
+          <button
+            type="button"
+            onClick={openEdit}
+            disabled={pending}
+            className="btn text-xs"
+            title="Pick a custom timestamp (e.g. backdate to the actual listing time)"
+          >
+            ✎ Pick time
+          </button>
+        </div>
+      )}
     </div>
   );
 }
