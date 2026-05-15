@@ -37,6 +37,13 @@ export default function ActionCenterShell({ rows, totals }: Props) {
   const [showCompleted,    setShowCompleted]    = useState<boolean>(false);
   const [selected,         setSelected]         = useState<string | null>(null);
   /**
+   * Free-text search — matches the Dashboard's pattern (PO number,
+   * dealer, model, batch code; case-insensitive substring). Applied
+   * inside the same `topLevelFiltered` pipeline so the aggregate
+   * strip + the table stay in sync.
+   */
+  const [search, setSearch] = useState<string>("");
+  /**
    * Aggregate filter — single chip selected across the three rows of the
    * filter strip. Applied AFTER the high-level filters so the chip counts
    * reflect the same data the user is filtering inside.
@@ -76,6 +83,7 @@ export default function ActionCenterShell({ rows, totals }: Props) {
    *                      to topLevelFiltered.
    */
   const topLevelFiltered = useMemo(() => {
+    const needle = search.trim().toLowerCase();
     return rows.filter((r) => {
       if (lifecycleFilter !== "all" && r.lifecycleState !== lifecycleFilter) return false;
 
@@ -90,6 +98,17 @@ export default function ActionCenterShell({ rows, totals }: Props) {
       // every VIN chase stage is in a terminal state. Shared predicate
       // with the top "Fully done" metric so both surfaces agree.
       if (!showCompleted && isFullySettled(r)) return false;
+
+      // Free-text search — case-insensitive substring against the
+      // batch identity fields ops searches by in practice.
+      if (needle) {
+        const hay = [
+          r.batchCode,
+          r.dealerName,
+          r.modelYear,
+        ].join(" ").toLowerCase();
+        if (!hay.includes(needle)) return false;
+      }
       return true;
     }).sort((a, b) => {
       // Default sort: most-waiting first, then most-blocked, then delay desc.
@@ -97,7 +116,7 @@ export default function ActionCenterShell({ rows, totals }: Props) {
       if (b.actionsBlocked !== a.actionsBlocked) return b.actionsBlocked - a.actionsBlocked;
       return b.delayDays - a.delayDays;
     });
-  }, [rows, departmentFilter, lifecycleFilter, statusFilter, showCompleted]);
+  }, [rows, departmentFilter, lifecycleFilter, statusFilter, showCompleted, search]);
 
   const filtered = useMemo(() => {
     if (aggregateFilter == null) return topLevelFiltered;
@@ -255,12 +274,44 @@ export default function ActionCenterShell({ rows, totals }: Props) {
            render legibly down to ~220px (PO code truncates with title
            tooltip; status chips already wrap). */
         <div className="grid grid-cols-1 lg:grid-cols-[minmax(220px,300px)_1fr] gap-4 h-[min(76vh,820px)] min-h-[480px]">
-          <ActionCenterBatchList
-            rows={filtered}
-            selectedCode={selected}
-            onSelect={(code) => setSelected((cur) => (cur === code ? null : code))}
-            totalCount={rows.length}
-          />
+          {/* Left column — search input + batch list, stacked. The
+              search is constrained to the same column width as the
+              list below it (no media break, both are inside the
+              same grid cell). Matches the Dashboard search UX
+              (PO / dealer / model substring + ✕ clear button). */}
+          <div className="flex flex-col gap-2 min-h-0">
+            <label className="block shrink-0">
+              <span className="sr-only">Search batches</span>
+              <div className="relative">
+                <input
+                  type="search"
+                  className="input pr-9 text-sm"
+                  placeholder="🔎 Search PO, dealer, model…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                {search && (
+                  <button
+                    type="button"
+                    aria-label="Clear search"
+                    onClick={() => setSearch("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 hover:text-midnight
+                               text-sm rounded px-1.5 py-0.5"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            </label>
+            <div className="flex-1 min-h-0">
+              <ActionCenterBatchList
+                rows={filtered}
+                selectedCode={selected}
+                onSelect={(code) => setSelected((cur) => (cur === code ? null : code))}
+                totalCount={rows.length}
+              />
+            </div>
+          </div>
           <div className="overflow-auto rounded-lg">
             {selected ? (
               <ActionCenterDrawer
