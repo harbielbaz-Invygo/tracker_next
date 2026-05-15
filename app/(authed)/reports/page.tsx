@@ -6,17 +6,33 @@
  * Departments + Stakeholders. Surfaces who's slow, who's reliable, and
  * which batches each owner currently has time-loss in.
  *
+ * Accepts a `?period=30d|90d|6m|all` query param that filters every
+ * aggregate to batches/actions whose closure/completion falls within
+ * the window. Default = all-time. Param is read server-side so it
+ * affects the SQL queries, not just the rendered output.
+ *
  * Access: Ops + Admin (gated by AccessGate; middleware redirects guests).
  */
 import AccessGate from "@/components/access-gate";
 import PageHeader from "@/components/page-header";
 import ReportsShell from "@/components/reports-shell";
-import { getPerformanceReport } from "@/lib/reports-data";
+import { getPerformanceReport, type ReportPeriod } from "@/lib/reports-data";
 
 export const dynamic = "force-dynamic";
 
-export default async function ReportsPage() {
-  const report = await getPerformanceReport();
+const VALID_PERIODS: ReportPeriod[] = ["30d", "90d", "6m", "all"];
+
+export default async function ReportsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ period?: string }>;
+}) {
+  const sp = await searchParams;
+  const raw = sp.period;
+  const period: ReportPeriod = VALID_PERIODS.includes(raw as ReportPeriod)
+    ? (raw as ReportPeriod)
+    : "all";
+  const report = await getPerformanceReport(period);
 
   return (
     <AccessGate view="Reports">

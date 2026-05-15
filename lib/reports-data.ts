@@ -13,7 +13,7 @@
  * This module computes BOTH so the UI can show them side-by-side. The
  * table headers explain what each column means.
  */
-import { eq, asc } from "drizzle-orm";
+import { eq, asc, gte, or, isNull } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   batchActions, actionTypes, departments, stakeholders, batches, dealers, batchColorMatrix, batchDateRevisions, batchDeliveryLegs,
@@ -197,8 +197,24 @@ export interface CustomerImpactReport {
   };
 }
 
+// Period type + options moved to `lib/reports-period.ts` so the
+// client <PeriodSelect> can import them without pulling this whole
+// (server-only) module into the client bundle. See PR #69 lesson.
+export { type ReportPeriod, REPORT_PERIODS } from "./reports-period";
+import type { ReportPeriod } from "./reports-period";
+
+/** Compute the inclusive lower-bound ISO date (yyyy-mm-dd) for a given period. Returns null for "all". */
+function fromIsoForPeriod(period: ReportPeriod): string | null {
+  if (period === "all") return null;
+  const days = { "30d": 30, "90d": 90, "6m": 183 }[period];
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  return new Date(d.getTime() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 export interface PerformanceReport {
   generatedAt: string;
+  /** The period filter that was applied to produce this report. */
+  period: ReportPeriod;
   totals: {
     /** Total open + closed batches in the system. */
     totalBatches: number;
@@ -312,9 +328,22 @@ function summarizeAcc(acc: AggregateAccumulator): {
   return { onTimeRate, avgDelayDays, worstDelayDays };
 }
 
-export async function getPerformanceReport(): Promise<PerformanceReport> {
+export async function getPerformanceReport(period: ReportPeriod = "all"): Promise<PerformanceReport> {
+  const fromIso = fromIsoForPeriod(period);
+  // Filter predicates — applied only when a finite period was chosen.
+  // For batch_actions we keep rows whose completedAt is in the window
+  // OR is null (active actions still count — they're in flight today).
+  // For batches we keep rows whose closedAt is in the window OR is null
+  // (open batches always show; they're current state).
+  const actionInPeriod = fromIso
+    ? or(isNull(batchActions.completedAt), gte(batchActions.completedAt, fromIso))
+    : undefined;
+  const batchInPeriod = fromIso
+    ? or(isNull(batches.closedAt), gte(batches.closedAt, fromIso))
+    : undefined;
+
   // Pull every batch_action joined with the metadata we need.
-  const rows = await db
+  let rowsQuery = db
     .select({
       ba:           batchActions,
       atName:       actionTypes.name,
@@ -332,7 +361,10 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
     .innerJoin(actionTypes,  eq(batchActions.actionTypeId, actionTypes.id))
     .leftJoin(departments,   eq(batchActions.departmentId, departments.id))
     .leftJoin(stakeholders,  eq(batchActions.assignedStakeholderId, stakeholders.id))
-    .innerJoin(batches,      eq(batchActions.batchId, batches.id));
+    .innerJoin(batches,      eq(batchActions.batchId, batches.id))
+    .$dynamic();
+  if (actionInPeriod) rowsQuery = rowsQuery.where(actionInPeriod);
+  const rows = await rowsQuery;
 
   // Pull all departments + stakeholders so the report includes ones with
   // zero actions (e.g. a newly added department). Without this, anyone
@@ -491,8 +523,13 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
   // Customer-impact analysis (item 4) needs a wider projection: batchCode,
   // model/year for display, projectedDate to score open batches, and the
   // revisionCount to measure trust erosion from repeated re-promises.
-  const [allBatches, allDealers, colorMatrixRows] = await Promise.all([
-    db.select({
+  // Same period filter we applied to the actions query — applied to
+  // batches (and joined queries on batches) so the totals and the
+  // dealer reliability are scoped consistently. Open batches always
+  // pass (closedAt IS NULL); closed batches must have closedAt
+  // within the window.
+  const allBatchesQuery = (() => {
+    const q = db.select({
       id:            batches.id,
       batchCode:     batches.batchCode,
       dealerId:      batches.dealerId,
@@ -508,17 +545,26 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
       revisionCount: batches.deliveryDateRevisionCount,
     })
     .from(batches)
-    .leftJoin(dealers, eq(batches.dealerId, dealers.id)),
-    db.select().from(dealers).orderBy(asc(dealers.name)),
-    // Color matrix for color reliability per dealer.
-    db.select({
+    .leftJoin(dealers, eq(batches.dealerId, dealers.id))
+    .$dynamic();
+    return batchInPeriod ? q.where(batchInPeriod) : q;
+  })();
+  const colorMatrixQuery = (() => {
+    const q = db.select({
       batchId:           batchColorMatrix.batchId,
       dealerId:          batches.dealerId,
       requestedQuantity: batchColorMatrix.requestedQuantity,
       confirmedQuantity: batchColorMatrix.confirmedQuantity,
     })
     .from(batchColorMatrix)
-    .innerJoin(batches, eq(batchColorMatrix.batchId, batches.id)),
+    .innerJoin(batches, eq(batchColorMatrix.batchId, batches.id))
+    .$dynamic();
+    return batchInPeriod ? q.where(batchInPeriod) : q;
+  })();
+  const [allBatches, allDealers, colorMatrixRows] = await Promise.all([
+    allBatchesQuery,
+    db.select().from(dealers).orderBy(asc(dealers.name)),
+    colorMatrixQuery,
   ]);
 
   // Phase H: fetch every shift event (batch_date_revisions) so the
@@ -923,6 +969,7 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
 
   return {
     generatedAt: new Date().toISOString(),
+    period,
     totals: {
       totalBatches: allBatches.length,
       deliveredOnTime,
