@@ -569,80 +569,79 @@ function DrawerHeader({
 
   return (
     <div className="mb-6 pb-5 border-b border-ink-100">
-      {/* ── Title row ────────────────────────────────────────────
-          PO code on top (mono, bold) — the canonical identifier ops
-          searches by. Model name below, large and prominent — what
-          ops actually NAMES the batch in conversation. Quantity /
-          dealer / lifecycle as a meta sub-line. */}
-      <p className="text-base font-mono font-semibold text-midnight tracking-tight">
-        {data.batchCode}
-      </p>
-      <h2 className="text-xl font-bold text-midnight mt-1 flex items-center gap-2">
-        <span aria-hidden="true">🛠️</span>
-        {data.modelYear}
-      </h2>
-      <p className="text-xs text-ink-500 mt-1">
-        <span className="tabular-nums">{data.quantity}×</span>
-        <Sep />
-        <span>{data.dealerName}</span>
-        <Sep />
-        <span className="uppercase tracking-wide">
-          {data.lifecycleState === "pre_po" ? "Pre-PO" : "Post-PO"}
-        </span>
-      </p>
+      {/* ── Two-column header ────────────────────────────────────
+          Title rows and shipment details all live in the LEFT
+          column so it has the same vertical span as the RIGHT
+          action stack — no more dangling whitespace below the
+          details while the buttons run on. Collapses to a single
+          column on small screens. Right column hides entirely when
+          batch is closed; the ClosedBanner below carries the final
+          state. */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr,16rem] gap-x-6 gap-y-4 items-start">
+        {/* LEFT column — identity + shipment details */}
+        <div className="space-y-1">
+          {/* PO code — mono, bold, primary headline. */}
+          <p className="text-base font-mono font-semibold text-midnight tracking-tight">
+            {data.batchCode}
+          </p>
+          {/* Model + year — what ops actually names the batch. */}
+          <h2 className="text-xl font-bold text-midnight flex items-center gap-2">
+            <span aria-hidden="true">🛠️</span>
+            {data.modelYear}
+          </h2>
+          {/* Quantity / dealer / lifecycle meta. */}
+          <p className="text-xs text-ink-500">
+            <span className="tabular-nums">{data.quantity}×</span>
+            <Sep />
+            <span>{data.dealerName}</span>
+            <Sep />
+            <span className="uppercase tracking-wide">
+              {data.lifecycleState === "pre_po" ? "Pre-PO" : "Post-PO"}
+            </span>
+          </p>
 
-      {/* ── Two-column body ──────────────────────────────────────
-          LEFT  = shipment details (legs, PO/Ops availability dates,
-                 status delta) — the "what & when" ops reads.
-          RIGHT = action bar — vertical stack of 4 buttons. Mark as
-                 delivered is the bottom anchor (the closing
-                 action) rendered larger + emerald-green-filled to
-                 stand apart from the three secondary buttons above
-                 it.
-          Collapses to a single column on small screens. The right
-          column hides entirely when the batch is closed — the
-          ClosedBanner below carries the final state. */}
-      <div className="mt-4 grid grid-cols-1 lg:grid-cols-[1fr,16rem] gap-x-6 gap-y-4 items-start">
-        {/* LEFT column */}
-        <div className="space-y-2">
-          {data.legs.length > 1 && (
-            <p className="text-xs text-ink-600 flex flex-wrap gap-x-2 items-baseline">
-              <span className="font-semibold text-midnight">🚚 {data.legs.length} legs:</span>
-              {data.legs.map((leg, i) => (
-                <span key={leg.id} className="tabular-nums">
-                  {leg.city} ({leg.requestedQuantity}
-                  {leg.deliveredQuantity > 0 && (
-                    <> · {leg.deliveredQuantity} delivered</>
-                  )})
-                  {i < data.legs.length - 1 && <span className="text-ink-400 ml-1">·</span>}
+          {/* Slight visual gap before the data block — keeps title
+              and details readable as two distinct rhythm groups. */}
+          <div className="pt-2 space-y-2">
+            {data.legs.length > 1 && (
+              <p className="text-xs text-ink-600 flex flex-wrap gap-x-2 items-baseline">
+                <span className="font-semibold text-midnight">🚚 {data.legs.length} legs:</span>
+                {data.legs.map((leg, i) => (
+                  <span key={leg.id} className="tabular-nums">
+                    {leg.city} ({leg.requestedQuantity}
+                    {leg.deliveredQuantity > 0 && (
+                      <> · {leg.deliveredQuantity} delivered</>
+                    )})
+                    {i < data.legs.length - 1 && <span className="text-ink-400 ml-1">·</span>}
+                  </span>
+                ))}
+              </p>
+            )}
+            <AvailabilityDatesLine data={data} />
+            {/* Listed-state chip lives in the left column when the
+                batch is already listed, so the right column is purely
+                forward-looking actions. */}
+            {isListed && appListingForm === false && !isClosed && (
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md
+                              bg-green-pale border border-green/40
+                              text-[0.7rem] font-medium text-green-dark">
+                <span aria-hidden="true">📱</span>
+                <span>Listed ·</span>
+                <span className="tabular-nums">
+                  {data.appListedAt ? fmtLocalDateTime(data.appListedAt) : "—"}
                 </span>
-              ))}
-            </p>
-          )}
-          <AvailabilityDatesLine data={data} />
-          {/* Listed-state chip lives in the left column when the
-              batch is already listed, so the right column is purely
-              forward-looking actions. */}
-          {isListed && appListingForm === false && !isClosed && (
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md
-                            bg-green-pale border border-green/40
-                            text-[0.7rem] font-medium text-green-dark">
-              <span aria-hidden="true">📱</span>
-              <span>Listed ·</span>
-              <span className="tabular-nums">
-                {data.appListedAt ? fmtLocalDateTime(data.appListedAt) : "—"}
-              </span>
-              <button
-                type="button"
-                onClick={() => setAppListingForm("edit")}
-                className="ml-1 text-green-dark hover:text-midnight"
-                title="Edit listing timestamp"
-                aria-label="Edit listing timestamp"
-              >
-                ✎
-              </button>
-            </div>
-          )}
+                <button
+                  type="button"
+                  onClick={() => setAppListingForm("edit")}
+                  className="ml-1 text-green-dark hover:text-midnight"
+                  title="Edit listing timestamp"
+                  aria-label="Edit listing timestamp"
+                >
+                  ✎
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* RIGHT column — vertical action stack */}
