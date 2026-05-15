@@ -688,10 +688,12 @@ function DrawerHeader({
           {/* Slight visual gap before the date block. */}
           <div className="pt-1 space-y-2">
             <AvailabilityDatesLine data={data} />
-            {/* Listed-state chip lives in the left column when the
-                batch is already listed, so the right column is purely
-                forward-looking actions. */}
-            {isListed && appListingForm === false && !isClosed && (
+            {/* Listed-state chip — visible whenever the batch was
+                listed, including post-closure. After delivery the
+                chip is still useful audit info ("when did this batch
+                go live?") but the edit affordance hides so the
+                timestamp can't be tampered with on a closed record. */}
+            {isListed && appListingForm === false && (
               <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md
                               bg-green-pale border border-green/40
                               text-[0.7rem] font-medium text-green-dark">
@@ -700,15 +702,17 @@ function DrawerHeader({
                 <span className="tabular-nums">
                   {data.appListedAt ? fmtLocalDateTime(data.appListedAt) : "—"}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setAppListingForm("edit")}
-                  className="ml-1 text-green-dark hover:text-midnight"
-                  title="Edit listing timestamp"
-                  aria-label="Edit listing timestamp"
-                >
-                  ✎
-                </button>
+                {!isClosed && (
+                  <button
+                    type="button"
+                    onClick={() => setAppListingForm("edit")}
+                    className="ml-1 text-green-dark hover:text-midnight"
+                    title="Edit listing timestamp"
+                    aria-label="Edit listing timestamp"
+                  >
+                    ✎
+                  </button>
+                )}
               </div>
             )}
           </div>
