@@ -641,24 +641,27 @@ function DrawerHeader({
             Each field has a label so renamed/extended fields stay
             self-describing. */}
         <div className="space-y-2">
-          {/* PO Number + Batch position — the primary identifiers. */}
-          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          {/* PO Number + Batch chip — promoted to primary heading.
+              Operations identifies a record by its PO first, the car
+              second — so the PO line gets the visual weight that used
+              to live on the model line. */}
+          <h2 className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
             {data.poNumber && (
-              <p className="text-base font-mono font-semibold text-midnight tracking-tight">
+              <span className="text-xl font-mono font-bold text-midnight tracking-tight">
                 {data.poNumber}
-              </p>
+              </span>
             )}
             {data.batchNumberInPo != null && data.totalBatchesInPo != null && (
               <span
                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded
                            bg-brand-pastel text-brand-dark
-                           text-[0.7rem] font-semibold uppercase tracking-wide"
+                           text-xs font-semibold uppercase tracking-wide"
                 title={`This batch is #${data.batchNumberInPo} of ${data.totalBatchesInPo} batches under PO ${data.poNumber ?? "—"}`}
               >
                 Batch {data.batchNumberInPo} / {data.totalBatchesInPo}
               </span>
             )}
-          </div>
+          </h2>
 
           {/* Batch name — the full slug, explicitly labelled. */}
           <p className="text-xs text-ink-600 flex flex-wrap items-baseline gap-x-2">
@@ -666,11 +669,11 @@ function DrawerHeader({
             <span className="font-mono text-midnight">{data.batchCode}</span>
           </p>
 
-          {/* Model + year — large, prominent. */}
-          <h2 className="text-xl font-bold text-midnight flex items-center gap-2">
-            <span aria-hidden="true">🛠️</span>
-            {data.modelYear}
-          </h2>
+          {/* Model + year — body-text size, matches the Dealer line below. */}
+          <p className="text-xs text-ink-600 flex flex-wrap items-baseline gap-x-2">
+            <span className="font-medium text-midnight">🛠️ Model:</span>
+            <span className="font-medium text-midnight">{data.modelYear}</span>
+          </p>
 
           {/* Dealer name (labelled) + lifecycle chip. */}
           <p className="text-xs text-ink-600 flex flex-wrap items-baseline gap-x-2">
