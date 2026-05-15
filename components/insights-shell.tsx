@@ -23,16 +23,21 @@ import type { DashboardRow, TimelineData, StatusBucket } from "@/lib/dashboard-d
 import BatchTable from "./batch-table";
 import PageHeader from "./page-header";
 import TimelineSvg from "./timeline-svg";
+import { PeriodSelect } from "./period-select";
+import { REPORT_PERIODS, type ReportPeriod } from "@/lib/reports-period";
 import { cn } from "@/lib/utils";
 
 interface Props {
   data: InsightsData;
+  /** Active period filter from the URL — scopes the entire payload. */
+  period: ReportPeriod;
 }
 
 type TrustTab = "dealer" | "ops" | "cities" | "risk";
 
-export default function InsightsShell({ data }: Props) {
+export default function InsightsShell({ data, period }: Props) {
   const [trustTab, setTrustTab] = useState<TrustTab>("dealer");
+  const periodLabel = REPORT_PERIODS.find((p) => p.value === period)?.label ?? "All time";
 
   return (
     <div className="space-y-6">
@@ -44,13 +49,16 @@ export default function InsightsShell({ data }: Props) {
 
       <HeroRow hero={data.hero} />
 
-      <div className="card flex flex-wrap items-baseline justify-between gap-3 text-xs text-ink-500">
-        <span>
-          Scope: <strong className="text-midnight">All time</strong>
-          <span className="ml-2 text-[0.7rem] text-ink-400">
-            (period filter wiring is in the roadmap)
-          </span>
+      {/* Period selector + scope + generation timestamp. Replaces the
+          "(period filter wiring is in the roadmap)" placeholder.
+          The selected period scopes hero + Customer Impact + Trust
+          tables + Batch Explorer rows. */}
+      <div className="card flex flex-wrap items-center justify-between gap-3 text-xs text-ink-500">
+        <span className="flex items-baseline gap-2">
+          <span>Scope:</span>
+          <strong className="text-midnight">{periodLabel}</strong>
         </span>
+        <PeriodSelect active={period} />
         <span className="tabular-nums">
           Generated {new Date(data.generatedAt).toLocaleString()}
         </span>

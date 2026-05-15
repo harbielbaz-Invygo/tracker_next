@@ -9,6 +9,7 @@
  */
 import { getDashboardRows, type DashboardRow } from "@/lib/dashboard-data";
 import { getPerformanceReport, type PerformanceReport } from "@/lib/reports-data";
+import type { ReportPeriod } from "@/lib/reports-period";
 
 export interface InsightsHero {
   /** North Star — total customer-days lost across all affected batches. */
@@ -37,11 +38,14 @@ export interface InsightsData {
   batchRows: DashboardRow[];
 }
 
-export async function getInsightsData(): Promise<InsightsData> {
+export async function getInsightsData(period: ReportPeriod = "all"): Promise<InsightsData> {
   // Both functions hit the DB; run them in parallel.
+  // Same period filter is threaded into both — Insights is just the
+  // union of Dashboard + Reports, so scoping them together keeps the
+  // hero metrics and the underlying tables in agreement.
   const [report, batchRows] = await Promise.all([
-    getPerformanceReport(),
-    getDashboardRows(),
+    getPerformanceReport(period),
+    getDashboardRows(period),
   ]);
 
   // Pre-VIN critical: derived from the dashboard rows where the row is
