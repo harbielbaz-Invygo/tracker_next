@@ -693,9 +693,9 @@ function DrawerHeader({
               type="button"
               onClick={() => setConfirming(true)}
               className="text-sm font-medium px-3 py-2 rounded-md
-                         border border-flame text-flame-dark
-                         bg-white hover:bg-flame-pale transition-colors
-                         w-full"
+                         border border-flame bg-flame-pale text-flame-dark
+                         hover:bg-flame hover:text-white hover:border-flame
+                         transition-colors w-full"
               title="Cancel this batch — destructive. Ops can no longer update its actions."
             >
               🚫 Cancel batch

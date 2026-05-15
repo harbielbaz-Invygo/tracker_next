@@ -133,7 +133,7 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         <Metric label="Active batches"   value={totals.total} />
         <Metric label="Waiting actions"  value={totals.withWaiting} />
         <Metric label="Delayed"          value={totals.delayed} valueColor="text-flame-dark" />
-        <Metric label="Fully done"       value={totals.fullyDone} valueColor="text-green-dark" />
+        <Metric label="Ready to deliver" value={totals.fullyDone} valueColor="text-green-dark" />
       </div>
 
       {/* Delayed-work strip — single triage surface. Chips bucketed by HOW
