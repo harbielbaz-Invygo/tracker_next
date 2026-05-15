@@ -128,13 +128,26 @@ export async function POST(req: NextRequest) {
   const dealerName = dealerRow.name;
 
   // ── Lookup dependency map + offsets for picked actions only ────
+  // A child is initially "blocked" only when it has an UNSATISFIED
+  // parent on this specific batch — i.e. a parent action_type that is
+  // ALSO being picked at this intake. If the parent isn't on the
+  // batch, the dep is dormant and the child should start as `waiting`,
+  // not blocked-forever-with-no-way-to-unblock. (Earlier bug: a child
+  // depending on two parents, with only one picked, stayed blocked
+  // even after the picked parent was marked done — the cascade had
+  // no row to read for the absent parent.)
   const pickedActionIds = body.actions.map((a) => a.actionTypeId);
+  const pickedSet = new Set(pickedActionIds);
   const depsRows = pickedActionIds.length
     ? await db.select().from(actionDependencies)
         .where(inArray(actionDependencies.actionTypeId, pickedActionIds))
     : [];
-  const hasParentDep = new Set<number>(); // actionTypeId → has any parent dep
-  for (const d of depsRows) hasParentDep.add(d.actionTypeId);
+  const hasParentDep = new Set<number>(); // actionTypeId → has any parent dep on THIS batch
+  for (const d of depsRows) {
+    if (pickedSet.has(d.dependsOnActionTypeId)) {
+      hasParentDep.add(d.actionTypeId);
+    }
+  }
 
   // Fetch full action_type metadata so we can both validate and use the
   // offset/anchor when computing each batch_action's expected date.
