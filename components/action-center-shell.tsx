@@ -35,6 +35,7 @@ interface Props {
   rows: ActionCenterRow[];
   totals: {
     total: number;
+    active: number;
     withWaiting: number;
     fullyDone: number;
     delayed: number;
@@ -45,6 +46,10 @@ interface Props {
     totalQuantity: number;
     carsListed: number;
     carsDelivered: number;
+    carsReady: number;
+    carsPartlyDelivered: number;
+    carsPartlyRequested: number;
+    carsCancelled: number;
   };
 }
 
@@ -233,36 +238,62 @@ export default function ActionCenterShell({ rows, totals }: Props) {
           compact pattern as the Dashboard for consistency. */}
       <div className="grid grid-cols-1 md:grid-cols-[2fr,1fr,1fr] gap-4 mb-3">
         <HeroMetric
-          label="Delayed batches"
+          label="Delayed"
           value={totals.delayed}
           tone={totals.delayed > 0 ? "alert" : "ok"}
           title={totals.delayed > 0
             ? `${totals.delayed} batches are past their dealer-promised availability date`
             : "No batches are past their promised date"}
         />
-        <Metric label="Active batches"  value={totals.total} valueColor="text-midnight" />
-        <Metric label="Waiting actions" value={totals.withWaiting} />
+        <Metric
+          label="Active"
+          value={totals.active}
+          valueColor="text-midnight"
+          title="Batches not yet closed (Delivered or Cancelled)."
+        />
+        <Metric
+          label="Action needed"
+          value={totals.withWaiting}
+          title="Batches with at least one waiting action — somebody's owed work."
+        />
       </div>
       {/* Closure + volume strip — compact tiles for the operational
-          breakdown the team wants visible at a glance. Wraps to 2 or
-          3 columns on narrow screens; all six fit one row on lg+. */}
+          breakdown the team wants visible at a glance. Each tile has
+          a colored left-edge accent matching its semantic role, and a
+          subtitle giving the car-level context (since "3 batches"
+          alone doesn't say how big the move is). Wraps to 2 or 3
+          columns on narrow screens; all six fit one row on lg+. */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 mb-6">
         <CompactMetric
-          label="Ready to deliver"
-          value={totals.fullyDone}
-          valueColor="text-green-dark"
-          title="Batches where every internal action AND every VIN chase stage is done or skipped. Just waiting for Mark as Delivered."
+          label="Total cars"
+          value={totals.totalQuantity}
+          accent="ink"
+          valueColor="text-midnight"
+          subtitle={`across ${totals.total} ${totals.total === 1 ? "batch" : "batches"}`}
+          title="Total cars across every batch in this Action Center (gross — includes cancelled units)."
         />
         <CompactMetric
           label="Listed on app"
           value={totals.listed}
+          accent="brand"
           valueColor="text-brand-dark"
           subtitle={`${totals.carsListed} / ${totals.totalQuantity} cars · ${pctOfTotal(totals.carsListed)}%`}
           title="Batches marked live in the customer app. Subtitle: cars in those batches as a share of total PO quantity."
         />
         <CompactMetric
+          label="Ready to deliver"
+          value={totals.fullyDone}
+          accent="green"
+          valueColor="text-green-dark"
+          subtitle={totals.fullyDone > 0
+            ? `${totals.carsReady} ${totals.carsReady === 1 ? "car" : "cars"} in pipeline`
+            : "—"}
+          title="Batches where every internal action AND every VIN chase stage is done or skipped. Just waiting for Mark as Delivered."
+        />
+        <CompactMetric
           label="Delivered"
           value={totals.delivered}
+          accent="green"
           valueColor="text-green-dark"
           subtitle={`${totals.carsDelivered} / ${totals.totalQuantity} cars · ${pctOfTotal(totals.carsDelivered)}%`}
           title="Batches formally closed as delivered. Subtitle: cars actually shipped (cumulative delivered_quantity) as a share of total PO quantity."
@@ -270,20 +301,22 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         <CompactMetric
           label="Partly delivered"
           value={totals.partlyDelivered}
+          accent="gold"
           valueColor="text-gold-dark"
+          subtitle={totals.partlyDelivered > 0
+            ? `${totals.carsPartlyDelivered} / ${totals.carsPartlyRequested} cars shipped`
+            : "—"}
           title="Batches where some units shipped but not all — includes in-flight partials and cancelled-after-partial."
         />
         <CompactMetric
           label="Cancelled"
           value={totals.cancelled}
+          accent="flame"
           valueColor="text-flame-dark"
-          title="Batches closed with a cancellation reason."
-        />
-        <CompactMetric
-          label="Total PO qty"
-          value={totals.totalQuantity}
-          valueColor="text-midnight"
-          title="Total cars across every batch in this Action Center (gross — includes cancelled units)."
+          subtitle={totals.cancelled > 0
+            ? `${totals.carsCancelled} ${totals.carsCancelled === 1 ? "car" : "cars"} affected`
+            : "—"}
+          title="Batches closed with a cancellation reason. Subtitle: gross car count across cancelled batches."
         />
       </div>
 
@@ -522,7 +555,17 @@ function HeroMetric({ label, value, tone, title }: {
   );
 }
 
-function CompactMetric({ label, value, valueColor, title, subtitle }: {
+type CompactAccent = "green" | "brand" | "gold" | "flame" | "ink";
+
+const COMPACT_ACCENT_CLASSES: Record<CompactAccent, string> = {
+  green: "border-l-2 border-l-green",
+  brand: "border-l-2 border-l-brand",
+  gold:  "border-l-2 border-l-gold",
+  flame: "border-l-2 border-l-flame",
+  ink:   "border-l-2 border-l-ink-300",
+};
+
+function CompactMetric({ label, value, valueColor, title, subtitle, accent }: {
   label: string;
   value: number;
   valueColor?: string;
@@ -530,11 +573,16 @@ function CompactMetric({ label, value, valueColor, title, subtitle }: {
   /** Optional second line — used to show the car-level breakdown
    *  (e.g. "200 / 340 cars · 59%") under tiles that have one. */
   subtitle?: string;
+  /** Colored left-edge stripe matching the tile's semantic role. */
+  accent?: CompactAccent;
 }) {
   return (
     <div
       title={title}
-      className="px-3 py-2 rounded-md bg-ink-50 border border-ink-100"
+      className={cn(
+        "px-3 py-2 rounded-md bg-ink-50 border border-ink-100",
+        COMPACT_ACCENT_CLASSES[accent ?? "ink"],
+      )}
     >
       <div className="flex items-baseline justify-between gap-3">
         <span className="text-xs font-medium text-ink-600">{label}</span>

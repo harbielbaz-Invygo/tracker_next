@@ -742,21 +742,36 @@ export function summarizeActionCenter(rows: ActionCenterRow[]) {
   // customer app at least once. Set via /api/batch-app-listing.
   const listed = rows.filter((r) => r.appListedAt != null).length;
 
+  // Active = not yet closed. Previously the "Active batches" hero
+  // showed `total` (every row, including delivered + cancelled), which
+  // double-counted batches that the Delivered/Cancelled tiles also list.
+  const active = rows.filter((r) => r.closedAt == null).length;
+
   // Total cars across every PO captured here. Gross volume — includes
   // cancelled units so it stays a stable headline number.
   const totalQuantity = rows.reduce((acc, r) => acc + (r.quantity ?? 0), 0);
 
-  // Car-level (not batch-level) volumes for the headline metrics that
-  // map most directly to "cars to customers": units in listed batches,
-  // and units that have actually shipped (cumulative deliveredQuantity).
-  // Both feed the % readout next to their batch-count tiles.
+  // Car-level (not batch-level) volumes for the compact-tile subtitles.
+  // Each maps directly to the question "how many CARS, not batches".
   const carsListed = rows
     .filter((r) => r.appListedAt != null)
     .reduce((acc, r) => acc + (r.quantity ?? 0), 0);
   const carsDelivered = rows.reduce((acc, r) => acc + (r.deliveredQuantity ?? 0), 0);
+  const carsReady = rows
+    .filter((r) => isFullySettled(r) && r.closedAt == null)
+    .reduce((acc, r) => acc + (r.quantity ?? 0), 0);
+  const partlyRows = rows.filter(
+    (r) => r.deliveredQuantity > 0 && r.deliveredQuantity < r.quantity,
+  );
+  const carsPartlyDelivered = partlyRows.reduce((acc, r) => acc + r.deliveredQuantity, 0);
+  const carsPartlyRequested = partlyRows.reduce((acc, r) => acc + r.quantity, 0);
+  const carsCancelled = rows
+    .filter((r) => r.closureReason === "cancelled")
+    .reduce((acc, r) => acc + (r.quantity ?? 0), 0);
 
   return {
     total,
+    active,
     withWaiting,
     fullyDone,
     delayed,
@@ -767,6 +782,10 @@ export function summarizeActionCenter(rows: ActionCenterRow[]) {
     totalQuantity,
     carsListed,
     carsDelivered,
+    carsReady,
+    carsPartlyDelivered,
+    carsPartlyRequested,
+    carsCancelled,
   };
 }
 
