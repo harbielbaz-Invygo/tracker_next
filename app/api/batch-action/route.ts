@@ -42,16 +42,18 @@ export async function POST(req: NextRequest) {
 
   /**
    * Body supports several mutation flavours:
-   *   - Add a new batch_action:    { op: "add", batchId, actionTypeId }
-   *   - Upsert-to-done in 1 RTT:   { op: "upsert_done", batchId, actionTypeId, newCompletedAt? }
    *   - Status flip:               { batchActionId, newStatus }
    *   - Plan date patch:           { batchActionId, newExpectedDate }
    *   - Manual completion stamp:   { batchActionId, newStatus:"done", newCompletedAt }
+   *
+   * Previously also supported `op:"add"` (for the VIN-chase stepper's
+   * "+ Add" button) and `op:"upsert_done"` (for the original
+   * action_type-backed App Listing panel). Both ops were removed when
+   * their respective features were decoupled into first-class concepts
+   * (vin_chase_stages table, batches.app_listed_at column). No client
+   * code calls them anymore.
    */
   let body: {
-    op?: string;
-    batchId?: number;
-    actionTypeId?: number;
     batchActionId?: number;
     newStatus?: Status;
     newExpectedDate?: string | null;
@@ -61,149 +63,6 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-
-  // ── Add a new batch_action to an existing batch ──────────────────
-  // Used by the VIN-chase stepper when ops clicks "+ Add" on a
-  // template step that isn't yet attached to this batch. The new row
-  // is created with status="waiting" + expectedDate computed from the
-  // action_type's offsetDays + offsetAnchor (same logic as intake).
-  if (body.op === "add") {
-    const batchId = Number(body.batchId);
-    const actionTypeId = Number(body.actionTypeId);
-    if (!Number.isFinite(batchId) || !Number.isFinite(actionTypeId)) {
-      return NextResponse.json(
-        { error: "op=add requires batchId and actionTypeId" },
-        { status: 400 },
-      );
-    }
-    // Pre-check: don't double-create.
-    const existing = await db.select({ id: batchActions.id })
-      .from(batchActions)
-      .where(and(
-        eq(batchActions.batchId, batchId),
-        eq(batchActions.actionTypeId, actionTypeId),
-      ))
-      .limit(1);
-    if (existing.length > 0) {
-      return NextResponse.json(
-        { error: `Batch ${batchId} already has action_type ${actionTypeId}`, batchActionId: existing[0].id },
-        { status: 409 },
-      );
-    }
-    // Pull batch + action_type for expectedDate computation.
-    const [type] = await db.select({
-      id:               actionTypes.id,
-      offsetDays:       actionTypes.offsetDays,
-      offsetAnchor:     actionTypes.offsetAnchor,
-      defaultDeptId:    actionTypes.defaultDepartmentId,
-    }).from(actionTypes).where(eq(actionTypes.id, actionTypeId)).limit(1);
-    if (!type) {
-      return NextResponse.json({ error: `action_type ${actionTypeId} not found` }, { status: 404 });
-    }
-    const [batchRow] = await db.select({
-      requestedAt: batches.requestedAt,
-      vin:         batches.vinReceivingDate,
-      promised:    batches.dealerPromisedDeliveryDate,
-    }).from(batches).where(eq(batches.id, batchId)).limit(1);
-    if (!batchRow) {
-      return NextResponse.json({ error: `batch ${batchId} not found` }, { status: 404 });
-    }
-    const expectedDate = computeExpectedDate({
-      anchor:     type.offsetAnchor,
-      offsetDays: type.offsetDays,
-      submission: batchRow.requestedAt,
-      vin:        batchRow.vin,
-      promised:   batchRow.promised,
-    });
-    const [inserted] = await db.insert(batchActions).values({
-      batchId,
-      actionTypeId,
-      departmentId: type.defaultDeptId ?? undefined,
-      status:       "waiting",
-      expectedDate: expectedDate ?? undefined,
-    }).returning({ id: batchActions.id });
-    return NextResponse.json({
-      ok: true,
-      batchActionId: inserted.id,
-      expectedDate,
-    });
-  }
-
-  // ── Upsert a batch_action to status="done" in one round-trip ─────
-  // Used by the App Listing standalone panel: ops shouldn't need to
-  // pre-attach the action via Settings → Batches before clicking
-  // "Mark as listed". This op:
-  //   • inserts a new batch_action with status="done" + completedAt
-  //     if one doesn't exist yet on this batch
-  //   • or updates the existing row to status="done" + completedAt
-  //     if it does
-  // Either way it triggers the same auto-unblock cascade so any
-  // downstream actions promote from blocked → waiting.
-  if (body.op === "upsert_done") {
-    const batchId      = Number(body.batchId);
-    const actionTypeId = Number(body.actionTypeId);
-    if (!Number.isFinite(batchId) || !Number.isFinite(actionTypeId)) {
-      return NextResponse.json(
-        { error: "op=upsert_done requires batchId and actionTypeId" },
-        { status: 400 },
-      );
-    }
-    const completedAtIso = body.newCompletedAt ?? new Date().toISOString();
-    const nowIso = new Date().toISOString();
-
-    const result = await db.transaction(async (tx) => {
-      const [existing] = await tx.select({ id: batchActions.id, status: batchActions.status })
-        .from(batchActions)
-        .where(and(
-          eq(batchActions.batchId, batchId),
-          eq(batchActions.actionTypeId, actionTypeId),
-        ))
-        .limit(1);
-
-      let batchActionId: number;
-      if (existing) {
-        await tx.update(batchActions)
-          .set({
-            status:      "done",
-            completedAt: completedAtIso,
-            updatedAt:   nowIso,
-          })
-          .where(eq(batchActions.id, existing.id));
-        batchActionId = existing.id;
-      } else {
-        // Look up the action_type for the department default.
-        const [type] = await tx.select({
-          defaultDeptId: actionTypes.defaultDepartmentId,
-        }).from(actionTypes).where(eq(actionTypes.id, actionTypeId)).limit(1);
-        if (!type) {
-          return { error: `action_type ${actionTypeId} not found`, status: 404 as const };
-        }
-        const [inserted] = await tx.insert(batchActions).values({
-          batchId,
-          actionTypeId,
-          departmentId: type.defaultDeptId ?? undefined,
-          status:       "done",
-          completedAt:  completedAtIso,
-        }).returning({ id: batchActions.id });
-        batchActionId = inserted.id;
-      }
-
-      // Run the auto-unblock cascade so any downstream action that
-      // was waiting for this one to be done promotes from blocked.
-      const autoUnblockedIds = await unblockDependents(tx, batchId, actionTypeId, nowIso);
-
-      return { batchActionId, autoUnblockedIds };
-    });
-
-    if ("error" in result) {
-      return NextResponse.json({ error: result.error }, { status: result.status });
-    }
-    return NextResponse.json({
-      ok: true,
-      batchActionId:    result.batchActionId,
-      autoUnblockedIds: result.autoUnblockedIds,
-    });
   }
 
   const id = Number(body.batchActionId);
