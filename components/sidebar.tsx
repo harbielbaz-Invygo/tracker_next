@@ -40,6 +40,14 @@ const NAV_GROUPS: { label: string | null; items: ViewName[] }[] = [
 
 const STORAGE_KEY = "sidebar-collapsed";
 
+// Sidebar width (expanded mode only — collapsed mode is a fixed slim
+// rail). Persisted in localStorage so each user keeps their preferred
+// rail width across sessions.
+const WIDTH_STORAGE_KEY = "sidebar-width";
+const DEFAULT_SIDEBAR_WIDTH = 288; // matches the previous w-72
+const MIN_SIDEBAR_WIDTH = 200;
+const MAX_SIDEBAR_WIDTH = 480;
+
 function accessBadge(view: ViewName, role: Role) {
   const rule = ACCESS[view];
   if (rule === "public") return "🌐";
@@ -74,15 +82,61 @@ export default function Sidebar({ role, name, username }: {
     });
   }
 
+  // Width state — drag-to-resize handle on the right edge of the rail
+  // (expanded mode only). Persisted to localStorage; clamped between
+  // MIN/MAX so users can't shrink the rail past readability.
+  const [width, setWidth] = useState<number>(DEFAULT_SIDEBAR_WIDTH);
+  const [isResizing, setIsResizing] = useState<boolean>(false);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(WIDTH_STORAGE_KEY);
+      if (stored) {
+        const n = parseInt(stored, 10);
+        if (!isNaN(n) && n >= MIN_SIDEBAR_WIDTH && n <= MAX_SIDEBAR_WIDTH) setWidth(n);
+      }
+    } catch { /* private mode / SSR */ }
+  }, []);
+  useEffect(() => {
+    try { window.localStorage.setItem(WIDTH_STORAGE_KEY, String(width)); } catch { /* ignore */ }
+  }, [width]);
+
+  function startResize(e: React.MouseEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = width;
+    setIsResizing(true);
+    function onMove(ev: MouseEvent) {
+      const next = Math.min(
+        MAX_SIDEBAR_WIDTH,
+        Math.max(MIN_SIDEBAR_WIDTH, startWidth + (ev.clientX - startX)),
+      );
+      setWidth(next);
+    }
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setIsResizing(false);
+    }
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   const initial = (name?.trim()?.[0] ?? "?").toUpperCase();
 
   return (
     <aside
       className={cn(
-        "shrink-0 bg-ink-50 border-r border-ink-200 py-5 sticky top-0 h-screen overflow-y-auto",
-        "transition-[width] duration-200 ease-out",
-        collapsed ? "w-14 px-2" : "w-72 px-4",
+        "relative shrink-0 bg-ink-50 border-r border-ink-200 py-5 sticky top-0 h-screen overflow-y-auto",
+        // Transition only while NOT actively dragging — otherwise the
+        // 200ms ease lags behind the cursor and feels rubbery.
+        !isResizing && "transition-[width] duration-200 ease-out",
+        collapsed ? "w-14 px-2" : "px-4",
       )}
+      style={!collapsed ? { width: `${width}px` } : undefined}
       aria-label="Primary navigation"
     >
       {/* Collapse toggle — chevron sits at the very top so it's reachable
@@ -160,6 +214,29 @@ export default function Sidebar({ role, name, username }: {
 
       {!collapsed && (
         <p className="text-xs font-medium text-ink-500 mb-2">Navigation</p>
+      )}
+
+      {/* Drag-to-resize handle on the right edge — expanded mode only.
+          Sits absolutely against the right border, full-height, with a
+          slim hit area that highlights on hover. Double-click resets
+          to the default width. */}
+      {!collapsed && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuenow={width}
+          title={`Drag to resize · Double-click to reset (${width}px)`}
+          onMouseDown={startResize}
+          onDoubleClick={() => setWidth(DEFAULT_SIDEBAR_WIDTH)}
+          className={cn(
+            "absolute top-0 right-0 h-full w-1.5 cursor-col-resize select-none",
+            "hover:bg-brand/40 active:bg-brand/60 transition-colors",
+            isResizing && "bg-brand/60",
+          )}
+        />
       )}
 
       {NAV_GROUPS.map(({ label, items }, gi) => (
