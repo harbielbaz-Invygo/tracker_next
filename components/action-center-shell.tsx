@@ -33,7 +33,17 @@ const COMPLETION_VIEW_KEY = "action-center-completion-view";
 
 interface Props {
   rows: ActionCenterRow[];
-  totals: { total: number; withWaiting: number; fullyDone: number; delayed: number };
+  totals: {
+    total: number;
+    withWaiting: number;
+    fullyDone: number;
+    delayed: number;
+    delivered: number;
+    cancelled: number;
+    partlyDelivered: number;
+    listed: number;
+    totalQuantity: number;
+  };
 }
 
 type LifecycleFilter = "all" | "pre_po" | "post_po";
@@ -226,12 +236,45 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         <Metric label="Active batches"  value={totals.total} valueColor="text-midnight" />
         <Metric label="Waiting actions" value={totals.withWaiting} />
       </div>
-      <div className="grid grid-cols-1 mb-6">
+      {/* Closure + volume strip — compact tiles for the operational
+          breakdown the team wants visible at a glance. Wraps to 2 or
+          3 columns on narrow screens; all six fit one row on lg+. */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 mb-6">
         <CompactMetric
           label="Ready to deliver"
           value={totals.fullyDone}
           valueColor="text-green-dark"
           title="Batches where every internal action AND every VIN chase stage is done or skipped. Just waiting for Mark as Delivered."
+        />
+        <CompactMetric
+          label="Listed on app"
+          value={totals.listed}
+          valueColor="text-brand-dark"
+          title="Batches that have been marked as live in the customer app at least once."
+        />
+        <CompactMetric
+          label="Delivered"
+          value={totals.delivered}
+          valueColor="text-green-dark"
+          title="Batches formally closed as delivered."
+        />
+        <CompactMetric
+          label="Partly delivered"
+          value={totals.partlyDelivered}
+          valueColor="text-gold-dark"
+          title="Batches where some units shipped but not all — includes in-flight partials and cancelled-after-partial."
+        />
+        <CompactMetric
+          label="Cancelled"
+          value={totals.cancelled}
+          valueColor="text-flame-dark"
+          title="Batches closed with a cancellation reason."
+        />
+        <CompactMetric
+          label="Total PO qty"
+          value={totals.totalQuantity}
+          valueColor="text-midnight"
+          title="Total cars across every batch in this Action Center (gross — includes cancelled units)."
         />
       </div>
 
