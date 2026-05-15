@@ -165,12 +165,25 @@ function BatchCard({
       </div>
 
       {/* Model + qty */}
-      <p className="text-sm font-medium text-midnight leading-tight mb-1.5">
+      <p className="text-sm font-medium text-midnight leading-tight mb-1">
         <span className="tabular-nums">{row.quantity}×</span>{" "}
         {row.modelYear === "—" ? <span className="text-ink-400">—</span> : row.modelYear}
       </p>
 
-      {/* Footer: status + counts */}
+      {/* Dealer + legs context line — same fields as the drawer
+          header but truncated for the compact card. Matches what
+          ops sees in the drawer so the two surfaces stay aligned. */}
+      <p className="text-[0.7rem] text-ink-600 truncate mb-1.5" title={row.dealerName}>
+        <span className="font-medium text-midnight">🏢</span>{" "}
+        <span>{row.dealerName}</span>
+      </p>
+
+      {/* Footer: status chip + per-cluster progress.
+          Two compact rows so VIN chase has parity with Internal
+          phase — each cluster gets its own labelled "done / total"
+          counter, with the open-action pills (waiting + blocked)
+          living next to the internal counter since they ONLY come
+          from batch_actions, not VIN stages. */}
       <div className="flex flex-wrap items-center gap-1.5 text-[0.7rem]">
         {isClosed ? (
           <ClosureChip cancelled={isCancelled} closedAt={row.closedAt!} />
@@ -188,12 +201,27 @@ function BatchCard({
         {!isClosed && row.actionsBlocked > 0 && (
           <CountPill value={row.actionsBlocked} tone="blocked" />
         )}
-        {!isClosed && row.totalActions > 0 && (
-          <span className="text-ink-500 tabular-nums">
-            {row.actionsDone}/{row.totalActions}
-          </span>
-        )}
       </div>
+
+      {/* Per-cluster progress strip. Renders for OPEN batches only —
+          a closed batch's progress is fixed and the ClosureChip
+          above already carries the final-state signal. */}
+      {!isClosed && (row.totalActions > 0 || row.totalVinStages > 0) && (
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.65rem] text-ink-600">
+          {row.totalActions > 0 && (
+            <span className="tabular-nums" title="Internal phase actions (Specs / Pricing / SKU / etc.) — done out of total">
+              <span className="text-midnight font-medium">🏢 Internal:</span>{" "}
+              {row.actionsDone}/{row.totalActions}
+            </span>
+          )}
+          {row.totalVinStages > 0 && (
+            <span className="tabular-nums" title="VIN chase stages — done or skipped out of total">
+              <span className="text-midnight font-medium">🔑 VIN:</span>{" "}
+              {row.vinStagesDone + row.vinStagesSkipped}/{row.totalVinStages}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Next action hint, only when there is one and the batch is open. */}
       {row.nextActionLabel && !isClosed && (
