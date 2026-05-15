@@ -247,8 +247,14 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         </>
       ) : (
         /* Side-by-side: compact list on the left, action card on the right.
-           Both panes scroll independently inside a fixed-height container. */
-        <div className="grid grid-cols-1 lg:grid-cols-[minmax(300px,400px)_1fr] gap-4 h-[min(76vh,820px)] min-h-[480px]">
+           Both panes scroll independently inside a fixed-height container.
+           Left-panel width narrowed (was minmax(300,400)) — gives the
+           drawer ~80px more horizontal room, which matters most on
+           1280-wide laptops where the unified header's two-column
+           action stack was getting crowded. The batch cards still
+           render legibly down to ~220px (PO code truncates with title
+           tooltip; status chips already wrap). */
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(220px,300px)_1fr] gap-4 h-[min(76vh,820px)] min-h-[480px]">
           <ActionCenterBatchList
             rows={filtered}
             selectedCode={selected}
