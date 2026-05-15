@@ -1023,7 +1023,7 @@ function AlertRuleRow({
 
   const severityColor =
     rule.severity === "critical" ? "text-flame-dark bg-flame-pale border-flame"
-    : rule.severity === "high"   ? "text-flame-dark bg-flame-pale/60 border-flame/60"
+    : rule.severity === "high"   ? "text-gold-dark bg-gold-pale/60 border-gold/60"
     : rule.severity === "medium" ? "text-gold-dark bg-gold-pale border-gold"
     :                               "text-ink-600 bg-ink-100 border-ink-200";
 

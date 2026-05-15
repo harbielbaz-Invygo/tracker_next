@@ -197,7 +197,7 @@ function CustomerImpactBlock({ impact }: { impact: CustomerImpactReport }) {
         </p>
         <div className="space-y-1.5">
           <SeverityBar label="Mild (1–7d)"      count={totals.mild}     pct={pct(totals.mild)}     tone="gold" />
-          <SeverityBar label="Moderate (8–21d)" count={totals.moderate} pct={pct(totals.moderate)} tone="flame-pale" />
+          <SeverityBar label="Moderate (8–21d)" count={totals.moderate} pct={pct(totals.moderate)} tone="gold-pale" />
           <SeverityBar label="Severe (>21d)"    count={totals.severe}   pct={pct(totals.severe)}   tone="flame" />
         </div>
         <p className="text-[0.65rem] text-ink-500 mt-2">
@@ -215,10 +215,10 @@ function SeverityBar({
   label, count, pct, tone,
 }: {
   label: string; count: number; pct: number;
-  tone: "gold" | "flame-pale" | "flame";
+  tone: "gold" | "gold-pale" | "flame";
 }) {
   const barCls = tone === "gold" ? "bg-gold"
-    : tone === "flame-pale" ? "bg-flame/60"
+    : tone === "gold-pale" ? "bg-gold/60"
     : "bg-flame-dark";
   return (
     <div className="flex items-center gap-3">
@@ -260,10 +260,10 @@ function CustomerImpactTable({ batches }: { batches: CustomerImpactBatch[] }) {
               </Td>
               <Td align="right" tabular>{b.quantity}</Td>
               <Td align="right" tabular>
-                <span className="font-semibold text-flame-dark">+{b.delayDays}d</span>
+                <span className="font-semibold text-gold-dark">+{b.delayDays}d</span>
               </Td>
               <Td align="right" tabular>
-                <span className="font-bold text-flame-dark">{b.customerDaysImpact.toLocaleString()}</span>
+                <span className="font-bold text-gold-dark">{b.customerDaysImpact.toLocaleString()}</span>
               </Td>
               <Td align="right" tabular>
                 {b.revisionCount > 0
@@ -508,7 +508,7 @@ function PerfTable({ title, rows }: { title: string; rows: PerfRow[] }) {
                 <Td align="right" tabular><DelayValue days={row.worstDelayDays} bold /></Td>
                 <Td align="right" tabular>
                   {row.delayedBatchesOwned > 0
-                    ? <span className="font-semibold text-flame-dark">{row.delayedBatchesOwned}</span>
+                    ? <span className="font-semibold text-gold-dark">{row.delayedBatchesOwned}</span>
                     : <span className="text-ink-400">0</span>}
                 </Td>
               </tr>
