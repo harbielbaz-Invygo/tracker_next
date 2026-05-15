@@ -36,6 +36,12 @@ export interface ActionCenterRow {
   closedAt: string | null;                                     // ISO yyyy-mm-dd
   closureReason: "delivered" | "cancelled" | null;
 
+  /* Delivery + listing — first-class columns on `batches`. Both fields
+   * power the top-of-page summary tiles (delivered count, partly-
+   * delivered count, listed-on-app count). */
+  deliveredQuantity: number;
+  appListedAt: string | null;
+
   /* Action aggregates (internal phase — batch_actions) */
   actionsWaiting: number;
   actionsBlocked: number;
@@ -414,6 +420,9 @@ export async function getActionCenterRows(
       closedAt:      b.closedAt ?? null,
       closureReason: (b.closureReason ?? null) as ActionCenterRow["closureReason"],
 
+      deliveredQuantity: b.deliveredQuantity ?? 0,
+      appListedAt:       b.appListedAt ?? null,
+
       actionsWaiting,
       actionsBlocked,
       actionsDone,
@@ -717,7 +726,37 @@ export function summarizeActionCenter(rows: ActionCenterRow[]) {
   // and the metric used to mis-count them by ignoring VIN stages.
   const fullyDone = rows.filter((r) => isFullySettled(r)).length;
   const delayed   = rows.filter((r) => r.delayDays > 0).length;
-  return { total, withWaiting, fullyDone, delayed };
+
+  // Closure breakdown — counts of formally-closed batches by reason.
+  const delivered = rows.filter((r) => r.closureReason === "delivered").length;
+  const cancelled = rows.filter((r) => r.closureReason === "cancelled").length;
+
+  // Partly delivered — any batch (open or closed) where SOME units
+  // shipped but not all of them. Picks up both in-flight partial
+  // deliveries and cancelled-after-partial cases.
+  const partlyDelivered = rows.filter(
+    (r) => r.deliveredQuantity > 0 && r.deliveredQuantity < r.quantity,
+  ).length;
+
+  // Listed on the app — batches that have been marked as live in the
+  // customer app at least once. Set via /api/batch-app-listing.
+  const listed = rows.filter((r) => r.appListedAt != null).length;
+
+  // Total cars across every PO captured here. Gross volume — includes
+  // cancelled units so it stays a stable headline number.
+  const totalQuantity = rows.reduce((acc, r) => acc + (r.quantity ?? 0), 0);
+
+  return {
+    total,
+    withWaiting,
+    fullyDone,
+    delayed,
+    delivered,
+    cancelled,
+    partlyDelivered,
+    listed,
+    totalQuantity,
+  };
 }
 
 // Slack formatter moved to `lib/action-center-slack.ts` so client components can
