@@ -37,6 +37,12 @@ export interface DepartmentRow {
   worstDelayDays: number | null;
   /** Distinct batches where this department owns at least one delayed action. */
   delayedBatchesOwned: number;
+  /**
+   * On-time rate per week, last 12 weeks (oldest first). null in
+   * weeks with no done batch_actions for this department. Drives a
+   * tiny sparkline in the Performance table row.
+   */
+  onTimeRateWeekly: (number | null)[];
 }
 
 export interface StakeholderRow {
@@ -51,6 +57,8 @@ export interface StakeholderRow {
   avgDelayDays: number | null;
   worstDelayDays: number | null;
   delayedBatchesOwned: number;
+  /** On-time rate per week, last 12 weeks (oldest first). Same shape as DepartmentRow. */
+  onTimeRateWeekly: (number | null)[];
 }
 
 /**
@@ -344,6 +352,20 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
   const departmentAcc = new Map<number, AggregateAccumulator>();
   const stakeholderAcc = new Map<number, AggregateAccumulator>();
 
+  // Weekly on-time/late counters per owner, for the 12-week sparkline.
+  // Indexed by owner id → array of 12 weekly buckets (oldest first).
+  // Pre-compute the bucket boundaries once.
+  const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+  const todayMidnight = new Date(); todayMidnight.setHours(0, 0, 0, 0);
+  const daysSinceMonday = (todayMidnight.getDay() + 6) % 7;
+  const thisWeekStartMs = todayMidnight.getTime() - daysSinceMonday * 24 * 60 * 60 * 1000;
+  const bucketEdges = Array.from({ length: 12 }, (_, i) => thisWeekStartMs - (11 - i) * WEEK_MS);
+  // bucketEdges[i] = start of bucket i; bucket i covers [edge, edge + WEEK_MS).
+  const newWeekly = (): { onTime: number; late: number }[] =>
+    Array.from({ length: 12 }, () => ({ onTime: 0, late: 0 }));
+  const departmentWeekly = new Map<number, { onTime: number; late: number }[]>();
+  const stakeholderWeekly = new Map<number, { onTime: number; late: number }[]>();
+
   for (const r of rows) {
     const ba = r.ba;
     const isDone     = ba.status === "done";
@@ -363,6 +385,17 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
       isLate = true;
     }
 
+    // Map this row into a weekly bucket index (0–11) when it has a
+    // completion timestamp inside the 12-week window. Used for the
+    // per-row sparkline.
+    let bucketIdx: number | null = null;
+    if (isDone && ba.completedAt && delayDays !== null) {
+      const ts = new Date(ba.completedAt).getTime();
+      if (ts >= bucketEdges[0] && ts < thisWeekStartMs + WEEK_MS) {
+        bucketIdx = Math.min(11, Math.floor((ts - bucketEdges[0]) / WEEK_MS));
+      }
+    }
+
     function bump(acc: AggregateAccumulator) {
       acc.totalActions++;
       if (isDone)    acc.doneActions++;
@@ -380,12 +413,33 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
       const acc = departmentAcc.get(r.deptId) ?? emptyAcc();
       bump(acc);
       departmentAcc.set(r.deptId, acc);
+      if (bucketIdx !== null && delayDays !== null) {
+        const wk = departmentWeekly.get(r.deptId) ?? newWeekly();
+        if (delayDays <= 0) wk[bucketIdx].onTime++; else wk[bucketIdx].late++;
+        departmentWeekly.set(r.deptId, wk);
+      }
     }
     if (r.stakeholderId != null) {
       const acc = stakeholderAcc.get(r.stakeholderId) ?? emptyAcc();
       bump(acc);
       stakeholderAcc.set(r.stakeholderId, acc);
+      if (bucketIdx !== null && delayDays !== null) {
+        const wk = stakeholderWeekly.get(r.stakeholderId) ?? newWeekly();
+        if (delayDays <= 0) wk[bucketIdx].onTime++; else wk[bucketIdx].late++;
+        stakeholderWeekly.set(r.stakeholderId, wk);
+      }
     }
+  }
+
+  // Helper: convert weekly counts to per-week on-time rates (0-100 or null).
+  // Same rule as the hero's onTimeRateWeekly — null when nothing done in
+  // that week, so the sparkline renders gaps instead of false zeros.
+  function ratesFromWeekly(wk: { onTime: number; late: number }[] | undefined): (number | null)[] {
+    if (!wk) return Array.from({ length: 12 }, () => null);
+    return wk.map(({ onTime, late }) => {
+      const total = onTime + late;
+      return total > 0 ? Math.round((onTime / total) * 100) : null;
+    });
   }
 
   // Build department rows. Include zero-action departments at the bottom.
@@ -399,6 +453,7 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
       activeActions: acc.activeActions,
       skippedActions: acc.skippedActions,
       delayedBatchesOwned: acc.delayedBatchIds.size,
+      onTimeRateWeekly: ratesFromWeekly(departmentWeekly.get(d.id)),
       ...summarizeAcc(acc),
     };
   });
@@ -415,6 +470,7 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
       activeActions: acc.activeActions,
       skippedActions: acc.skippedActions,
       delayedBatchesOwned: acc.delayedBatchIds.size,
+      onTimeRateWeekly: ratesFromWeekly(stakeholderWeekly.get(s.id)),
       ...summarizeAcc(acc),
     };
   });
