@@ -40,8 +40,26 @@ for (const envFile of [".env.production", ".env.local", ".env"]) {
   console.log(`    ${envFile}: set ${setCount} key(s)`);
 }
 
+if (process.env.DATABASE_URL === "") {
+  console.error("\n❌ DATABASE_URL was loaded as an empty string.");
+  console.error("   This usually means Vercel masked the value during `env pull`.");
+  console.error("   Fix: in Vercel → Settings → Environment Variables, click the eye");
+  console.error("   icon to reveal DATABASE_URL and TURSO_AUTH_TOKEN, then in PowerShell:\n");
+  console.error("       $env:DATABASE_URL = 'libsql://your-db.turso.io'");
+  console.error("       $env:TURSO_AUTH_TOKEN = 'eyJ…'");
+  console.error("       npx tsx scripts/migrate-forecast.ts\n");
+  process.exit(1);
+}
 if (!process.env.DATABASE_URL) {
-  console.error("\n❌ DATABASE_URL is unset. Run `npx vercel env pull .env.production --environment=production` first.\n");
+  console.error("\n❌ DATABASE_URL is unset.");
+  console.error("   Run `npx vercel env pull .env.production --environment=production` first,");
+  console.error("   or set $env:DATABASE_URL and $env:TURSO_AUTH_TOKEN manually.\n");
+  process.exit(1);
+}
+if (/<|>/.test(process.env.DATABASE_URL)) {
+  console.error("\n❌ DATABASE_URL still contains placeholder characters (< or >):");
+  console.error(`   ${process.env.DATABASE_URL}`);
+  console.error("   Replace <your-db> and <token> with the real values.\n");
   process.exit(1);
 }
 
