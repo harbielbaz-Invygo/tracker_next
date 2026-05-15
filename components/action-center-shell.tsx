@@ -43,6 +43,8 @@ interface Props {
     partlyDelivered: number;
     listed: number;
     totalQuantity: number;
+    carsListed: number;
+    carsDelivered: number;
   };
 }
 
@@ -200,6 +202,11 @@ export default function ActionCenterShell({ rows, totals }: Props) {
     router.refresh();
   }
 
+  // Whole-percent against the total fleet, with a divide-by-zero
+  // guard for the empty-Action-Center case.
+  const pctOfTotal = (n: number) =>
+    totals.totalQuantity === 0 ? 0 : Math.round((n / totals.totalQuantity) * 100);
+
   return (
     <div>
       <PageHeader
@@ -250,13 +257,15 @@ export default function ActionCenterShell({ rows, totals }: Props) {
           label="Listed on app"
           value={totals.listed}
           valueColor="text-brand-dark"
-          title="Batches that have been marked as live in the customer app at least once."
+          subtitle={`${totals.carsListed} / ${totals.totalQuantity} cars · ${pctOfTotal(totals.carsListed)}%`}
+          title="Batches marked live in the customer app. Subtitle: cars in those batches as a share of total PO quantity."
         />
         <CompactMetric
           label="Delivered"
           value={totals.delivered}
           valueColor="text-green-dark"
-          title="Batches formally closed as delivered."
+          subtitle={`${totals.carsDelivered} / ${totals.totalQuantity} cars · ${pctOfTotal(totals.carsDelivered)}%`}
+          title="Batches formally closed as delivered. Subtitle: cars actually shipped (cumulative delivered_quantity) as a share of total PO quantity."
         />
         <CompactMetric
           label="Partly delivered"
@@ -513,22 +522,31 @@ function HeroMetric({ label, value, tone, title }: {
   );
 }
 
-function CompactMetric({ label, value, valueColor, title }: {
+function CompactMetric({ label, value, valueColor, title, subtitle }: {
   label: string;
   value: number;
   valueColor?: string;
   title?: string;
+  /** Optional second line — used to show the car-level breakdown
+   *  (e.g. "200 / 340 cars · 59%") under tiles that have one. */
+  subtitle?: string;
 }) {
   return (
     <div
       title={title}
-      className="flex items-baseline justify-between gap-3 px-3 py-2 rounded-md
-                 bg-ink-50 border border-ink-100"
+      className="px-3 py-2 rounded-md bg-ink-50 border border-ink-100"
     >
-      <span className="text-xs font-medium text-ink-600">{label}</span>
-      <span className={cn("text-lg font-semibold tabular-nums", valueColor ?? "text-midnight")}>
-        {value}
-      </span>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-xs font-medium text-ink-600">{label}</span>
+        <span className={cn("text-lg font-semibold tabular-nums", valueColor ?? "text-midnight")}>
+          {value}
+        </span>
+      </div>
+      {subtitle && (
+        <p className="text-[0.65rem] text-ink-500 mt-0.5 tabular-nums leading-tight">
+          {subtitle}
+        </p>
+      )}
     </div>
   );
 }
