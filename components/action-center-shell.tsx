@@ -20,6 +20,13 @@ import { cn } from "@/lib/utils";
 type ViewMode = "stacked" | "side-by-side";
 const VIEW_MODE_KEY = "action-center-view-mode";
 
+// Left-panel (batches list) width in the side-by-side view. Persisted in
+// localStorage so each user keeps their preferred ratio between visits.
+const LEFT_WIDTH_KEY = "action-center-left-width";
+const DEFAULT_LEFT_WIDTH = 280;
+const MIN_LEFT_WIDTH = 200;
+const MAX_LEFT_WIDTH = 640;
+
 interface Props {
   rows: ActionCenterRow[];
   totals: { total: number; withWaiting: number; fullyDone: number; delayed: number };
@@ -64,6 +71,44 @@ export default function ActionCenterShell({ rows, totals }: Props) {
   useEffect(() => {
     try { window.localStorage.setItem(VIEW_MODE_KEY, viewMode); } catch { /* ignore */ }
   }, [viewMode]);
+
+  // ── Left-panel width (drag-to-resize), persisted in localStorage ──
+  const [leftWidth, setLeftWidth] = useState<number>(DEFAULT_LEFT_WIDTH);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(LEFT_WIDTH_KEY);
+      if (stored) {
+        const n = parseInt(stored, 10);
+        if (!isNaN(n) && n >= MIN_LEFT_WIDTH && n <= MAX_LEFT_WIDTH) setLeftWidth(n);
+      }
+    } catch { /* SSR / private mode */ }
+  }, []);
+  useEffect(() => {
+    try { window.localStorage.setItem(LEFT_WIDTH_KEY, String(leftWidth)); } catch { /* ignore */ }
+  }, [leftWidth]);
+
+  function startResize(e: React.MouseEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = leftWidth;
+    function onMove(ev: MouseEvent) {
+      const next = Math.min(
+        MAX_LEFT_WIDTH,
+        Math.max(MIN_LEFT_WIDTH, startWidth + (ev.clientX - startX)),
+      );
+      setLeftWidth(next);
+    }
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
 
   // Department options from rows
   const departmentOptions = useMemo(() => {
@@ -267,13 +312,13 @@ export default function ActionCenterShell({ rows, totals }: Props) {
       ) : (
         /* Side-by-side: compact list on the left, action card on the right.
            Both panes scroll independently inside a fixed-height container.
-           Left-panel width narrowed (was minmax(300,400)) — gives the
-           drawer ~80px more horizontal room, which matters most on
-           1280-wide laptops where the unified header's two-column
-           action stack was getting crowded. The batch cards still
-           render legibly down to ~220px (PO code truncates with title
-           tooltip; status chips already wrap). */
-        <div className="grid grid-cols-1 lg:grid-cols-[minmax(220px,300px)_1fr] gap-4 h-[min(76vh,820px)] min-h-[480px]">
+           Column widths are user-controlled: drag the divider between the
+           two panes (lg+ only). The width is clamped to [MIN, MAX] and
+           persisted in localStorage. Double-click the divider to reset. */
+        <div
+          className="grid grid-cols-1 gap-4 lg:gap-0 h-[min(76vh,820px)] min-h-[480px] lg:[grid-template-columns:var(--ac-cols)]"
+          style={{ "--ac-cols": `${leftWidth}px 14px 1fr` } as React.CSSProperties}
+        >
           {/* Left column — search input + batch list, stacked. The
               search is constrained to the same column width as the
               list below it (no media break, both are inside the
@@ -312,7 +357,29 @@ export default function ActionCenterShell({ rows, totals }: Props) {
               />
             </div>
           </div>
-          <div className="overflow-auto rounded-lg">
+
+          {/* Drag-to-resize handle — hidden on mobile (grid collapses
+              to a single column). The hit area is the full 14px column;
+              the inner pill is a visual affordance that brightens on
+              hover. Double-click resets to the default width. */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize batches panel"
+            aria-valuemin={MIN_LEFT_WIDTH}
+            aria-valuemax={MAX_LEFT_WIDTH}
+            aria-valuenow={leftWidth}
+            title={`Drag to resize · Double-click to reset (${leftWidth}px)`}
+            onMouseDown={startResize}
+            onDoubleClick={() => setLeftWidth(DEFAULT_LEFT_WIDTH)}
+            className="hidden lg:flex items-center justify-center cursor-col-resize
+                       group select-none"
+          >
+            <div className="w-1 h-10 rounded-full bg-ink-200 group-hover:bg-brand
+                            group-active:bg-brand-dark transition-colors" />
+          </div>
+
+          <div className="overflow-auto rounded-lg lg:ml-2">
             {selected ? (
               <ActionCenterDrawer
                 key={selected}
