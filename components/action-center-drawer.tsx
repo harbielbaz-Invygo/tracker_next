@@ -647,23 +647,10 @@ function DrawerHeader({
         {/* RIGHT column — vertical action stack */}
         {!isClosed && (
           <div className="flex flex-col gap-2 lg:w-full">
-            {/* Mark as listed — either the button, the inline picker,
-                or hidden (chip moved to the left column when listed). */}
-            {appListingForm !== false ? (
-              <AppListingInlineForm
-                batchId={data.batchId}
-                initialAt={
-                  appListingForm === "edit" && data.appListedAt
-                    ? data.appListedAt
-                    : null
-                }
-                onSaved={() => {
-                  setAppListingForm(false);
-                  onAppListed();
-                }}
-                onCancel={() => setAppListingForm(false)}
-              />
-            ) : !isListed ? (
+            {/* Mark as listed — modal-trigger button. Hidden when the
+                batch is already listed (the green "Listed · ✎" chip in
+                the left column carries the edit affordance instead). */}
+            {!isListed && (
               <button
                 type="button"
                 onClick={() => setAppListingForm("new")}
@@ -671,11 +658,11 @@ function DrawerHeader({
                            border border-brand text-brand-dark
                            bg-white hover:bg-brand-pastel transition-colors
                            w-full"
-                title="Mark cars as listed in the app. Defaults to now; you can pick a different time."
+                title="Mark cars as listed in the app — opens a date/time picker"
               >
                 📱 Mark as listed
               </button>
-            ) : null}
+            )}
 
             <button
               type="button"
@@ -751,93 +738,155 @@ function DrawerHeader({
           }}
         />
       )}
+      {appListingForm !== false && (
+        <AppListingModal
+          data={data}
+          mode={appListingForm}
+          onClose={() => setAppListingForm(false)}
+          onSaved={() => {
+            setAppListingForm(false);
+            onAppListed();
+          }}
+        />
+      )}
     </div>
   );
 }
 
 /**
- * Inline App Listing time picker — appears in place of the
- * "📱 Mark as listed" button when clicked. Pre-fills with NOW
- * (or the existing timestamp when editing). One Enter / Confirm
- * click → POST /api/batch-app-listing. Designed for the fast
- * path: ops rarely needs to backdate, but the input is right
- * there if they do.
+ * App Listing date/time picker — modal popup. Matches the visual
+ * pattern of DateShiftModal (header + body + footer in a card-shaped
+ * dialog with a backdrop). Default value:
+ *   • mode="new"   → NOW (so a single Enter / Confirm marks listed now)
+ *   • mode="edit"  → the existing data.appListedAt (lets ops adjust)
+ *
+ * Submits to POST /api/batch-app-listing. Closes on click-outside,
+ * Escape key, or Cancel button. Same UX shape as the Shift modal.
  */
-function AppListingInlineForm({
-  batchId, initialAt, onSaved, onCancel,
+function AppListingModal({
+  data, mode, onClose, onSaved,
 }: {
-  batchId: number;
-  /** ISO datetime for edit mode, or null for first-time mark (defaults to now). */
-  initialAt: string | null;
+  data: DrawerData;
+  mode: "new" | "edit";
+  onClose: () => void;
   onSaved: () => void;
-  onCancel: () => void;
 }) {
   // datetime-local format (LOCAL time, no offset): "YYYY-MM-DDTHH:MM"
   const seed = (() => {
-    const d = new Date(initialAt ?? new Date().toISOString());
+    const source = mode === "edit" && data.appListedAt
+      ? data.appListedAt
+      : new Date().toISOString();
+    const d = new Date(source);
     if (Number.isNaN(d.getTime())) return "";
     const pad = (n: number) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   })();
   const [draftAt, setDraftAt] = useState(seed);
   const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function confirm() {
     setPending(true);
+    setError(null);
     try {
       const iso = draftAt ? new Date(draftAt).toISOString() : new Date().toISOString();
       const res = await fetch("/api/batch-app-listing", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ batchId, appListedAt: iso }),
+        body: JSON.stringify({ batchId: data.batchId, appListedAt: iso }),
       });
       if (!res.ok) throw new Error(await res.text());
       onSaved();
     } catch (e) {
-      alert(`Could not save: ${e instanceof Error ? e.message : String(e)}`);
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setPending(false);
     }
   }
 
+  // Esc closes the modal — mirrors the standard dialog convention.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, pending]);
+
+  const title = mode === "edit" ? "✎ Edit App Listing timestamp" : "📱 Mark as listed";
+  const ctaLabel = mode === "edit" ? "✓ Update timestamp" : "📱 Mark as listed";
+
   return (
-    <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md
-                    border border-brand bg-brand-pastel/30"
-         role="group" aria-label="App Listing timestamp">
-      <span aria-hidden="true" className="text-xs">📱</span>
-      <input
-        type="datetime-local"
-        className="input text-xs py-1 px-1.5"
-        value={draftAt}
-        onChange={(e) => setDraftAt(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && draftAt && !pending) confirm();
-          if (e.key === "Escape") onCancel();
-        }}
-        disabled={pending}
-        autoFocus
-        aria-label="Listing timestamp"
-      />
-      <button
-        type="button"
-        onClick={confirm}
-        disabled={pending || !draftAt}
-        className="text-xs font-semibold px-2 py-1 rounded
-                   bg-brand text-white border border-brand
-                   hover:bg-brand-dark transition-colors disabled:opacity-50"
-      >
-        {pending ? "…" : "✓ Confirm"}
-      </button>
-      <button
-        type="button"
-        onClick={onCancel}
-        disabled={pending}
-        className="text-xs font-medium px-2 py-1 rounded
-                   border border-ink-200 text-ink-600
-                   hover:bg-ink-50 transition-colors"
-      >
-        Cancel
-      </button>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="app-listing-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center px-4
+                 bg-midnight/60 backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !pending) onClose();
+      }}
+    >
+      <div className="w-full max-w-md bg-white rounded-lg shadow-2xl border-2 border-brand">
+        <div className="bg-brand-pastel border-b-2 border-brand px-5 py-3 rounded-t-md">
+          <h3 id="app-listing-modal-title" className="text-xl font-bold text-brand-dark">
+            {title}
+          </h3>
+          <p className="text-xs text-ink-600 mt-0.5">
+            {data.batchCode} · {data.quantity}× {data.modelYear}
+          </p>
+        </div>
+
+        <div className="px-5 py-4 space-y-3">
+          <label className="block">
+            <span className="block text-xs font-medium text-ink-600 mb-1">
+              Listing date &amp; time
+              <span className="text-[0.65rem] font-normal text-ink-500 ml-1.5">
+                (when cars first went live in the app)
+              </span>
+            </span>
+            <input
+              type="datetime-local"
+              className="input tabular-nums"
+              value={draftAt}
+              onChange={(e) => setDraftAt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && draftAt && !pending) confirm();
+              }}
+              disabled={pending}
+              autoFocus
+            />
+            <span className="block text-[0.65rem] text-ink-500 mt-1">
+              Defaults to now. Backdate if cars were already listed earlier.
+            </span>
+          </label>
+
+          {error && (
+            <p role="alert" className="text-sm text-flame-dark">{error}</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-3 bg-ink-50 rounded-b-md border-t border-ink-200">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={pending}
+            className="btn text-sm"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={pending || !draftAt}
+            className="text-sm font-semibold px-4 py-2 rounded-md text-white
+                       bg-brand hover:bg-brand-dark disabled:opacity-50
+                       border border-brand"
+          >
+            {pending ? "Saving…" : ctaLabel}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
