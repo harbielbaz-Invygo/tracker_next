@@ -109,6 +109,16 @@ function fromIsoForPeriod(period: ReportPeriod): string | null {
   return new Date(d.getTime() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
+function emptyClosureSummary(): ClosureSummary {
+  return {
+    totalBatches: 0, totalQuantity: 0,
+    listed: 0, carsListed: 0, carsListedConfirmed: 0, carsListedForecastOnly: 0,
+    delivered: 0, carsDelivered: 0,
+    partlyDelivered: 0, carsPartlyDelivered: 0, carsPartlyRequested: 0,
+    cancelled: 0, carsCancelled: 0,
+  };
+}
+
 async function getClosureSummary(period: ReportPeriod): Promise<ClosureSummary> {
   const fromIso = fromIsoForPeriod(period);
   const baseQuery = db
@@ -123,9 +133,24 @@ async function getClosureSummary(period: ReportPeriod): Promise<ClosureSummary> 
     })
     .from(batches);
 
-  const rows = fromIso
-    ? await baseQuery.where(or(gte(batches.closedAt, fromIso), isNull(batches.closedAt)))
-    : await baseQuery;
+  // Defensive: every column above except `lifecycleState` was on
+  // batches before PR 1, so this won't fail in normal operation. Kept
+  // wrapped so a fresh-clone dev still loads the page even if the
+  // schema hasn't been pushed yet.
+  let rows: Awaited<typeof baseQuery>;
+  try {
+    rows = await (fromIso
+      ? baseQuery.where(or(gte(batches.closedAt, fromIso), isNull(batches.closedAt)))
+      : baseQuery);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table|no such column/i.test(msg)) {
+      // eslint-disable-next-line no-console
+      console.warn("[insights-data] closure summary skipped — schema not migrated.");
+      return emptyClosureSummary();
+    }
+    throw err;
+  }
 
   const totalBatches = rows.length;
   const totalQuantity = rows.reduce((acc, r) => acc + (r.quantity ?? 0), 0);
@@ -144,23 +169,33 @@ async function getClosureSummary(period: ReportPeriod): Promise<ClosureSummary> 
     .filter((r) => r.appListedAt != null && r.lifecycleState === "post_po")
     .reduce((acc, r) => acc + (r.quantity ?? 0), 0);
 
-  const prePoActionType = (await db.select({ id: actionTypes.id })
-    .from(actionTypes).where(eq(actionTypes.name, "Pre-PO App Listing")).limit(1))[0];
+  // Wrapped — the action_types table is old, but the row "Pre-PO App
+  // Listing" may not be seeded yet. Either case, default carsListedForecastOnly
+  // to 0 and keep loading the page.
   let carsListedForecastOnly = 0;
-  if (prePoActionType) {
-    const forecastListed = await db
-      .select({
-        batchId:  batches.id,
-        quantity: batches.requestedQuantity,
-      })
-      .from(batchActions)
-      .innerJoin(batches, eq(batches.id, batchActions.batchId))
-      .where(and(
-        eq(batchActions.actionTypeId, prePoActionType.id),
-        eq(batchActions.status, "done"),
-        eq(batches.lifecycleState, "pre_po"),
-      ));
-    carsListedForecastOnly = forecastListed.reduce((acc, r) => acc + (r.quantity ?? 0), 0);
+  try {
+    const prePoActionType = (await db.select({ id: actionTypes.id })
+      .from(actionTypes).where(eq(actionTypes.name, "Pre-PO App Listing")).limit(1))[0];
+    if (prePoActionType) {
+      const forecastListed = await db
+        .select({
+          batchId:  batches.id,
+          quantity: batches.requestedQuantity,
+        })
+        .from(batchActions)
+        .innerJoin(batches, eq(batches.id, batchActions.batchId))
+        .where(and(
+          eq(batchActions.actionTypeId, prePoActionType.id),
+          eq(batchActions.status, "done"),
+          eq(batches.lifecycleState, "pre_po"),
+        ));
+      carsListedForecastOnly = forecastListed.reduce((acc, r) => acc + (r.quantity ?? 0), 0);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such table|no such column/i.test(msg)) throw err;
+    // eslint-disable-next-line no-console
+    console.warn("[insights-data] Pre-PO listing lookup skipped — schema not migrated.");
   }
 
   const delivered = rows.filter((r) => r.closureReason === "delivered").length;
@@ -210,9 +245,25 @@ async function getForecastReliability(period: ReportPeriod): Promise<ForecastRel
     .innerJoin(batches, eq(batches.id, batchForecasts.batchId))
     .innerJoin(users,   eq(users.id,   batchForecasts.submittedByUserId));
 
-  const rows = fromIso
-    ? await baseQuery.where(gte(batchForecasts.submittedAt, fromIso))
-    : await baseQuery;
+  // Defensive: batch_forecasts is new in PR 1. If the migration didn't
+  // apply (or columns are missing), return [] so Insights still loads.
+  let rows: Awaited<typeof baseQuery>;
+  try {
+    rows = await (fromIso
+      ? baseQuery.where(gte(batchForecasts.submittedAt, fromIso))
+      : baseQuery);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table|no such column/i.test(msg)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[insights-data] Forecast reliability skipped — batch_forecasts " +
+        "table or new columns missing. Run `npm run db:push`.",
+      );
+      return [];
+    }
+    throw err;
+  }
 
   type Acc = {
     name: string;
