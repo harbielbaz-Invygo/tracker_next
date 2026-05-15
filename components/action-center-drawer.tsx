@@ -663,12 +663,6 @@ function DrawerHeader({
             )}
           </h2>
 
-          {/* Batch name — the full slug, explicitly labelled. */}
-          <p className="text-xs text-ink-600 flex flex-wrap items-baseline gap-x-2">
-            <span className="font-medium text-midnight">🏷️ Batch name:</span>
-            <span className="font-mono text-midnight">{data.batchCode}</span>
-          </p>
-
           {/* Model + year — body-text size, matches the Dealer line below. */}
           <p className="text-xs text-ink-600 flex flex-wrap items-baseline gap-x-2">
             <span className="font-medium text-midnight">🛠️ Model:</span>
