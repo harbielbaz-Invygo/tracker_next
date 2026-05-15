@@ -89,20 +89,15 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
     alertsByActionId.set(a.actionId, arr);
   }
 
-  // Two prominent actions are promoted out of the generic action list
-  // into their own dedicated panels: App Listing (top of drawer, Phase D)
-  // and Delivery (bottom, Phase E). Resolve both rows here so we can
-  // render the panels with the right state AND filter them out of the
-  // ActionsList below. Name matches are case-insensitive so renamed
-  // action_types still resolve.
-  const appListingAction = data.actions.find((a) =>
-    a.actionTypeName.toLowerCase().includes("app listing"),
-  );
+  // Delivery is the only action_type still promoted into a dedicated
+  // panel (closing gate). App Listing used to live here too, but it's
+  // been decoupled into its own first-class column (`batches.appListedAt`)
+  // so admin can't break it via Settings rename/delete. The panel
+  // reads/writes that column directly via /api/batch-app-listing.
   const deliveryAction = data.actions.find(
     (a) => a.actionTypeName.toLowerCase() === "delivery",
   );
   const excludedIds = new Set<number>();
-  if (appListingAction) excludedIds.add(appListingAction.id);
   if (deliveryAction)   excludedIds.add(deliveryAction.id);
   const actionsForList = excludedIds.size > 0
     ? data.actions.filter((a) => !excludedIds.has(a.id))
@@ -148,9 +143,8 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
           <BatchAlertsStrip alerts={batchLevelAlerts} />
         )}
         <AppListingPanel
-          action={appListingAction ?? null}
           batchId={data.batchId}
-          appListingActionTypeId={data.appListingActionTypeId}
+          appListedAt={data.appListedAt}
           onMutated={() => { refresh(); onMutation?.(); }}
           disabled={!!data.closedAt}
         />
@@ -201,14 +195,11 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
  *     edit mode for adjustments.
  */
 function AppListingPanel({
-  action, batchId, appListingActionTypeId, onMutated, disabled,
+  batchId, appListedAt, onMutated, disabled,
 }: {
-  /** Existing batch_action row when the action was already attached at intake. */
-  action: ActionDetail | null;
-  /** Needed for the upsert path when `action` is null. */
   batchId: number;
-  /** action_types.id resolved server-side; null if no "App Listing" type exists. */
-  appListingActionTypeId: number | null;
+  /** ISO datetime read from `batches.app_listed_at`. Null = not yet listed. */
+  appListedAt: string | null;
   onMutated: () => void;
   disabled: boolean;
 }) {
@@ -216,26 +207,16 @@ function AppListingPanel({
   const [draftAt, setDraftAt] = useState<string>("");
   const [pending, setPending] = useState(false);
 
-  // Reset edit state when the selected batch changes (drawer reuses the
-  // component but `action.id` / batchId shifts).
+  // Reset edit state when the selected batch changes.
   useEffect(() => {
     setEditing(false);
     setDraftAt("");
-  }, [action?.id, batchId]);
+  }, [batchId]);
 
-  // Defensive: if no App Listing action_type exists in the catalogue
-  // AND no batch_action is attached, there's no way to mark the
-  // milestone — quietly hide the panel to keep the drawer clean.
-  // (Admin would need to add an App Listing action_type in Settings →
-  // Action Types to bring the panel back.)
-  if (!action && appListingActionTypeId == null) {
-    return null;
-  }
-
-  const isDone = action?.status === "done";
+  const isDone = !!appListedAt;
 
   function openEdit() {
-    const seed = isDone && action?.completedAt ? action.completedAt : new Date().toISOString();
+    const seed = isDone && appListedAt ? appListedAt : new Date().toISOString();
     // datetime-local wants "YYYY-MM-DDTHH:MM" in LOCAL time (no offset).
     const d = new Date(seed);
     if (!Number.isNaN(d.getTime())) {
@@ -246,38 +227,18 @@ function AppListingPanel({
   }
 
   /**
-   * One-click "mark as listed" — used by the prominent CTA. Defaults
-   * the timestamp to NOW (matches the Mark-as-delivered button which
-   * opens a modal but defaults to today). If ops needs to backdate
-   * they can edit the timestamp afterwards via the ✎ Edit button.
-   *
-   * Two paths converge here:
-   *   • action exists  → POST batchActionId + newStatus="done" (same
-   *     as the existing flow)
-   *   • action absent  → POST op="upsert_done" with the resolved
-   *     action_type id → server creates the batch_action AND marks
-   *     it done in one transaction
+   * Set or update `batches.app_listed_at`. One round-trip, no
+   * action_type involvement. Same UX shape as Mark as Delivered:
+   * defaults to NOW; ops can backdate via the "Pick time" affordance.
    */
   async function markListed(timestampIso?: string) {
     setPending(true);
     try {
-      const completedIso = timestampIso ?? new Date().toISOString();
-      const body = action
-        ? {
-            batchActionId:  action.id,
-            newStatus:      "done",
-            newCompletedAt: completedIso,
-          }
-        : {
-            op:             "upsert_done",
-            batchId,
-            actionTypeId:   appListingActionTypeId,
-            newCompletedAt: completedIso,
-          };
-      const res = await fetch("/api/batch-action", {
+      const iso = timestampIso ?? new Date().toISOString();
+      const res = await fetch("/api/batch-app-listing", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ batchId, appListedAt: iso }),
       });
       if (!res.ok) throw new Error(await res.text());
       setEditing(false);
@@ -301,7 +262,7 @@ function AppListingPanel({
           <p className="text-[0.7rem] text-ink-600 mt-0.5">
             ✅ Cars listed in app
             <span className="ml-1 font-medium tabular-nums">
-              · {action?.completedAt ? fmtLocalDateTime(action.completedAt) : "—"}
+              · {appListedAt ? fmtLocalDateTime(appListedAt) : "—"}
             </span>
           </p>
         </div>
