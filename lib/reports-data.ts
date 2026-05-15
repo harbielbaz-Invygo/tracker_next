@@ -214,6 +214,17 @@ export interface PerformanceReport {
    * — the lens is most useful once Phase β has been running for a while.
    */
   cityReliability: CityReliabilityRow[];
+  /**
+   * On-time delivery rate trend, weekly buckets for the last 12 weeks
+   * (oldest first). Each bucket: { weekStart, rate (0-100 or null),
+   * deliveredCount }. Powers the sparkline next to the hero rate card
+   * on the Reports page.
+   *
+   * `rate` is null when no batches were delivered in that week (don't
+   * skip the bucket — keep the weekly cadence so the spark renders at
+   * consistent width).
+   */
+  onTimeRateWeekly: { weekStart: string; rate: number | null; deliveredCount: number }[];
 }
 
 /**
@@ -496,6 +507,49 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
       else deliveredOnTime++;
     }
   }
+
+  // ── On-time rate trend — weekly buckets, last 12 weeks ────────────
+  // For every batch that was DELIVERED (closureReason="delivered"),
+  // bucket by the week of its closedAt date and compute the on-time
+  // rate within that week. Cancelled batches don't count toward the
+  // trend (they weren't delivered at all). Open batches don't count
+  // either (the trend measures realised outcomes).
+  //
+  // 12 weeks is enough to see a quarter-scale trend without flattening
+  // out per-week variation into a single average. Empty weeks render
+  // as gaps in the sparkline.
+  const onTimeRateWeekly = (() => {
+    const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+    // Week start = the most recent Monday on or before today, then
+    // step backwards in 7-day chunks. Using local-midnight to keep
+    // bucket boundaries readable in the UI.
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const dayOfWeek = today.getDay(); // 0 = Sunday, 1 = Monday, ...
+    const daysSinceMonday = (dayOfWeek + 6) % 7; // 0 if Monday, 6 if Sunday
+    const thisWeekStart = new Date(today.getTime() - daysSinceMonday * 24 * 60 * 60 * 1000);
+    const buckets: { weekStart: string; rate: number | null; deliveredCount: number }[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const weekStartMs = thisWeekStart.getTime() - i * WEEK_MS;
+      const weekEndMs   = weekStartMs + WEEK_MS;
+      let onTime = 0;
+      let late = 0;
+      for (const b of allBatches) {
+        if (!b.closedAt || b.closureReason !== "delivered") continue;
+        const ts = new Date(b.closedAt + "T12:00:00Z").getTime();
+        if (ts < weekStartMs || ts >= weekEndMs) continue;
+        if (b.closedAt > b.promisedDate) late++;
+        else onTime++;
+      }
+      const delivered = onTime + late;
+      buckets.push({
+        weekStart: new Date(weekStartMs).toISOString().slice(0, 10),
+        rate: delivered > 0 ? Math.round((onTime / delivered) * 100) : null,
+        deliveredCount: delivered,
+      });
+    }
+    return buckets;
+  })();
 
   // ── Dealer reliability aggregation ─────────────────────────────────
 
@@ -825,5 +879,6 @@ export async function getPerformanceReport(): Promise<PerformanceReport> {
     dealerReliability,
     customerImpact,
     cityReliability,
+    onTimeRateWeekly,
   };
 }

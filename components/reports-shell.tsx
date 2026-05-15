@@ -46,6 +46,7 @@ export default function ReportsShell({ report }: Props) {
           rate={onTimeRate}
           onTimeCount={totals.deliveredOnTime}
           totalDelivered={totals.deliveredOnTime + totals.deliveredLate}
+          weekly={report.onTimeRateWeekly}
         />
         {/* Secondary tier — context counts, compact pills. */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -280,14 +281,16 @@ function DeltaArrow({
 /**
  * Hero card for the on-time delivery rate — the single most important
  * number on the Reports page. Big tabular digit, tone-coloured border,
- * sub-line shows the underlying counts.
+ * sub-line shows the underlying counts, and an inline 12-week
+ * sparkline showing how the rate has been trending.
  */
 function OnTimeRateHero({
-  rate, onTimeCount, totalDelivered,
+  rate, onTimeCount, totalDelivered, weekly,
 }: {
   rate: number | null;
   onTimeCount: number;
   totalDelivered: number;
+  weekly: { weekStart: string; rate: number | null; deliveredCount: number }[];
 }) {
   if (rate === null) {
     return (
@@ -310,18 +313,108 @@ function OnTimeRateHero({
     warn:  "border-l-gold  bg-gold-pale/30  text-gold-dark",
     alert: "border-l-flame bg-flame-pale/30 text-flame-dark",
   }[tone];
+  const strokeColor = {
+    ok:    "#5C8A2B",  // green-dark
+    warn:  "#A87600",  // gold-dark
+    alert: "#A04600",  // flame-dark
+  }[tone];
   return (
     <div className={cn("card border-l-4 px-5 py-4 flex flex-col gap-1", accent.split(" ").slice(0, 2).join(" "))}>
-      <span className="text-xs font-semibold uppercase tracking-wide text-ink-600">
-        On-time delivery rate
-      </span>
-      <span className={cn("text-5xl font-bold tabular-nums leading-none", accent.split(" ").slice(2).join(" "))}>
-        {rate}%
-      </span>
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <span className="text-xs font-semibold uppercase tracking-wide text-ink-600 block">
+            On-time delivery rate
+          </span>
+          <span className={cn("text-5xl font-bold tabular-nums leading-none mt-1 inline-block", accent.split(" ").slice(2).join(" "))}>
+            {rate}%
+          </span>
+        </div>
+        <Sparkline values={weekly.map((w) => w.rate)} stroke={strokeColor} />
+      </div>
       <span className="text-xs text-ink-500 mt-1">
-        {onTimeCount} on time of {totalDelivered} delivered
+        {onTimeCount} on time of {totalDelivered} delivered · last 12 weeks trend ↗
       </span>
     </div>
+  );
+}
+
+/**
+ * Tiny SVG sparkline. `values` is the series — null entries render as
+ * gaps in the line (no point drawn, segment skipped). Normalises to
+ * the [0, 100] range since the only caller today is the on-time rate
+ * (a percentage). 96×24 viewbox keeps it compact next to the hero
+ * digit; render bigger by passing wider className.
+ */
+function Sparkline({
+  values, stroke, className,
+}: {
+  values: (number | null)[];
+  stroke: string;
+  className?: string;
+}) {
+  const W = 96;
+  const H = 24;
+  const PAD = 2;
+  const innerW = W - PAD * 2;
+  const innerH = H - PAD * 2;
+  // Fixed 0-100 domain — these are rate percentages.
+  const yFor = (v: number) => PAD + innerH - (v / 100) * innerH;
+  const xFor = (i: number) => PAD + (values.length <= 1 ? 0 : (i / (values.length - 1)) * innerW);
+
+  // Build the polyline path. Skip null entries — they break the line
+  // (start a new subpath after each gap).
+  let d = "";
+  let onPath = false;
+  values.forEach((v, i) => {
+    if (v === null) { onPath = false; return; }
+    d += `${onPath ? " L" : "M"}${xFor(i).toFixed(1)} ${yFor(v).toFixed(1)}`;
+    onPath = true;
+  });
+
+  // Marker dots on non-null points so isolated weeks (one bucket
+  // surrounded by gaps) still register visually.
+  const dots = values
+    .map((v, i) => v === null ? null : { x: xFor(i), y: yFor(v) })
+    .filter((p): p is { x: number; y: number } => p !== null);
+
+  // If the whole series is null, render an empty SVG (keeps layout
+  // stable) plus a tiny "no data" hint.
+  if (dots.length === 0) {
+    return (
+      <span className={cn("text-[0.6rem] text-ink-400 italic", className)}>
+        no trend yet
+      </span>
+    );
+  }
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      width={W}
+      height={H}
+      className={cn("shrink-0", className)}
+      aria-label="12-week trend"
+      role="img"
+    >
+      {/* baseline at 50% — visual anchor */}
+      <line
+        x1={PAD} y1={yFor(50)}
+        x2={W - PAD} y2={yFor(50)}
+        stroke="#E5E7EB"
+        strokeDasharray="2 2"
+      />
+      <path
+        d={d}
+        fill="none"
+        stroke={stroke}
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      {dots.map((p, i) => (
+        <circle key={i} cx={p.x} cy={p.y} r={1.5} fill={stroke} />
+      ))}
+    </svg>
   );
 }
 
