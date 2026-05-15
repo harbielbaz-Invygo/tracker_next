@@ -126,15 +126,13 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
         data={data}
         onClosed={() => { refresh(); onMutation?.(); }}
         onShifted={() => { refresh(); onMutation?.(); }}
+        onAppListed={() => { refresh(); onMutation?.(); }}
+        onDelivered={() => { refresh(); onMutation?.(); }}
       />
-      {/* Drawer body — everything below the header shares the same
-          vertical rhythm (`space-y-6` = 24px) as the two cluster
-          sections do internally. Order:
-            1. Optional banners: closed / batch alerts / recommend-shift
-            2. App Listing  (status panel)
-            3. Car Delivery (closing action, surfaces FIRST when open)
-            4. VIN chase + Internal phase clusters (inside ActionsList)
-          Ops Confidence row removed for now per ops feedback. */}
+      {/* Drawer body — banners + action clusters. The four top-level
+          actions (Mark as listed, Shift, Cancel, Mark as delivered)
+          all live in the unified DrawerHeader above; this body is
+          just contextual banners + the work clusters. */}
       <div className="space-y-6">
         {data.closedAt && data.closureReason ? (
           <ClosedBanner data={data} />
@@ -142,23 +140,11 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
         {batchLevelAlerts.length > 0 && (
           <BatchAlertsStrip alerts={batchLevelAlerts} />
         )}
-        <AppListingPanel
-          batchId={data.batchId}
-          appListedAt={data.appListedAt}
-          onMutated={() => { refresh(); onMutation?.(); }}
-          disabled={!!data.closedAt}
-        />
         {showRecommendShift && (
           <RecommendShiftBanner
             data={data}
             recommendedDate={recommendedDate}
             onShifted={() => { refresh(); onMutation?.(); }}
-          />
-        )}
-        {!data.closedAt && (
-          <CarDeliveryPanel
-            data={data}
-            onDelivered={() => { refresh(); onMutation?.(); }}
           />
         )}
         <ActionsList
@@ -174,27 +160,13 @@ export default function ActionCenterDrawer({ batchCode, onMutation, layout = "ve
   );
 }
 
-// ──────────────────────────────────────────────────────────────────
-// App Listing — prominent drawer panel
-// ──────────────────────────────────────────────────────────────────
-//
-// Phase D: the App Listing action is the single most important
-// moment in the customer-visible journey — once cars are listed,
-// pre-bookings can start. Pulling it out of the action list into
-// a dedicated panel near the top of the drawer reflects that
-// status. The corresponding action_list row is filtered out by
-// the parent so it doesn't render twice.
+// AppListingPanel was removed in the unified-header redesign. The
+// Mark-as-listed affordance now lives directly in DrawerHeader's
+// action bar (alongside Shift / Cancel / Mark as delivered), with
+// an inline datetime picker via AppListingInlineForm. Done state
+// renders as a compact green chip in the same bar.
 
-/**
- * Two states:
- *   • not done → primary CTA, datetime input pre-filled with now (ops
- *     can backdate). Submit fires POST /api/batch-action with newStatus
- *     "done" and a custom completedAt.
- *   • done     → status banner ("✅ Cars listed in app · 2026-05-13 14:32")
- *     with an "Edit timestamp" button that swaps the panel back into
- *     edit mode for adjustments.
- */
-function AppListingPanel({
+function _DEAD_AppListingPanel_DELETE_ME({
   batchId, appListedAt, onMutated, disabled,
 }: {
   batchId: number;
@@ -453,7 +425,7 @@ function BatchAlertsStrip({
 // qty + colour data, marks the Delivery action done, and the drawer's
 // existing ClosedBanner takes over for the post-closure state.
 
-function CarDeliveryPanel({
+function _DEAD_CarDeliveryPanel_DELETE_ME({
   data, onDelivered,
 }: {
   data: DrawerData;
@@ -814,76 +786,165 @@ function ClosedBanner({ data }: { data: DrawerData }) {
 // ──────────────────────────────────────────────────────────────────
 
 function DrawerHeader({
-  data, onClosed, onShifted,
+  data, onClosed, onShifted, onAppListed, onDelivered,
 }: {
   data: DrawerData;
   onClosed: () => void;
   onShifted: () => void;
+  onAppListed: () => void;
+  onDelivered: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [shifting, setShifting] = useState(false);
+  const [delivering, setDelivering] = useState(false);
+  // App Listing has three states:
+  //   false   = idle (button or status pill)
+  //   "new"   = inline picker open to set the initial timestamp
+  //   "edit"  = inline picker open to edit an existing timestamp
+  const [appListingForm, setAppListingForm] = useState<false | "new" | "edit">(false);
   const isClosed = !!data.closedAt;
+  const isListed = !!data.appListedAt;
 
   return (
-    <div className="flex flex-wrap items-baseline justify-between gap-3 mb-6">
-      <div>
-        <h2 className="text-lg font-bold text-midnight">
-          🛠️ {data.modelYear}
-          <code className="ml-2 text-sm font-mono font-medium text-ink-600">{data.batchCode}</code>
-        </h2>
-        <p className="text-xs text-ink-500 mt-0.5">
-          <span className="tabular-nums">{data.quantity}×</span>
-          <Sep />
-          <span>{data.dealerName}</span>
-          <Sep />
-          <span className="uppercase tracking-wide">
-            {data.lifecycleState === "pre_po" ? "Pre-PO" : "Post-PO"}
-          </span>
+    <div className="mb-6 pb-5 border-b border-ink-100">
+      {/* PO code — the primary headline. Mono font, prominent. */}
+      <p className="text-base font-mono font-semibold text-midnight tracking-tight">
+        {data.batchCode}
+      </p>
+
+      {/* Model + year — secondary identifier under the PO code. */}
+      <h2 className="text-base font-semibold text-ink-700 mt-1 flex items-center gap-2">
+        <span aria-hidden="true">🛠️</span>
+        {data.modelYear}
+      </h2>
+
+      {/* Quantity · dealer · lifecycle */}
+      <p className="text-xs text-ink-500 mt-1">
+        <span className="tabular-nums">{data.quantity}×</span>
+        <Sep />
+        <span>{data.dealerName}</span>
+        <Sep />
+        <span className="uppercase tracking-wide">
+          {data.lifecycleState === "pre_po" ? "Pre-PO" : "Post-PO"}
+        </span>
+      </p>
+
+      {/* Multi-city legs breakdown */}
+      {data.legs.length > 1 && (
+        <p className="text-[0.7rem] text-ink-500 mt-1 flex flex-wrap gap-x-2">
+          <span className="font-medium text-midnight">🚚 {data.legs.length} legs:</span>
+          {data.legs.map((leg, i) => (
+            <span key={leg.id} className="tabular-nums">
+              {leg.city} ({leg.requestedQuantity}
+              {leg.deliveredQuantity > 0 && (
+                <> · {leg.deliveredQuantity} delivered</>
+              )})
+              {i < data.legs.length - 1 && <span className="text-ink-400 ml-1">·</span>}
+            </span>
+          ))}
         </p>
-        {/* Multi-city batches (Phase α/β grouping) — show per-leg
-            breakdown so ops sees where the cars are going at a glance. */}
-        {data.legs.length > 1 && (
-          <p className="text-[0.7rem] text-ink-500 mt-1 flex flex-wrap gap-x-2">
-            <span className="font-medium text-midnight">🚚 {data.legs.length} legs:</span>
-            {data.legs.map((leg, i) => (
-              <span key={leg.id} className="tabular-nums">
-                {leg.city} ({leg.requestedQuantity}
-                {leg.deliveredQuantity > 0 && (
-                  <> · {leg.deliveredQuantity} delivered</>
-                )})
-                {i < data.legs.length - 1 && <span className="text-ink-400 ml-1">·</span>}
-              </span>
-            ))}
-          </p>
-        )}
-        {/* Availability dates — the two numbers ops actually navigate by.
-            "PO" is the locked dealer-promised date (the contract).
-            "Ops" is the working projection (mutated by the shift modal).
-            The signed delta is colour-coded to match the status chip. */}
-        <AvailabilityDatesLine data={data} />
-      </div>
+      )}
+
+      {/* Availability dates — important info ops navigates by. */}
+      <AvailabilityDatesLine data={data} />
+
+      {/* Unified action bar — all top-level batch actions on one row.
+          Layout: 3 secondary buttons left-aligned (📱 Mark as listed,
+          📅 Shift date, 🚫 Cancel batch), spacer pushes the primary
+          🚚 Mark as delivered to the right. Secondary buttons are
+          equal size; primary is bolder + larger to draw the eye.
+          When the batch is closed everything is hidden — the
+          ClosedBanner below carries the final state. */}
       {!isClosed && (
-        <div className="flex items-center gap-2">
+        <div className="mt-4 flex items-center gap-2 flex-wrap">
+          {/* Mark as listed — three render modes (listed, editing, idle). */}
+          {appListingForm !== false ? (
+            <AppListingInlineForm
+              batchId={data.batchId}
+              initialAt={
+                appListingForm === "edit" && data.appListedAt
+                  ? data.appListedAt
+                  : null
+              }
+              onSaved={() => {
+                setAppListingForm(false);
+                onAppListed();
+              }}
+              onCancel={() => setAppListingForm(false)}
+            />
+          ) : isListed ? (
+            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
+                            bg-green-pale border border-green/40
+                            text-xs font-medium text-green-dark">
+              <span aria-hidden="true">📱</span>
+              <span>Listed · </span>
+              <span className="tabular-nums">
+                {data.appListedAt ? fmtLocalDateTime(data.appListedAt) : "—"}
+              </span>
+              <button
+                type="button"
+                onClick={() => setAppListingForm("edit")}
+                className="ml-1 text-green-dark hover:text-midnight"
+                title="Edit listing timestamp"
+                aria-label="Edit listing timestamp"
+              >
+                ✎
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAppListingForm("new")}
+              className="text-xs font-medium px-3 py-1.5 rounded-md
+                         border border-brand text-brand-dark
+                         bg-white hover:bg-brand-pastel transition-colors"
+              title="Mark cars as listed in the app. Defaults to now; you can pick a different time."
+            >
+              📱 Mark as listed
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => setShifting(true)}
-            className="text-xs font-medium px-3 py-1.5 rounded-md border border-gold text-gold-dark
+            className="text-xs font-medium px-3 py-1.5 rounded-md
+                       border border-gold text-gold-dark
                        bg-white hover:bg-gold-pale transition-colors"
             title="Shift the projected availability date — captures bookings + reason"
           >
             📅 Shift availability date
           </button>
+
           <button
             type="button"
             onClick={() => setConfirming(true)}
-            className="text-xs font-medium px-3 py-1.5 rounded-md border border-flame text-flame-dark
+            className="text-xs font-medium px-3 py-1.5 rounded-md
+                       border border-flame text-flame-dark
                        bg-white hover:bg-flame-pale transition-colors"
-            title="Cancel this batch — Ops can no longer update its actions"
+            title="Cancel this batch — destructive. Ops can no longer update its actions."
           >
             🚫 Cancel batch
           </button>
+
+          {/* Push the primary action to the right edge so it visually
+              stands apart from the secondary buttons. */}
+          <span className="flex-1 min-w-0" aria-hidden="true" />
+
+          <button
+            type="button"
+            onClick={() => setDelivering(true)}
+            className="text-sm font-semibold px-4 py-2 rounded-md
+                       bg-green-dark text-white border border-green-dark
+                       hover:bg-green transition-colors
+                       shadow-sm"
+            title="Mark this batch delivered — opens the qty + colours confirmation"
+          >
+            🚚 Mark as delivered
+          </button>
         </div>
       )}
+
+      {/* Modals — same triggers, just consolidated up here. */}
       {confirming && (
         <CancelModal
           data={data}
@@ -904,6 +965,103 @@ function DrawerHeader({
           }}
         />
       )}
+      {delivering && (
+        <CarDeliveryModal
+          data={data}
+          onClose={() => setDelivering(false)}
+          onDelivered={() => {
+            setDelivering(false);
+            onDelivered();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Inline App Listing time picker — appears in place of the
+ * "📱 Mark as listed" button when clicked. Pre-fills with NOW
+ * (or the existing timestamp when editing). One Enter / Confirm
+ * click → POST /api/batch-app-listing. Designed for the fast
+ * path: ops rarely needs to backdate, but the input is right
+ * there if they do.
+ */
+function AppListingInlineForm({
+  batchId, initialAt, onSaved, onCancel,
+}: {
+  batchId: number;
+  /** ISO datetime for edit mode, or null for first-time mark (defaults to now). */
+  initialAt: string | null;
+  onSaved: () => void;
+  onCancel: () => void;
+}) {
+  // datetime-local format (LOCAL time, no offset): "YYYY-MM-DDTHH:MM"
+  const seed = (() => {
+    const d = new Date(initialAt ?? new Date().toISOString());
+    if (Number.isNaN(d.getTime())) return "";
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  })();
+  const [draftAt, setDraftAt] = useState(seed);
+  const [pending, setPending] = useState(false);
+
+  async function confirm() {
+    setPending(true);
+    try {
+      const iso = draftAt ? new Date(draftAt).toISOString() : new Date().toISOString();
+      const res = await fetch("/api/batch-app-listing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batchId, appListedAt: iso }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onSaved();
+    } catch (e) {
+      alert(`Could not save: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md
+                    border border-brand bg-brand-pastel/30"
+         role="group" aria-label="App Listing timestamp">
+      <span aria-hidden="true" className="text-xs">📱</span>
+      <input
+        type="datetime-local"
+        className="input text-xs py-1 px-1.5"
+        value={draftAt}
+        onChange={(e) => setDraftAt(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && draftAt && !pending) confirm();
+          if (e.key === "Escape") onCancel();
+        }}
+        disabled={pending}
+        autoFocus
+        aria-label="Listing timestamp"
+      />
+      <button
+        type="button"
+        onClick={confirm}
+        disabled={pending || !draftAt}
+        className="text-xs font-semibold px-2 py-1 rounded
+                   bg-brand text-white border border-brand
+                   hover:bg-brand-dark transition-colors disabled:opacity-50"
+      >
+        {pending ? "…" : "✓ Confirm"}
+      </button>
+      <button
+        type="button"
+        onClick={onCancel}
+        disabled={pending}
+        className="text-xs font-medium px-2 py-1 rounded
+                   border border-ink-200 text-ink-600
+                   hover:bg-ink-50 transition-colors"
+      >
+        Cancel
+      </button>
     </div>
   );
 }
