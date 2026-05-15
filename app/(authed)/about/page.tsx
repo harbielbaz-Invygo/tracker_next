@@ -54,6 +54,97 @@ const PAGE_SUMMARIES: { view: ViewName; href: string; what: string; who: string 
   },
 ];
 
+const GLOSSARY: { group: string; terms: { term: string; def: string }[] }[] = [
+  {
+    group: "Entities",
+    terms: [
+      { term: "PO",
+        def: "Purchase Order. A dealer document committing to a number of cars at agreed terms. One PO usually produces multiple batches." },
+      { term: "Batch",
+        def: "A slice of a PO with shared (model, year, commercial terms, delivery date). The unit of work everywhere in this tool — every status, action, and date is per-batch." },
+      { term: "Dealer",
+        def: "The trade partner issuing the PO. Their reliability is tracked across all batches in the Insights → Trust → Dealer Reliability tab." },
+      { term: "Leg",
+        def: "A per-city slice of a batch. A 30-car batch delivered to Riyadh / Jeddah / Dammam has three legs. Each leg has its own requested and delivered quantity." },
+    ],
+  },
+  {
+    group: "Lifecycle",
+    terms: [
+      { term: "Pre-PO",
+        def: "The bet phase. We've projected an intake but no PO is signed yet. Partnership confidence is the steering signal." },
+      { term: "Post-PO",
+        def: "The execution phase. PO is signed, the internal action checklist + VIN chase are in motion." },
+      { term: "Internal phase",
+        def: "The sequence of internal actions (Specs, Pricing, SKU, App Listing, …) that must complete before delivery. Configured in Settings → Action Types." },
+      { term: "VIN chase",
+        def: "Sequence of stages from VIN receipt to plate / handover. Decoupled from the internal phase so both can progress in parallel." },
+    ],
+  },
+  {
+    group: "Dates",
+    terms: [
+      { term: "Promised date",
+        def: "Dealer-promised availability date — the line we drew when the PO was signed. Reference for on-time vs delayed." },
+      { term: "Projected date / Ops projection",
+        def: "Ops' current realistic estimate of when the batch will actually be available. Shifts when an action slips; each shift logged as a re-promise." },
+      { term: "Closure date",
+        def: "The day the batch was formally closed — either delivered or cancelled. Stored on `batches.closedAt`." },
+    ],
+  },
+  {
+    group: "Status",
+    terms: [
+      { term: "On track",
+        def: "Projected date == promised date. We're on plan." },
+      { term: "Ahead",
+        def: "Projected date is earlier than promised. We expect to beat the promise." },
+      { term: "Delayed",
+        def: "Projected date is later than promised. Days late = projected − promised." },
+      { term: "Ready to deliver",
+        def: "Every internal action and every VIN chase stage is done or skipped. Just waiting for Mark as Delivered." },
+      { term: "Listed on app",
+        def: "Cars went live in the customer app for the first time. Date captured on `appListedAt`." },
+      { term: "Delivered",
+        def: "Closed with `closureReason='delivered'`. Counts cars that actually reached customers." },
+      { term: "Partly delivered",
+        def: "Some units shipped but not all (deliveredQuantity > 0 and < quantity). Includes in-flight partials and cancelled-after-partial." },
+      { term: "Cancelled",
+        def: "Closed with `closureReason='cancelled'`. Reason captured in a cancellation note." },
+    ],
+  },
+  {
+    group: "Metrics",
+    terms: [
+      { term: "Customer-days lost",
+        def: "North Star. Sum of (days late × cars in batch) across affected batches. The single number that says 'how much pain did slipping cause customers'." },
+      { term: "On-time rate",
+        def: "% of delivered batches that landed on or before promised. Null until the first delivery." },
+      { term: "Re-promises",
+        def: "Count of Ops projection shifts on a batch. Each shift is a date the dealer was told and then walked back from — trust erosion signal." },
+      { term: "Severity",
+        def: "Bucket on customer-days impact: Mild (1–7d), Moderate (8–21d), Severe (>21d). Drives the Customer Impact distribution bars." },
+      { term: "Confidence",
+        def: "Two separate signals: Partnership confidence (Pre-PO bet quality) and Ops confidence (Post-PO execution likelihood). Both 0–100, both visible per batch." },
+    ],
+  },
+  {
+    group: "Configuration",
+    terms: [
+      { term: "Action type",
+        def: "A canonical step in the internal phase (e.g. \"Car Specs Required\"). Each has a waiting label, a done label, and a default department." },
+      { term: "Action dependency",
+        def: "DAG edge: action B is blocked until action A is done. Edited in Settings → Dependencies." },
+      { term: "Department",
+        def: "An owning team (Operations / Partnership / Commercial / …). Drives the Action Center's Department filter and the Trust → Ops Performance table." },
+      { term: "Stakeholder",
+        def: "A named person inside a department. Captures \"who specifically owes this work\". Visible in the Slack status-check message." },
+      { term: "Color matrix",
+        def: "Per-color quantity breakdown captured at intake when the dealer specifies colours. Drives the colour-confirmation table in the Confirm-Delivery modal." },
+    ],
+  },
+];
+
 const TECH_STACK: { name: string; role: string }[] = [
   { name: "Next.js 15 (App Router)", role: "Framework — server components, route handlers, edge middleware" },
   { name: "Drizzle ORM",             role: "Type-safe SQL — schema, migrations, queries" },
@@ -114,6 +205,37 @@ export default function AboutPage() {
               </li>
             ))}
           </ul>
+        </section>
+
+        <section className="card p-0 overflow-hidden">
+          <header className="px-4 py-3 border-b border-ink-200">
+            <h2 className="text-base font-bold text-midnight">Definitions</h2>
+            <p className="text-xs text-ink-500 mt-0.5">
+              The vocabulary used across the app, grouped so you can scan a
+              single area at a time.
+            </p>
+          </header>
+          <div className="divide-y divide-ink-200/60">
+            {GLOSSARY.map((g) => (
+              <div key={g.group} className="px-4 py-3">
+                <p className="text-[0.7rem] font-semibold uppercase tracking-wide text-ink-500 mb-2">
+                  {g.group}
+                </p>
+                <dl className="grid grid-cols-1 md:grid-cols-[max-content,1fr] gap-x-4 gap-y-2">
+                  {g.terms.map((t) => (
+                    <div key={t.term} className="contents">
+                      <dt className="text-sm font-semibold text-midnight md:whitespace-nowrap md:pt-0.5">
+                        {t.term}
+                      </dt>
+                      <dd className="text-sm text-ink-600 leading-snug">
+                        {t.def}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ))}
+          </div>
         </section>
 
         <section className="card p-0 overflow-hidden">
