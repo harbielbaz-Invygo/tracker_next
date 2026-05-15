@@ -10,15 +10,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ActionCenterRow } from "@/lib/action-center-data";
 import { isFullySettled } from "@/lib/action-center-predicates";
-import ActionCenterTable from "./action-center-table";
 import ActionCenterBatchList from "./action-center-batch-list";
 import ActionCenterDrawer from "./action-center-drawer";
 import ActionCenterDelayedStrip, { type AggregateFilter } from "./action-center-delayed-strip";
 import PageHeader from "./page-header";
 import { cn } from "@/lib/utils";
-
-type ViewMode = "stacked" | "side-by-side";
-const VIEW_MODE_KEY = "action-center-view-mode";
 
 // Left-panel (batches list) width in the side-by-side view. Persisted in
 // localStorage so each user keeps their preferred ratio between visits.
@@ -47,7 +43,7 @@ export default function ActionCenterShell({ rows, totals }: Props) {
    * Free-text search — matches the Dashboard's pattern (PO number,
    * dealer, model, batch code; case-insensitive substring). Applied
    * inside the same `topLevelFiltered` pipeline so the aggregate
-   * strip + the table stay in sync.
+   * strip + the batch list stay in sync.
    */
   const [search, setSearch] = useState<string>("");
   /**
@@ -56,21 +52,6 @@ export default function ActionCenterShell({ rows, totals }: Props) {
    * reflect the same data the user is filtering inside.
    */
   const [aggregateFilter, setAggregateFilter] = useState<AggregateFilter>(null);
-
-  // ── View mode (stacked / side-by-side), persisted in localStorage ──
-  // Default = side-by-side: master/detail layout fits the daily-use shape
-  // of the Action Center better than the stacked variant. Users who prefer stacked
-  // still get their preference back via localStorage on subsequent visits.
-  const [viewMode, setViewMode] = useState<ViewMode>("side-by-side");
-  useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(VIEW_MODE_KEY);
-      if (stored === "stacked" || stored === "side-by-side") setViewMode(stored);
-    } catch { /* private mode / SSR — fall back to default */ }
-  }, []);
-  useEffect(() => {
-    try { window.localStorage.setItem(VIEW_MODE_KEY, viewMode); } catch { /* ignore */ }
-  }, [viewMode]);
 
   // ── Left-panel width (drag-to-resize), persisted in localStorage ──
   const [leftWidth, setLeftWidth] = useState<number>(DEFAULT_LEFT_WIDTH);
@@ -124,8 +105,8 @@ export default function ActionCenterShell({ rows, totals }: Props) {
    *                      aggregates from THIS so its chip counts reflect
    *                      the current view, not the raw dataset.
    *   filtered         — aggregate strip filter applied on top. This is
-   *                      what the table renders. Clear the chip → identical
-   *                      to topLevelFiltered.
+   *                      what the batch list renders. Clear the chip →
+   *                      identical to topLevelFiltered.
    */
   const topLevelFiltered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -276,49 +257,21 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         </div>
       </div>
 
-      {/* View toggle (segmented control) */}
       <div className="flex items-center justify-between mb-3">
         <p className="text-xs text-ink-500">
           {filtered.length} batch{filtered.length === 1 ? "" : "es"} match the current filters.
         </p>
-        <ViewToggle value={viewMode} onChange={setViewMode} />
       </div>
 
-      {/* Conditional layout */}
-      {viewMode === "stacked" ? (
-        <>
-          {/* Stacked: full-width table, drawer below when selected */}
-          <ActionCenterTable
-            rows={filtered}
-            selectedCode={selected}
-            onSelect={(code) => setSelected((cur) => (cur === code ? null : code))}
-            totalCount={rows.length}
-          />
-          {selected && (
-            <div className="mt-6">
-              <ActionCenterDrawer
-                key={selected}
-                batchCode={selected}
-                onMutation={onMutation}
-              />
-            </div>
-          )}
-          {!selected && rows.length > 0 && (
-            <p className="text-sm text-ink-500 px-1 mt-6">
-              👆 Click a batch row to update its actions and capture Ops&apos; confidence.
-            </p>
-          )}
-        </>
-      ) : (
-        /* Side-by-side: compact list on the left, action card on the right.
-           Both panes scroll independently inside a fixed-height container.
-           Column widths are user-controlled: drag the divider between the
-           two panes (lg+ only). The width is clamped to [MIN, MAX] and
-           persisted in localStorage. Double-click the divider to reset. */
-        <div
-          className="grid grid-cols-1 gap-4 lg:gap-0 h-[min(76vh,820px)] min-h-[480px] lg:[grid-template-columns:var(--ac-cols)]"
-          style={{ "--ac-cols": `${leftWidth}px 14px 1fr` } as React.CSSProperties}
-        >
+      {/* Side-by-side: compact list on the left, action card on the right.
+          Both panes scroll independently inside a fixed-height container.
+          Column widths are user-controlled: drag the divider between the
+          two panes (lg+ only). The width is clamped to [MIN, MAX] and
+          persisted in localStorage. Double-click the divider to reset. */}
+      <div
+        className="grid grid-cols-1 gap-4 lg:gap-0 h-[min(76vh,820px)] min-h-[480px] lg:[grid-template-columns:var(--ac-cols)]"
+        style={{ "--ac-cols": `${leftWidth}px 14px 1fr` } as React.CSSProperties}
+      >
           {/* Left column — search input + batch list, stacked. The
               search is constrained to the same column width as the
               list below it (no media break, both are inside the
@@ -399,65 +352,7 @@ export default function ActionCenterShell({ rows, totals }: Props) {
             )}
           </div>
         </div>
-      )}
     </div>
-  );
-}
-
-// ── View toggle ────────────────────────────────────────────────
-
-function ViewToggle({
-  value, onChange,
-}: {
-  value: ViewMode;
-  onChange: (v: ViewMode) => void;
-}) {
-  return (
-    <div
-      role="tablist"
-      aria-label="Action Center view mode"
-      className="inline-flex items-center bg-ink-100 rounded-md p-0.5"
-    >
-      <ToggleButton
-        active={value === "stacked"}
-        onClick={() => onChange("stacked")}
-        label="Stacked"
-        title="Table on top, action card below the selected row"
-      />
-      <ToggleButton
-        active={value === "side-by-side"}
-        onClick={() => onChange("side-by-side")}
-        label="Side by side"
-        title="Compact batch list on the left, action card on the right"
-      />
-    </div>
-  );
-}
-
-function ToggleButton({
-  active, onClick, label, title,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-  title?: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      title={title}
-      className={cn(
-        "px-3 py-1 text-xs font-medium rounded transition-colors",
-        active
-          ? "bg-white text-midnight shadow-sm"
-          : "text-ink-500 hover:text-midnight",
-      )}
-    >
-      {label}
-    </button>
   );
 }
 
