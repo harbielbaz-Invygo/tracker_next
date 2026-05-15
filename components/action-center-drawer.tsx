@@ -729,7 +729,12 @@ function DrawerHeader({
                   "text-sm font-medium px-3 py-2 rounded-md border w-full transition-colors",
                   internalPhaseSettled
                     ? "border-brand text-brand-dark bg-white hover:bg-brand-pastel"
-                    : "border-ink-200 text-ink-400 bg-ink-50 cursor-not-allowed",
+                    // Disabled but ON-BRAND: muted brand-pastel fill, brand
+                    // border at half-opacity, brand-dark text at ~70%.
+                    // Keeps the button visually identified with "listing"
+                    // (vs grey, which loses that association). Lock icon
+                    // + "pending" count still communicates the gate.
+                    : "border-brand/40 text-brand-dark/70 bg-brand-pastel/40 cursor-not-allowed",
                 )}
                 title={internalPhaseSettled
                   ? "Mark cars as listed in the app — opens a date/time picker"
@@ -777,10 +782,15 @@ function DrawerHeader({
               onClick={() => setDelivering(true)}
               disabled={!vinChaseSettled}
               className={cn(
-                "mt-1 text-base font-bold px-4 py-3 rounded-md border-2 shadow-md transition-colors w-full flex items-center justify-center gap-2",
+                "mt-1 text-base font-bold px-4 py-3 rounded-md border-2 transition-colors w-full flex items-center justify-center gap-2",
                 vinChaseSettled
-                  ? "bg-green-dark text-white border-green-dark hover:bg-green hover:border-green"
-                  : "bg-ink-100 text-ink-400 border-ink-200 cursor-not-allowed shadow-none",
+                  ? "bg-green-dark text-white border-green-dark hover:bg-green hover:border-green shadow-md"
+                  // Disabled but ON-BRAND: muted green-pale fill, green
+                  // border at half-opacity, green-dark text at ~70%.
+                  // Keeps the button visually identified with "delivery"
+                  // even when gated; the 🔒 + pending count carries the
+                  // "not yet" signal.
+                  : "bg-green-pale/50 text-green-dark/70 border-green/40 cursor-not-allowed",
               )}
               title={vinChaseSettled
                 ? "Mark this batch delivered — opens the qty + colours confirmation"
