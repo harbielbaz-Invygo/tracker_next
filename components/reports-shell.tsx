@@ -15,6 +15,7 @@ import type {
   PerformanceReport, DepartmentRow, StakeholderRow, DealerReliabilityRow,
   CustomerImpactReport, CustomerImpactBatch,
 } from "@/lib/reports-data";
+import { PeriodSelect } from "./period-select";
 import { Sparkline } from "./sparkline";
 import { cn } from "@/lib/utils";
 
@@ -41,6 +42,13 @@ export default function ReportsShell({ report }: Props) {
 
   return (
     <div className="space-y-6">
+      {/* Period selector — top-right, always visible. The selected
+          period scopes every aggregate on this page (totals, perf
+          tables, dealer reliability, customer impact). */}
+      <div className="flex items-center justify-end">
+        <PeriodSelect active={report.period} />
+      </div>
+
       {/* ── On-time rate — the HERO. Performance review starts here. ── */}
       <div className="grid grid-cols-1 md:grid-cols-[2fr,3fr] gap-4">
         <OnTimeRateHero
