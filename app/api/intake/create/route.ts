@@ -10,12 +10,12 @@
  * If the dealer doesn't exist yet, we create one with the dealer name as
  * given and the first split's city as home_city.
  */
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, and } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
   batches, dealers, batchActions, actionDependencies, actionTypes, batchDeliveryLegs,
-  vinChaseStages, batchVinStages,
+  vinChaseStages, batchVinStages, batchForecasts,
 } from "@/lib/db/schema";
 import { makeBatchCode } from "@/lib/utils";
 import { getLeadTimeDays } from "@/lib/rules";
@@ -71,6 +71,14 @@ interface CreateBody {
    */
   vinReceivedAtIntake?: boolean;
   notes?: string | null;
+  /**
+   * Optional — when set, this Intake fulfils the named Forecast.
+   * If exactly one batch is produced, the Forecast's pre_po row flips
+   * to post_po in place (same record). If multiple batches are
+   * produced, the Forecast is marked superseded and each new batch
+   * gets `parentForecastBatchId` set.
+   */
+  forecastBatchId?: number | null;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -192,6 +200,46 @@ export async function POST(req: NextRequest) {
     (s) => s.name.toLowerCase().includes("vin"),
   )?.id ?? null;
 
+  // ── Optional: Forecast linkage ────────────────────────────────
+  // When set, this Intake fulfils a Partnership pre-PO bet. We need
+  // the parent's existing Pre-PO App Listing batch_action so we can
+  // either leave it in place (1:1) or copy it to each child (split).
+  let forecastParent: typeof batches.$inferSelect | null = null;
+  let prePoActionOnParent: typeof batchActions.$inferSelect | null = null;
+  if (body.forecastBatchId != null) {
+    const [parent] = await db.select().from(batches)
+      .innerJoin(batchForecasts, eq(batchForecasts.batchId, batches.id))
+      .where(eq(batches.id, body.forecastBatchId))
+      .limit(1);
+    if (!parent) {
+      return NextResponse.json({ error: `Forecast batch ${body.forecastBatchId} not found` }, { status: 400 });
+    }
+    if (parent.batches.lifecycleState !== "pre_po") {
+      return NextResponse.json({ error: "Forecast has already been fulfilled" }, { status: 409 });
+    }
+    if (parent.batches.closedAt) {
+      return NextResponse.json({ error: "Forecast has been cancelled" }, { status: 409 });
+    }
+    if (parent.batches.forecastSupersededAt) {
+      return NextResponse.json({ error: "Forecast has already been split" }, { status: 409 });
+    }
+    forecastParent = parent.batches;
+    // Find the Pre-PO App Listing action on the parent (auto-created at
+    // Forecast submission). Match by action_type name so admin renames
+    // of the canonical row don't break us — substring tolerance.
+    const prePoActionType = (await db.select({ id: actionTypes.id }).from(actionTypes)
+      .where(eq(actionTypes.name, "Pre-PO App Listing")).limit(1))[0];
+    if (prePoActionType) {
+      const [row] = await db.select().from(batchActions)
+        .where(and(
+          eq(batchActions.batchId, forecastParent.id),
+          eq(batchActions.actionTypeId, prePoActionType.id),
+        ))
+        .limit(1);
+      prePoActionOnParent = row ?? null;
+    }
+  }
+
   // ── Create batches × splits — single transaction ──────────────
   // If any insert below throws (FK violation, disk full, …), the whole
   // submission rolls back so we never leave half-created batches.
@@ -273,11 +321,25 @@ export async function POST(req: NextRequest) {
     legCount: number;
   };
 
+  // 1:1 Forecast fulfilment means we UPDATE the existing pre_po batch
+  // instead of inserting a new one. Detect once, up front.
+  const isOneToOneFulfilment = forecastParent != null && groups.length === 1;
+  const isSplitFulfilment    = forecastParent != null && groups.length > 1;
+
   // libSQL transactions take an async callback. All inserts/updates
   // inside must be `await`-ed; if any throws, the whole submission rolls
   // back and we never leave half-created batches.
   const created: CreatedBatch[] = await db.transaction(async (tx) => {
     const out: CreatedBatch[] = [];
+
+    // Split case: mark the parent superseded right at the start of
+    // the transaction. Children created below get parentForecastBatchId.
+    if (isSplitFulfilment && forecastParent) {
+      await tx.update(batches).set({
+        forecastSupersededAt: today,
+      }).where(eq(batches.id, forecastParent.id));
+    }
+
     let groupN = 0;
     for (const group of groups) {
       groupN++;
@@ -307,7 +369,9 @@ export async function POST(req: NextRequest) {
       });
       const targetPoDate = isoMinusDays(availabilityDate, leadTimeDays);
 
-      const [batchRow] = await tx.insert(batches).values({
+      // Shared field set — used for both the INSERT (new batch / split
+      // child) and the UPDATE (1:1 Forecast flip in place).
+      const intakeFields = {
         batchCode,
         dealerId,
         model: item.model,
@@ -337,13 +401,35 @@ export async function POST(req: NextRequest) {
         vinReceivingDate:    null,
 
         currentStage: "po_issued",
-        lifecycleState: "post_po",
+        lifecycleState: "post_po" as const,
         feasibilityStatus,
 
         vinReceivedAtIntake: body.vinReceivedAtIntake ?? false,
 
         notes: body.notes ?? undefined,
-      }).returning({ id: batches.id });
+      };
+
+      // Three paths:
+      //   1:1 fulfilment → UPDATE the existing Forecast batch in place
+      //                    (same record), wipe its old legs, skip
+      //                    Pre-PO App Listing in the actions loop.
+      //   Split child    → INSERT new batch with parentForecastBatchId
+      //                    set; later copy Pre-PO App Listing from parent.
+      //   Standard       → INSERT new batch, no Forecast linkage.
+      let batchRow: { id: number };
+      if (isOneToOneFulfilment && forecastParent) {
+        await tx.update(batches).set(intakeFields)
+          .where(eq(batches.id, forecastParent.id));
+        batchRow = { id: forecastParent.id };
+        // Wipe the Forecast-era legs — Intake legs replace them.
+        await tx.delete(batchDeliveryLegs).where(eq(batchDeliveryLegs.batchId, forecastParent.id));
+      } else {
+        const [inserted] = await tx.insert(batches).values({
+          ...intakeFields,
+          parentForecastBatchId: isSplitFulfilment && forecastParent ? forecastParent.id : undefined,
+        }).returning({ id: batches.id });
+        batchRow = inserted;
+      }
 
       // ── Write per-city legs ─────────────────────────────────────
       // Defensive: if the new table is missing (Phase α migration not
@@ -372,7 +458,14 @@ export async function POST(req: NextRequest) {
       }
 
       // ── Per-picked-action batch_actions (one set per BATCH, not per leg) ──
+      // 1:1 fulfilment: the Pre-PO App Listing action is already on the
+      //                 parent row — skip any duplicate pick.
+      // Split child:    the parent's Pre-PO App Listing is copied onto
+      //                 each child below the standard action loop, so
+      //                 likewise skip any duplicate pick here.
+      const prePoActionTypeId = prePoActionOnParent?.actionTypeId ?? null;
       for (const a of body.actions) {
+        if (prePoActionTypeId != null && a.actionTypeId === prePoActionTypeId) continue;
         const status = hasParentDep.has(a.actionTypeId) ? "blocked" : "waiting";
         const type = typeById.get(a.actionTypeId);
         const expectedDate = type
@@ -391,6 +484,23 @@ export async function POST(req: NextRequest) {
           assignedStakeholderId: a.assignedStakeholderId ?? undefined,
           status,
           expectedDate: expectedDate ?? undefined,
+        });
+      }
+
+      // ── Split case: copy the Pre-PO App Listing action from the
+      //    parent Forecast onto this child. Preserves status (which
+      //    might already be "done" if Ops listed the cars before PO
+      //    arrived) so accuracy tracking in PR 4 stays correct.
+      if (isSplitFulfilment && prePoActionOnParent) {
+        await tx.insert(batchActions).values({
+          batchId:      batchRow.id,
+          actionTypeId: prePoActionOnParent.actionTypeId,
+          departmentId: prePoActionOnParent.departmentId ?? undefined,
+          assignedStakeholderId: prePoActionOnParent.assignedStakeholderId ?? undefined,
+          status:       prePoActionOnParent.status,
+          expectedDate: prePoActionOnParent.expectedDate ?? undefined,
+          completedAt:  prePoActionOnParent.completedAt ?? undefined,
+          notes:        prePoActionOnParent.notes ?? undefined,
         });
       }
 
