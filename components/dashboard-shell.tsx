@@ -14,12 +14,19 @@ import type {
 } from "@/lib/dashboard-data";
 import BatchTable from "./batch-table";
 import PageHeader from "./page-header";
+import { Sparkline } from "./sparkline";
 import TimelineSvg from "./timeline-svg";
 import { cn } from "@/lib/utils";
 
 interface Props {
   rows: DashboardRow[];
   totals: { total: number; active: number; delivered: number; delayed: number; onTrack: number; highRisk: number };
+  /**
+   * Weekly count of late deliveries over the last 12 weeks (oldest
+   * first). Drives the sparkline on the Delayed hero tile —
+   * communicates "are we delivering late more often or less often?".
+   */
+  lateWeekly: number[];
 }
 
 const STATUS_OPTIONS: { value: StatusBucket; label: string }[] = [
@@ -44,7 +51,7 @@ const VIN_PHASE_OPTIONS = [
 ] as const;
 type VinPhaseOption = (typeof VIN_PHASE_OPTIONS)[number]["value"];
 
-export default function DashboardShell({ rows, totals }: Props) {
+export default function DashboardShell({ rows, totals, lateWeekly }: Props) {
   // ── Filter state ────────────────────────────────────────────
   const [search,        setSearch]       = useState<string>("");
   const [dealerFilter, setDealerFilter] = useState<string>("all");
@@ -138,6 +145,8 @@ export default function DashboardShell({ rows, totals }: Props) {
           title={totals.delayed > 0
             ? `${totals.delayed} batches are past their dealer-promised availability date`
             : "No batches are past their promised date"}
+          sparkValues={lateWeekly}
+          sparkLabel="late deliveries per week, last 12 weeks"
         />
         <Metric label="Active batches" value={totals.active} valueColor="text-midnight" />
         <Metric label="On track"       value={totals.onTrack} valueColor="text-green-dark" />
@@ -288,15 +297,30 @@ function Metric({
  * the Dashboard). Tone-coloured accent border + larger digit.
  */
 function HeroMetric({
-  label, value, tone, title,
+  label, value, tone, title, sparkValues, sparkLabel,
 }: {
   label: string;
   value: number;
-  /** "alert" = flame border + flame digit; "ok" = green border + green digit. */
+  /** "alert" = gold border + gold digit; "ok" = green border + green digit. */
   tone: "alert" | "ok";
   title?: string;
+  /**
+   * Optional 12-week trend series for an inline sparkline to the right
+   * of the big digit. Numbers are counts (auto-scaled to the max value
+   * in the series so peaks reach the top of the sparkline area).
+   */
+  sparkValues?: number[];
+  /** aria-label for the sparkline; surfaces in screen readers + native tooltips. */
+  sparkLabel?: string;
 }) {
   const ok = tone === "ok" || value === 0;
+  // Auto-scale the sparkline domain — count series can have any
+  // magnitude. Use max-or-1 to avoid divide-by-zero on flat-zero
+  // series; nudge max up by 20% so peaks aren't pinned to the top edge.
+  const sparkMax = sparkValues && sparkValues.length > 0
+    ? Math.max(1, ...sparkValues) * 1.2
+    : 1;
+  const sparkStroke = ok ? "#5C8A2B" : "#A87600"; // green-dark | gold-dark
   return (
     <div
       title={title}
@@ -305,15 +329,30 @@ function HeroMetric({
         ok ? "border-l-green bg-green-pale/30" : "border-l-gold bg-gold-pale/30",
       )}
     >
-      <span className="text-xs font-semibold uppercase tracking-wide text-ink-600">
-        {label}
-      </span>
-      <span className={cn(
-        "text-4xl font-bold tabular-nums leading-none",
-        ok ? "text-green-dark" : "text-gold-dark",
-      )}>
-        {value}
-      </span>
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <span className="text-xs font-semibold uppercase tracking-wide text-ink-600 block">
+            {label}
+          </span>
+          <span className={cn(
+            "text-4xl font-bold tabular-nums leading-none inline-block mt-1",
+            ok ? "text-green-dark" : "text-gold-dark",
+          )}>
+            {value}
+          </span>
+        </div>
+        {sparkValues && sparkValues.length > 0 && (
+          <Sparkline
+            values={sparkValues}
+            stroke={sparkStroke}
+            width={80}
+            height={20}
+            domain={[0, sparkMax]}
+            baseline={null}
+            ariaLabel={sparkLabel ?? "trend"}
+          />
+        )}
+      </div>
     </div>
   );
 }

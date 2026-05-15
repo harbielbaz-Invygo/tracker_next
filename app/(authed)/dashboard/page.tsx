@@ -13,12 +13,17 @@
  */
 import DashboardShell from "@/components/dashboard-shell";
 import PageHeader from "@/components/page-header";
-import { getDashboardRows, summarize } from "@/lib/dashboard-data";
+import { getDashboardRows, summarize, getLateDeliveriesWeekly } from "@/lib/dashboard-data";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
-  const rows = await getDashboardRows();
+  // Pull rows + the 12-week late-deliveries trend in parallel so the
+  // sparkline data lands at the same time as the table.
+  const [rows, lateWeekly] = await Promise.all([
+    getDashboardRows(),
+    getLateDeliveriesWeekly(),
+  ]);
   const totals = summarize(rows);
 
   if (rows.length === 0) {
@@ -38,5 +43,5 @@ export default async function DashboardPage() {
     );
   }
 
-  return <DashboardShell rows={rows} totals={totals} />;
+  return <DashboardShell rows={rows} totals={totals} lateWeekly={lateWeekly} />;
 }

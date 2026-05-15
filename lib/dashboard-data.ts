@@ -640,3 +640,39 @@ export function summarize(rows: DashboardRow[]) {
   ).length;
   return { total, active, delivered, delayed, onTrack, highRisk };
 }
+
+/**
+ * Weekly count of LATE deliveries over the last 12 weeks (oldest first).
+ * "Late" = closureReason="delivered" AND closedAt > dealerPromisedDeliveryDate.
+ *
+ * Powers the sparkline on the Dashboard's Delayed hero tile —
+ * communicates the trend of "are we delivering late more often, less
+ * often, or about the same?" Same Monday-anchored bucket alignment as
+ * the Reports on-time rate weekly buckets, so a side-by-side view
+ * stays comparable.
+ */
+export async function getLateDeliveriesWeekly(): Promise<number[]> {
+  const rows = await db
+    .select({
+      closedAt:        batches.closedAt,
+      closureReason:   batches.closureReason,
+      promisedDate:    batches.dealerPromisedDeliveryDate,
+    })
+    .from(batches);
+
+  const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const daysSinceMonday = (today.getDay() + 6) % 7;
+  const thisWeekStartMs = today.getTime() - daysSinceMonday * 24 * 60 * 60 * 1000;
+  const buckets = Array.from({ length: 12 }, () => 0);
+  for (const r of rows) {
+    if (!r.closedAt || r.closureReason !== "delivered") continue;
+    if (!(r.closedAt > r.promisedDate)) continue; // on-time → skip
+    const ts = new Date(r.closedAt + "T12:00:00Z").getTime();
+    const offset = thisWeekStartMs - ts;
+    if (offset < 0 || offset >= 12 * WEEK_MS) continue;
+    const weekIdx = 11 - Math.floor(offset / WEEK_MS);
+    buckets[weekIdx]++;
+  }
+  return buckets;
+}
