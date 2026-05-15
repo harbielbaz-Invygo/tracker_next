@@ -53,6 +53,36 @@ Don't auto-merge — pause and confirm — if the change involves any of:
 - **Tailwind tokens** — use the brand palette (`brand`, `gold`, `flame`, `green`, `ink`, `midnight`), not raw hex.
 - **Server components by default**; `"use client"` only when interactivity actually requires it.
 
+### Color tokens — meanings (locked)
+
+Different palettes have different semantic loads. Don't mix.
+
+| Token | Meaning | Examples |
+|---|---|---|
+| `brand` (cyan/teal) | Active / primary / "take this action" | Nav active state, primary CTA, current row highlight |
+| `green` | Done / settled / on-time | Done status chips, "Mark as listed/delivered" success, on-time KPIs |
+| `gold` | Warning / late / needs attention (status, NOT destructive) | Delayed status, "Shift availability date", mid-bucket urgency stripe, "blocked" badge |
+| `flame` | Destructive intent (irreversible action) OR critical severity | Cancel batch, Delete, critical alerts (severity="critical"), urgency stripe ≥7d late |
+| `ink-*` | Neutral content, secondary text | Everything else |
+| `midnight` | Strongest neutral (deepest text) | Page titles, primary readable text |
+
+**Don't apply `flame` to a passive STATUS** (e.g. "this is delayed"). That's `gold`. Reserve `flame` for things the user is about to do that destroys state, or for the most extreme severity.
+
+### Spacing system (Tailwind step values)
+
+Four-step rhythm for vertical + horizontal gaps. Use these tokens directly; avoid one-offs like `gap-3`, `mt-5`, `py-3.5`.
+
+| Step | Token | When |
+|---|---|---|
+| `xs` | `gap-1` (4px) / `space-y-1` | Within a single chip / pill / micro-content |
+| `sm` | `gap-2` (8px) / `space-y-2` | Within a button group / list row / form row |
+| `md` | `gap-4` (16px) / `space-y-4` | Between form fields, between sub-cards in a card |
+| `lg` | `gap-6` (24px) / `space-y-6` | Between top-level page blocks |
+
+Padding inside containers uses the same scale: `px-2 py-1` (compact), `px-3 py-2` (default), `px-4 py-3` (roomy), `px-5 py-4` (hero / spacious).
+
+Exceptions are fine when there's a typographic reason (e.g. `pt-2` to break a rhythm group inside a column), but document why in a brief comment.
+
 ## Don't
 
 - Don't create `README.md`/docs unless asked.
