@@ -26,7 +26,7 @@ export default function LoginPage() {
 function LoginForm() {
   const params = useSearchParams();
   const router = useRouter();
-  const callbackUrl = params.get("callbackUrl") ?? "/dashboard";
+  const callbackUrl = params.get("callbackUrl") ?? "/insights";
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 

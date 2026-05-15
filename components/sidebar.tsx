@@ -20,7 +20,10 @@ import { ALL_VIEWS, ACCESS, VIEW_LABELS, canAccess, type Role, type ViewName } f
 import { ViewIcon } from "@/components/view-icons";
 import { cn } from "@/lib/utils";
 
-// Stable mapping ViewName → URL slug
+// Stable mapping ViewName → URL slug. Dashboard + Reports retained
+// here so legacy bookmarks and direct URLs still resolve; they're
+// just no longer surfaced in the nav. Remove from access.ts in a
+// follow-up if you want to remove the pages entirely.
 const VIEW_TO_PATH: Record<ViewName, string> = {
   "Dashboard":     "/dashboard",
   "Insights":      "/insights",
@@ -31,10 +34,13 @@ const VIEW_TO_PATH: Record<ViewName, string> = {
   "Settings":      "/settings",
 };
 
+// Dashboard + Reports removed from the nav — Insights now covers
+// both their surfaces. Forecast moved under Intake (Intake is the
+// workflow's entry point; Forecast is the projection that follows).
 const NAV_GROUPS: { label: string | null; items: ViewName[] }[] = [
-  { label: null,         items: ["Dashboard", "Insights"] },
-  { label: "Workflow",   items: ["Forecast", "Intake"] },
-  { label: "Operations", items: ["Action Center", "Reports"] },
+  { label: null,         items: ["Insights"] },
+  { label: "Workflow",   items: ["Intake", "Forecast"] },
+  { label: "Operations", items: ["Action Center"] },
   { label: "Admin",      items: ["Settings"] },
 ];
 

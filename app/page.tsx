@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-/** Root → Dashboard. */
+/** Root → Insights (the unified leadership view). */
 export default function Home() {
-  redirect("/dashboard");
+  redirect("/insights");
 }
