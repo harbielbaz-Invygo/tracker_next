@@ -54,6 +54,42 @@ export interface IntakeOptions {
 }
 
 export async function getIntakeOptions(): Promise<IntakeOptions> {
+  // Open Forecasts query is wrapped — if batch_forecasts (or the new
+  // columns on batches) aren't migrated yet, default to [] so Intake
+  // still loads. Same fallback pattern used for batch_delivery_legs
+  // and batch_vin_stages.
+  const openForecastsPromise = (async () => {
+    try {
+      return await db.select({
+        batchId:      batches.id,
+        dealerName:   dealers.name,
+        city:         batches.dealerReceivingCity,
+        quantity:     batches.requestedQuantity,
+        expectedDate: batches.dealerPromisedDeliveryDate,
+      })
+      .from(batchForecasts)
+      .innerJoin(batches, eq(batchForecasts.batchId, batches.id))
+      .leftJoin(dealers, eq(batches.dealerId, dealers.id))
+      .where(and(
+        eq(batches.lifecycleState, "pre_po"),
+        isNull(batches.closedAt),
+        isNull(batches.forecastSupersededAt),
+      ))
+      .orderBy(desc(batchForecasts.submittedAt));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table|no such column/i.test(msg)) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[intake-data] batch_forecasts / new batches columns missing — " +
+          "Forecast picker hidden. Run `npm run db:push`.",
+        );
+        return [];
+      }
+      throw err;
+    }
+  })();
+
   const [deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, leadTimeDays, openForecastRows] = await Promise.all([
     db.select().from(departments).orderBy(asc(departments.sortOrder)),
     db.select().from(stakeholders).orderBy(asc(stakeholders.sortOrder)),
@@ -61,23 +97,7 @@ export async function getIntakeOptions(): Promise<IntakeOptions> {
     db.select().from(actionDependencies),
     db.select().from(dealers).orderBy(asc(dealers.name)),
     getLeadTimeDays(),
-    // Open Forecasts: pre_po, not closed, not superseded.
-    db.select({
-      batchId:      batches.id,
-      dealerName:   dealers.name,
-      city:         batches.dealerReceivingCity,
-      quantity:     batches.requestedQuantity,
-      expectedDate: batches.dealerPromisedDeliveryDate,
-    })
-    .from(batchForecasts)
-    .innerJoin(batches, eq(batchForecasts.batchId, batches.id))
-    .leftJoin(dealers, eq(batches.dealerId, dealers.id))
-    .where(and(
-      eq(batches.lifecycleState, "pre_po"),
-      isNull(batches.closedAt),
-      isNull(batches.forecastSupersededAt),
-    ))
-    .orderBy(desc(batchForecasts.submittedAt)),
+    openForecastsPromise,
   ]);
 
   const nameByActionTypeId = new Map(typesRaw.map((t) => [t.id, t.name]));

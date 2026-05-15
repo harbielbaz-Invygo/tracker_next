@@ -41,9 +41,46 @@ export interface ForecastFormOptions {
 /**
  * Pull every Forecast in the system. Sorted by submission date desc
  * so the freshest commitments are on top.
+ *
+ * Defensive: if `batch_forecasts` (or the new columns on `batches`)
+ * haven't been migrated yet on this DB, return [] instead of 500-ing
+ * the page. Mirrors the pattern used for `batch_delivery_legs` and
+ * `batch_vin_stages` elsewhere in the codebase.
  */
 export async function getForecastRows(): Promise<ForecastRow[]> {
-  const rows = await db
+  let rows: Awaited<ReturnType<typeof selectForecastRows>>;
+  try {
+    rows = await selectForecastRows();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table|no such column/i.test(msg)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[forecast-data] batch_forecasts / new batches columns missing — " +
+        "did you run `npm run db:push` after PR 1? Returning empty list.",
+      );
+      return [];
+    }
+    throw err;
+  }
+
+  return rows.map((r) => ({
+    batchId:    r.batchId,
+    batchCode:  r.batchCode,
+    dealerName: r.dealerName ?? "—",
+    city:       r.city ?? "—",
+    quantity:   r.quantity,
+    expectedDeliveryDate: r.expectedDate,
+    submittedAt:       r.submittedAt,
+    submittedByUserId: r.submittedById,
+    submittedByName:   r.userName ?? r.userUsername ?? `User #${r.submittedById}`,
+    status:            statusFromRow(r),
+    closedAt:          r.closedAt ?? null,
+  }));
+}
+
+function selectForecastRows() {
+  return db
     .select({
       batchId:       batches.id,
       batchCode:     batches.batchCode,
@@ -65,20 +102,6 @@ export async function getForecastRows(): Promise<ForecastRow[]> {
     .leftJoin(dealers,  eq(batches.dealerId, dealers.id))
     .leftJoin(users,    eq(batchForecasts.submittedByUserId, users.id))
     .orderBy(desc(batchForecasts.submittedAt), desc(batchForecasts.id));
-
-  return rows.map((r) => ({
-    batchId:    r.batchId,
-    batchCode:  r.batchCode,
-    dealerName: r.dealerName ?? "—",
-    city:       r.city ?? "—",
-    quantity:   r.quantity,
-    expectedDeliveryDate: r.expectedDate,
-    submittedAt:       r.submittedAt,
-    submittedByUserId: r.submittedById,
-    submittedByName:   r.userName ?? r.userUsername ?? `User #${r.submittedById}`,
-    status:            statusFromRow(r),
-    closedAt:          r.closedAt ?? null,
-  }));
 }
 
 function statusFromRow(r: {
