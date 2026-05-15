@@ -7,10 +7,11 @@
  *   - All action dependencies (for the "depends on X, Y" hints)
  *   - All dealers (for the dealer selector; create-new is also supported)
  */
-import { asc } from "drizzle-orm";
+import { asc, eq, and, isNull, desc } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   departments, stakeholders, actionTypes, actionDependencies, dealers,
+  batches, batchForecasts,
 } from "@/lib/db/schema";
 import { getLeadTimeDays } from "@/lib/rules";
 
@@ -36,16 +37,47 @@ export interface IntakeOptions {
     dependsOnNames: string[];
   }[];
   dealers: { id: number; name: string; homeCity: string }[];
+  /**
+   * Open Forecasts the Intake can fulfil. An Intake submission may
+   * optionally link to one of these; the create route then flips the
+   * Forecast batch to post_po (1:1) or marks it superseded and creates
+   * children with `parentForecastBatchId` set (split).
+   */
+  openForecasts: {
+    batchId: number;
+    label: string;        // human-readable summary for the picker
+    dealerName: string;
+    city: string;
+    quantity: number;
+    expectedDate: string; // ISO yyyy-mm-dd
+  }[];
 }
 
 export async function getIntakeOptions(): Promise<IntakeOptions> {
-  const [deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, leadTimeDays] = await Promise.all([
+  const [deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, leadTimeDays, openForecastRows] = await Promise.all([
     db.select().from(departments).orderBy(asc(departments.sortOrder)),
     db.select().from(stakeholders).orderBy(asc(stakeholders.sortOrder)),
     db.select().from(actionTypes).orderBy(asc(actionTypes.sortOrder)),
     db.select().from(actionDependencies),
     db.select().from(dealers).orderBy(asc(dealers.name)),
     getLeadTimeDays(),
+    // Open Forecasts: pre_po, not closed, not superseded.
+    db.select({
+      batchId:      batches.id,
+      dealerName:   dealers.name,
+      city:         batches.dealerReceivingCity,
+      quantity:     batches.requestedQuantity,
+      expectedDate: batches.dealerPromisedDeliveryDate,
+    })
+    .from(batchForecasts)
+    .innerJoin(batches, eq(batchForecasts.batchId, batches.id))
+    .leftJoin(dealers, eq(batches.dealerId, dealers.id))
+    .where(and(
+      eq(batches.lifecycleState, "pre_po"),
+      isNull(batches.closedAt),
+      isNull(batches.forecastSupersededAt),
+    ))
+    .orderBy(desc(batchForecasts.submittedAt)),
   ]);
 
   const nameByActionTypeId = new Map(typesRaw.map((t) => [t.id, t.name]));
@@ -82,6 +114,14 @@ export async function getIntakeOptions(): Promise<IntakeOptions> {
     })),
     dealers: dealersRaw.map((d) => ({
       id: d.id, name: d.name, homeCity: d.homeCity,
+    })),
+    openForecasts: openForecastRows.map((r) => ({
+      batchId:      r.batchId,
+      dealerName:   r.dealerName ?? "—",
+      city:         r.city ?? "—",
+      quantity:     r.quantity,
+      expectedDate: r.expectedDate,
+      label: `${r.dealerName ?? "—"} · ${r.quantity}× in ${r.city ?? "—"} · expected ${r.expectedDate}`,
     })),
   };
 }

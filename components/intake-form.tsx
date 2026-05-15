@@ -117,6 +117,12 @@ export default function IntakeForm({ options }: Props) {
   const [dealerId, setDealerId] = useState<number | null>(null);
   const [dealerName, setDealerName] = useState<string>("");
 
+  // Optional Forecast linkage — picked up front. If set, the create
+  // route flips that pre_po batch to post_po (1:1) or marks it
+  // superseded and creates children with `parentForecastBatchId` set
+  // (split case, when the Intake produces more than one batch group).
+  const [linkedForecastBatchId, setLinkedForecastBatchId] = useState<number | null>(null);
+
   // Items × splits
   const [items, setItems] = useState<ItemDraft[]>([]);
 
@@ -357,6 +363,7 @@ export default function IntakeForm({ options }: Props) {
           }),
         vinReceivedAtIntake,
         notes: notes.trim() || null,
+        forecastBatchId: linkedForecastBatchId,
       };
 
       const res = await fetch("/api/intake/create", {
@@ -383,6 +390,7 @@ export default function IntakeForm({ options }: Props) {
     setDealerId(null); setDealerName("");
     setItems([]);
     setNotes("");
+    setLinkedForecastBatchId(null);
     setActions(options.actionTypes.map((t) => ({
       actionTypeId: t.id, selected: false,
     })));
@@ -474,6 +482,39 @@ export default function IntakeForm({ options }: Props) {
 
   return (
     <div className="space-y-4">
+      {/* ── Optional: Fulfils Forecast? ─────────────────────────
+          Picks an open pre_po batch (Partnership submission) to
+          link this Intake to. If chosen:
+            - 1 batch produced → that Forecast's batch flips to
+              post_po (same record).
+            - 2+ batches produced → the Forecast is marked superseded
+              and each new batch gets parentForecastBatchId set.
+          Leave on "None" for standard Intake. */}
+      {options.openForecasts.length > 0 && (
+        <div className="card border-brand/40 bg-brand-pastel/30">
+          <h2 className="text-sm font-bold mb-1 text-midnight">
+            🔗 Fulfils a Forecast? <span className="text-ink-500 font-normal">(optional)</span>
+          </h2>
+          <p className="text-xs text-ink-600 mb-2">
+            If this PO fulfils a Partnership pre-PO commitment, pick the Forecast below.
+            The matching batch will flip from pre-PO to post-PO (or split into the
+            batches you submit here, if this Intake produces more than one).
+          </p>
+          <select
+            className="input text-sm"
+            value={linkedForecastBatchId ?? ""}
+            onChange={(e) => setLinkedForecastBatchId(
+              e.target.value === "" ? null : Number(e.target.value),
+            )}
+          >
+            <option value="">None — standard Intake</option>
+            {options.openForecasts.map((f) => (
+              <option key={f.batchId} value={f.batchId}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* ── Step 1: PDF drop ───────────────────────────────────── */}
       <div className="card">
         <h2 className="text-base font-bold mb-2">📎 Step 1 · Upload PO PDF</h2>
