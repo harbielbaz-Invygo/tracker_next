@@ -567,6 +567,40 @@ function DrawerHeader({
   const isClosed = !!data.closedAt;
   const isListed = !!data.appListedAt;
 
+  // ── Workflow gates ──────────────────────────────────────────────
+  // Mark as Listed is the customer-facing milestone — ops shouldn't
+  // hit it until the INTERNAL phase (Specs, Pricing, SKU, …) is
+  // fully cleared. Any waiting/blocked batch_action means there's
+  // still work to do before listing.
+  //
+  // Mark as Delivered is the closing gate — ops shouldn't hit it
+  // until the VIN CHASE chain is fully cleared. Same predicate, but
+  // applied to batch_vin_stages.
+  //
+  // Both predicates treat done + skipped as "settled" — a skipped
+  // step is an explicit decision to bypass, not a pending item.
+  // Empty clusters (no actions / no stages) are also considered
+  // settled (nothing to wait on).
+  //
+  // Exclude the Delivery action itself when computing the internal-
+  // phase gate, since the system uses its completion as the close
+  // signal — keeping it in would create a chicken/egg loop.
+  const internalPhaseSettled = (() => {
+    const settledStatuses = new Set(["done", "skipped"]);
+    return data.actions
+      .filter((a) => a.actionTypeName.toLowerCase() !== "delivery")
+      .every((a) => settledStatuses.has(a.status));
+  })();
+  const pendingInternalCount = data.actions
+    .filter((a) => a.actionTypeName.toLowerCase() !== "delivery")
+    .filter((a) => a.status === "waiting" || a.status === "blocked")
+    .length;
+
+  const vinChaseSettled = data.vinChaseStages.every(
+    (s) => s.status === "done" || s.status === "skipped",
+  );
+  const pendingVinCount = data.vinChaseStages.filter((s) => s.status === "waiting").length;
+
   return (
     <div className="mb-6 pb-5 border-b border-ink-100">
       {/* ── Two-column header ────────────────────────────────────
@@ -685,13 +719,23 @@ function DrawerHeader({
               <button
                 type="button"
                 onClick={() => setAppListingForm("new")}
-                className="text-sm font-medium px-3 py-2 rounded-md
-                           border border-brand text-brand-dark
-                           bg-white hover:bg-brand-pastel transition-colors
-                           w-full"
-                title="Mark cars as listed in the app — opens a date/time picker"
+                disabled={!internalPhaseSettled}
+                className={cn(
+                  "text-sm font-medium px-3 py-2 rounded-md border w-full transition-colors",
+                  internalPhaseSettled
+                    ? "border-brand text-brand-dark bg-white hover:bg-brand-pastel"
+                    : "border-ink-200 text-ink-400 bg-ink-50 cursor-not-allowed",
+                )}
+                title={internalPhaseSettled
+                  ? "Mark cars as listed in the app — opens a date/time picker"
+                  : `Complete the Internal phase first — ${pendingInternalCount} action(s) still waiting or blocked. Mark them done or skipped to enable listing.`}
               >
                 📱 Mark as listed
+                {!internalPhaseSettled && (
+                  <span className="ml-1 text-[0.65rem] font-normal">
+                    🔒 {pendingInternalCount} pending
+                  </span>
+                )}
               </button>
             )}
 
@@ -720,19 +764,30 @@ function DrawerHeader({
             </button>
 
             {/* Mark as delivered — visual anchor of the column.
-                Larger padding, bolder, filled emerald, shadow. */}
+                Larger padding, bolder, filled emerald, shadow.
+                Gated on VIN chase completion: ops can't close a batch
+                whose dealer-side chain isn't fully settled. */}
             <button
               type="button"
               onClick={() => setDelivering(true)}
-              className="mt-1 text-base font-bold px-4 py-3 rounded-md
-                         bg-green-dark text-white border-2 border-green-dark
-                         hover:bg-green hover:border-green
-                         shadow-md transition-colors
-                         w-full flex items-center justify-center gap-2"
-              title="Mark this batch delivered — opens the qty + colours confirmation"
+              disabled={!vinChaseSettled}
+              className={cn(
+                "mt-1 text-base font-bold px-4 py-3 rounded-md border-2 shadow-md transition-colors w-full flex items-center justify-center gap-2",
+                vinChaseSettled
+                  ? "bg-green-dark text-white border-green-dark hover:bg-green hover:border-green"
+                  : "bg-ink-100 text-ink-400 border-ink-200 cursor-not-allowed shadow-none",
+              )}
+              title={vinChaseSettled
+                ? "Mark this batch delivered — opens the qty + colours confirmation"
+                : `Complete the VIN chase first — ${pendingVinCount} stage(s) still waiting. Mark them done or skipped to enable delivery.`}
             >
               <span aria-hidden="true">🚚</span>
               <span>Mark as delivered</span>
+              {!vinChaseSettled && (
+                <span className="text-[0.7rem] font-normal opacity-80">
+                  🔒 {pendingVinCount} pending
+                </span>
+              )}
             </button>
           </div>
         )}
