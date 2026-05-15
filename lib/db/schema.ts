@@ -188,6 +188,23 @@ export const batches = sqliteTable("batches", {
    */
   appListedAt:         text("app_listed_at"),
 
+  // ── Forecast linkage ───────────────────────────────────────────
+  /**
+   * When this batch was created as a child of a Forecast split (one
+   * Forecast → multiple Intake batches), points to the parent
+   * Forecast batch. Null on standard Intake batches and on Forecast
+   * batches that haven't been split.
+   */
+  parentForecastBatchId: integer("parent_forecast_batch_id"),
+  /**
+   * Set when a Forecast batch has been superseded by Intake splits.
+   * After this point the parent's only role is accuracy tracking —
+   * its `requested_quantity` stays as the original promised total,
+   * and `sum(children.requested_quantity)` shows what actually
+   * fulfilled. Null on all standard batches.
+   */
+  forecastSupersededAt:  text("forecast_superseded_at"),
+
   notes:      text("notes"),
   createdAt:  text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
   updatedAt:  text("updated_at").default(sql`(CURRENT_TIMESTAMP)`),
@@ -285,6 +302,51 @@ export const batchDateRevisions = sqliteTable("batch_date_revisions", {
 }, (t) => ({
   byBatch:     index("batch_date_revisions_batch_idx").on(t.batchId),
   byRevisedAt: index("batch_date_revisions_revised_at_idx").on(t.revisedAt),
+}));
+
+// ─────────────────────────────────────────────────────────
+// Batch forecasts — Partnership-submitted, pre-PO bets.
+//
+// 1:1 with a `batches` row whose `lifecycleState = 'pre_po'`. The
+// batch carries the Forecast's Qty / City / Expected Delivery Date;
+// this table carries the partnership-specific metadata that doesn't
+// belong on the batch itself: submission date and submitter.
+//
+// When a real PO arrives and Ops links it via Intake, the batch
+// flips to `post_po` and gains all the standard fields. The
+// `batch_forecasts` row stays attached to the same record so
+// accuracy metrics (submission → PO drift, listing accuracy, qty
+// shortfall) remain computable.
+//
+// Splits (one Forecast → multiple fulfilling batches) work via
+// `batches.parent_forecast_batch_id` on the children + the parent's
+// `forecast_superseded_at` marker. The Forecast row on the parent
+// remains the authoritative submission record.
+// ─────────────────────────────────────────────────────────
+export const batchForecasts = sqliteTable("batch_forecasts", {
+  id:                  integer("id").primaryKey({ autoIncrement: true }),
+  /** The pre_po batch this Forecast lives on. 1:1 — only one Forecast per batch. */
+  batchId:             integer("batch_id").notNull().unique()
+                         .references(() => batches.id, { onDelete: "cascade" }),
+  /**
+   * ISO date the Partnership team committed to this bet. Used as the
+   * anchor for "Partnership submission → actual PO" drift metric.
+   */
+  submittedAt:         text("submitted_at").notNull(),
+  /**
+   * Partnership user (from `users`) who made the commitment. Drives
+   * the per-submitter Forecast reliability breakdown on Insights.
+   * Source = submitter; we don't track a separate "source partner"
+   * dimension at the moment.
+   */
+  submittedByUserId:   integer("submitted_by_user_id").notNull()
+                         .references(() => users.id),
+  createdAt:           text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
+  updatedAt:           text("updated_at").default(sql`(CURRENT_TIMESTAMP)`),
+}, (t) => ({
+  byBatch:            index("batch_forecasts_batch_idx").on(t.batchId),
+  bySubmittedBy:      index("batch_forecasts_submitted_by_idx").on(t.submittedByUserId),
+  bySubmittedAt:      index("batch_forecasts_submitted_at_idx").on(t.submittedAt),
 }));
 
 // ─────────────────────────────────────────────────────────
