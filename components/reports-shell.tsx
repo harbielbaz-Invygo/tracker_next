@@ -27,32 +27,46 @@ export default function ReportsShell({ report }: Props) {
     ? Math.round((totals.deliveredOnTime / (totals.deliveredOnTime + totals.deliveredLate)) * 100)
     : null;
 
+  // Cohort baselines for the delta arrows in the performance tables.
+  // Rather than a true period-over-period sparkline (which would need a
+  // time-series query layer we haven't built yet), we compare each
+  // department / stakeholder to the COHORT average. So a row showing
+  // "↑ 2.1d above avg" means "this owner is 2.1 days slower than the
+  // typical owner on this report". Actionable without needing trends.
+  const cohortDeptDelay = avgOf(departments.map((d) => d.avgDelayDays));
+  const cohortStakeDelay = avgOf(stakeholders.map((s) => s.avgDelayDays));
+  const cohortDeptOnTime = avgOf(departments.map((d) => d.onTimeRate));
+  const cohortStakeOnTime = avgOf(stakeholders.map((s) => s.onTimeRate));
+
   return (
     <div className="space-y-6">
-      {/* ── Summary strip ──────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        <Metric label="Total batches" value={totals.totalBatches} />
-        <Metric label="Open"          value={totals.open} />
-        <Metric label="✅ Delivered on time" value={totals.deliveredOnTime} valueColor="text-green-dark" />
-        <Metric label="⚠️ Delivered late"   value={totals.deliveredLate}   valueColor="text-flame-dark" />
-        <Metric label="🚫 Cancelled"        value={totals.cancelled}       valueColor="text-ink-600" />
+      {/* ── On-time rate — the HERO. Performance review starts here. ── */}
+      <div className="grid grid-cols-1 md:grid-cols-[2fr,3fr] gap-4">
+        <OnTimeRateHero
+          rate={onTimeRate}
+          onTimeCount={totals.deliveredOnTime}
+          totalDelivered={totals.deliveredOnTime + totals.deliveredLate}
+        />
+        {/* Secondary tier — context counts, compact pills. */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <CompactReportMetric label="Total batches" value={totals.totalBatches} />
+          <CompactReportMetric label="Open"          value={totals.open} />
+          <CompactReportMetric
+            label="✅ On time"
+            value={totals.deliveredOnTime}
+            valueColor="text-green-dark"
+          />
+          <CompactReportMetric
+            label="⚠️ Late"
+            value={totals.deliveredLate}
+            valueColor="text-flame-dark"
+          />
+        </div>
       </div>
 
-      {onTimeRate !== null && (
-        <div className="card flex flex-wrap items-baseline justify-between gap-3">
-          <p className="text-sm text-midnight">
-            <span className="font-bold tabular-nums text-2xl mr-1">{onTimeRate}%</span>
-            <span className="text-ink-600">on-time delivery rate</span>
-            <span className="text-ink-400 mx-2">·</span>
-            <span className="text-xs text-ink-500">
-              {totals.deliveredOnTime} on time of {totals.deliveredOnTime + totals.deliveredLate} delivered
-            </span>
-          </p>
-          <p className="text-[0.7rem] text-ink-500">
-            Generated {new Date(report.generatedAt).toLocaleString()}
-          </p>
-        </div>
-      )}
+      <p className="text-[0.7rem] text-ink-500 text-right -mt-3">
+        Generated {new Date(report.generatedAt).toLocaleString()}
+      </p>
 
       {/* ── Customer impact (item 4) ───────────────────────────── */}
       <CustomerImpactSection impact={customerImpact} />
@@ -63,7 +77,9 @@ export default function ReportsShell({ report }: Props) {
       {/* ── Departments table ──────────────────────────────────── */}
       <PerformanceTable
         title="Departments"
-        description="Ranked by average action delay (worst first)."
+        description="Ranked by average action delay (worst first). Delta arrows compare each row to the cohort average."
+        cohortAvgDelay={cohortDeptDelay}
+        cohortOnTimeRate={cohortDeptOnTime}
         rows={departments.map((d) => ({
           key: `dept-${d.id}`,
           primary: d.name,
@@ -75,7 +91,9 @@ export default function ReportsShell({ report }: Props) {
       {/* ── Stakeholders table ─────────────────────────────────── */}
       <PerformanceTable
         title="Stakeholders"
-        description="Same metrics, per individual / sub-team."
+        description="Same metrics, per individual / sub-team. Delta arrows compare each row to the cohort average."
+        cohortAvgDelay={cohortStakeDelay}
+        cohortOnTimeRate={cohortStakeOnTime}
         rows={stakeholders.map((s) => ({
           key: `sh-${s.id}`,
           primary: s.name,
@@ -111,11 +129,15 @@ interface TableRow {
 }
 
 function PerformanceTable({
-  title, description, rows,
+  title, description, rows, cohortAvgDelay, cohortOnTimeRate,
 }: {
   title: string;
   description: string;
   rows: TableRow[];
+  /** Cohort baseline for the avg-delay delta column. Null when not computable. */
+  cohortAvgDelay: number | null;
+  /** Cohort baseline for the on-time-rate delta. Null when not computable. */
+  cohortOnTimeRate: number | null;
 }) {
   return (
     <div className="card p-0 overflow-hidden">
@@ -159,10 +181,26 @@ function PerformanceTable({
                   <Td align="right" tabular>{row.activeActions}</Td>
                   <Td align="right" tabular className="text-ink-500">{row.skippedActions}</Td>
                   <Td align="right" tabular>
-                    <OnTimeChip rate={row.onTimeRate} />
+                    <div className="inline-flex items-center gap-1.5 justify-end">
+                      <OnTimeChip rate={row.onTimeRate} />
+                      <DeltaArrow
+                        value={row.onTimeRate}
+                        baseline={cohortOnTimeRate}
+                        higherIsBetter
+                        unit="%"
+                      />
+                    </div>
                   </Td>
                   <Td align="right" tabular>
-                    <DelayValue days={row.avgDelayDays} />
+                    <div className="inline-flex items-center gap-1.5 justify-end">
+                      <DelayValue days={row.avgDelayDays} />
+                      <DeltaArrow
+                        value={row.avgDelayDays}
+                        baseline={cohortAvgDelay}
+                        higherIsBetter={false}
+                        unit="d"
+                      />
+                    </div>
                   </Td>
                   <Td align="right" tabular>
                     <DelayValue days={row.worstDelayDays} bold />
@@ -180,6 +218,126 @@ function PerformanceTable({
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Mean of nullable numeric values. Returns null when there's nothing
+ * measurable. Used to compute cohort baselines for the delta arrows.
+ */
+function avgOf(values: (number | null)[]): number | null {
+  const measured = values.filter((v): v is number => v !== null && Number.isFinite(v));
+  if (measured.length === 0) return null;
+  return measured.reduce((sum, v) => sum + v, 0) / measured.length;
+}
+
+/**
+ * Tiny delta indicator next to a metric. Compares the row's value to
+ * the cohort baseline; shows ↑ / ↓ + magnitude when the difference is
+ * meaningful (> 5% of baseline-or-1, to avoid noise on near-equal
+ * values). `higherIsBetter` flips the colour convention:
+ *   • Higher is better → ↑ green, ↓ flame  (e.g. on-time rate)
+ *   • Lower is better  → ↑ flame, ↓ green  (e.g. avg delay days)
+ *
+ * Renders nothing when value or baseline is null/unmeasurable.
+ */
+function DeltaArrow({
+  value, baseline, higherIsBetter, unit,
+}: {
+  value: number | null;
+  baseline: number | null;
+  higherIsBetter: boolean;
+  unit: string;
+}) {
+  if (value === null || baseline === null) return null;
+  const diff = value - baseline;
+  // Suppress noise — anything < 5% of the magnitude of the baseline
+  // (or < 1 unit when baseline is near zero) renders as "≈" not an arrow.
+  const noiseThreshold = Math.max(Math.abs(baseline) * 0.05, 1);
+  if (Math.abs(diff) < noiseThreshold) {
+    return <span className="text-[0.65rem] text-ink-400" title="Near cohort average">≈</span>;
+  }
+  const up = diff > 0;
+  const good = higherIsBetter ? up : !up;
+  const arrow = up ? "↑" : "↓";
+  const magnitude = Math.abs(diff);
+  // Round magnitude to 1 decimal for cleanliness.
+  const display = Math.round(magnitude * 10) / 10;
+  return (
+    <span
+      className={cn(
+        "text-[0.65rem] font-medium tabular-nums",
+        good ? "text-green-dark" : "text-flame-dark",
+      )}
+      title={`${up ? "Above" : "Below"} cohort average by ${display}${unit}`}
+    >
+      {arrow} {display}{unit}
+    </span>
+  );
+}
+
+/**
+ * Hero card for the on-time delivery rate — the single most important
+ * number on the Reports page. Big tabular digit, tone-coloured border,
+ * sub-line shows the underlying counts.
+ */
+function OnTimeRateHero({
+  rate, onTimeCount, totalDelivered,
+}: {
+  rate: number | null;
+  onTimeCount: number;
+  totalDelivered: number;
+}) {
+  if (rate === null) {
+    return (
+      <div className="card border-l-4 border-l-ink-200 px-5 py-4 flex flex-col gap-1">
+        <span className="text-xs font-semibold uppercase tracking-wide text-ink-600">
+          On-time delivery rate
+        </span>
+        <span className="text-2xl font-bold text-ink-400">—</span>
+        <span className="text-xs text-ink-500">No batches delivered yet</span>
+      </div>
+    );
+  }
+  // Tone thresholds match the OnTimeChip convention used in the tables.
+  const tone =
+    rate >= 90 ? "ok" :
+    rate >= 70 ? "warn" :
+    "alert";
+  const accent = {
+    ok:    "border-l-green bg-green-pale/30 text-green-dark",
+    warn:  "border-l-gold  bg-gold-pale/30  text-gold-dark",
+    alert: "border-l-flame bg-flame-pale/30 text-flame-dark",
+  }[tone];
+  return (
+    <div className={cn("card border-l-4 px-5 py-4 flex flex-col gap-1", accent.split(" ").slice(0, 2).join(" "))}>
+      <span className="text-xs font-semibold uppercase tracking-wide text-ink-600">
+        On-time delivery rate
+      </span>
+      <span className={cn("text-5xl font-bold tabular-nums leading-none", accent.split(" ").slice(2).join(" "))}>
+        {rate}%
+      </span>
+      <span className="text-xs text-ink-500 mt-1">
+        {onTimeCount} on time of {totalDelivered} delivered
+      </span>
+    </div>
+  );
+}
+
+/** Compact second-tier metric pill — mirrors the Dashboard pattern. */
+function CompactReportMetric({ label, value, valueColor }: {
+  label: string;
+  value: number;
+  valueColor?: string;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-2 px-3 py-2 rounded-md
+                    bg-ink-50 border border-ink-100">
+      <span className="text-xs font-medium text-ink-600">{label}</span>
+      <span className={cn("text-lg font-semibold tabular-nums", valueColor ?? "text-midnight")}>
+        {value}
+      </span>
     </div>
   );
 }
