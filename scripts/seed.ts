@@ -117,6 +117,11 @@ const SEED_STAKEHOLDERS: { departmentName: string; name: string; sortOrder: numb
  *    12 Delivery (depends on App Listing AND Car Ready in Showroom)
  */
 const SEED_ACTION_TYPES = [
+  // Forecast (pre-PO) ─────────────────────────────────────────────
+  // Lives ONLY on Forecast batches. Auto-created when Partnership
+  // submits a pre-PO commitment; compared against the regular
+  // "App Listing" action once the PO arrives for listing accuracy.
+  { name: "Pre-PO App Listing",           waitingLabel: "Pre-PO list pending",    doneLabel: "Pre-PO listed",       defaultDepartment: "Operations", sortOrder:  0, offsetDays:  0, offsetAnchor: "submission" as const },
   // Internal phase ────────────────────────────────────────────────
   { name: "Car Specs",                    waitingLabel: "Waiting Car Specs",      doneLabel: "Specs Received",      defaultDepartment: "Specs",      sortOrder:  1, offsetDays:  1, offsetAnchor: "submission" as const },
   { name: "Pricing",                      waitingLabel: "Waiting Pricing",        doneLabel: "Pricing Received",    defaultDepartment: "Pricing",    sortOrder:  2, offsetDays:  1, offsetAnchor: "submission" as const },
