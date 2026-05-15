@@ -14,7 +14,9 @@
  * — wire it through the data layer in a follow-up once the shape lands.
  */
 import { useEffect, useMemo, useState } from "react";
-import type { InsightsData, ClosureSummary } from "@/lib/insights-data";
+import type {
+  InsightsData, ClosureSummary, ForecastReliabilityRow,
+} from "@/lib/insights-data";
 import type {
   DepartmentRow, StakeholderRow, DealerReliabilityRow, CityReliabilityRow,
   CustomerImpactReport, CustomerImpactBatch,
@@ -34,7 +36,7 @@ interface Props {
   period: ReportPeriod;
 }
 
-type TrustTab = "dealer" | "ops" | "cities" | "risk";
+type TrustTab = "dealer" | "ops" | "cities" | "forecast" | "risk";
 
 export default function InsightsShell({ data, period }: Props) {
   const [trustTab, setTrustTab] = useState<TrustTab>("dealer");
@@ -73,6 +75,7 @@ export default function InsightsShell({ data, period }: Props) {
         active={trustTab}
         onChange={setTrustTab}
         report={data.report}
+        forecastReliability={data.forecastReliability}
       />
 
       <BatchExplorer rows={data.batchRows} />
@@ -162,8 +165,17 @@ function ClosureStrip({ closure }: { closure: ClosureSummary }) {
         value={closure.listed}
         accent="brand"
         valueColor="text-brand-dark"
-        subtitle={`${closure.carsListed} / ${closure.totalQuantity} cars · ${pct(closure.carsListed)}%`}
-        title="Batches marked live in the customer app. Subtitle: cars in those batches as a share of total PO quantity."
+        subtitle={(() => {
+          const main = `${closure.carsListed} / ${closure.totalQuantity} cars · ${pct(closure.carsListed)}%`;
+          // "X confirmed · Y forecast-only" — confirmed = listed on a
+          // post_po batch (normal flow); forecast-only = a pre_po batch
+          // where Pre-PO App Listing was done before the PO arrived.
+          const splitParts: string[] = [];
+          if (closure.carsListedConfirmed > 0)    splitParts.push(`${closure.carsListedConfirmed} confirmed`);
+          if (closure.carsListedForecastOnly > 0) splitParts.push(`${closure.carsListedForecastOnly} forecast-only`);
+          return splitParts.length > 0 ? `${main} · ${splitParts.join(" · ")}` : main;
+        })()}
+        title="Batches marked live in the customer app. Subtitle: cars in those batches as a share of total PO quantity. The split shows cars listed through the standard Intake → list flow (confirmed) vs. cars listed pre-PO on Partnership's commitment (forecast-only)."
       />
       <CompactMetric
         label="Delivered"
@@ -371,36 +383,87 @@ function CustomerImpactTable({ batches }: { batches: CustomerImpactBatch[] }) {
 // ──────────────────────────────────────────────────────────────────
 
 function TrustPanel({
-  active, onChange, report,
+  active, onChange, report, forecastReliability,
 }: {
   active: TrustTab;
   onChange: (t: TrustTab) => void;
   report: InsightsData["report"];
+  forecastReliability: ForecastReliabilityRow[];
 }) {
   return (
     <section className="card p-0 overflow-hidden">
       <header className="px-4 py-3 border-b border-ink-200">
         <h2 className="text-base font-bold text-midnight">🤝 Trust</h2>
         <p className="text-xs text-ink-500 mt-0.5">
-          Why we're slipping — three lenses: who we partner with, how we
-          execute internally, and how well the risk engine catches problems.
+          Why we're slipping — five lenses: who we partner with, how we
+          execute internally, how well the risk engine catches problems,
+          and how reliable Partnership's pre-PO commitments are.
         </p>
       </header>
 
-      <div role="tablist" className="flex border-b border-ink-200 bg-ink-50">
-        <TrustTabButton id="dealer" active={active} onChange={onChange} label="Dealer Reliability" />
-        <TrustTabButton id="ops"    active={active} onChange={onChange} label="Ops Performance" />
-        <TrustTabButton id="cities" active={active} onChange={onChange} label="Cities" />
-        <TrustTabButton id="risk"   active={active} onChange={onChange} label="Risk Engine" />
+      <div role="tablist" className="flex border-b border-ink-200 bg-ink-50 overflow-x-auto">
+        <TrustTabButton id="dealer"   active={active} onChange={onChange} label="Dealer Reliability" />
+        <TrustTabButton id="ops"      active={active} onChange={onChange} label="Ops Performance" />
+        <TrustTabButton id="cities"   active={active} onChange={onChange} label="Cities" />
+        <TrustTabButton id="forecast" active={active} onChange={onChange} label="Forecast Reliability" />
+        <TrustTabButton id="risk"     active={active} onChange={onChange} label="Risk Engine" />
       </div>
 
       <div className="p-3">
-        {active === "dealer" && <DealerTab rows={report.dealerReliability} />}
-        {active === "ops"    && <OpsTab depts={report.departments} stakeholders={report.stakeholders} />}
-        {active === "cities" && <CitiesTab rows={report.cityReliability} />}
-        {active === "risk"   && <RiskTab report={report} />}
+        {active === "dealer"   && <DealerTab rows={report.dealerReliability} />}
+        {active === "ops"      && <OpsTab depts={report.departments} stakeholders={report.stakeholders} />}
+        {active === "cities"   && <CitiesTab rows={report.cityReliability} />}
+        {active === "forecast" && <ForecastReliabilityTab rows={forecastReliability} />}
+        {active === "risk"     && <RiskTab report={report} />}
       </div>
     </section>
+  );
+}
+
+function ForecastReliabilityTab({ rows }: { rows: ForecastReliabilityRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <p className="text-sm text-ink-500 italic px-2 py-4">
+        No Forecasts submitted in this period yet. Forecasts created on the Forecast page will show up here grouped by submitter.
+      </p>
+    );
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="bg-ink-50 text-[0.65rem] text-ink-500 uppercase tracking-wide">
+          <tr>
+            <Th>Partnership member</Th>
+            <Th align="right">Submitted</Th>
+            <Th align="right">Fulfilled</Th>
+            <Th align="right">Split</Th>
+            <Th align="right">Cancelled</Th>
+            <Th align="right">Open</Th>
+            <Th align="right">Avg drift</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const realized = r.fulfilled + r.superseded;
+            const ratio = r.submitted === 0 ? 0 : Math.round((realized / r.submitted) * 100);
+            return (
+              <tr key={r.userId} className="border-t border-ink-200/60">
+                <Td>
+                  <span className="font-medium text-midnight">{r.name}</span>
+                  <span className="text-[0.65rem] text-ink-500 ml-2 tabular-nums">{ratio}% realized</span>
+                </Td>
+                <Td align="right" tabular>{r.submitted}</Td>
+                <Td align="right" tabular>{r.fulfilled}</Td>
+                <Td align="right" tabular>{r.superseded}</Td>
+                <Td align="right" tabular>{r.cancelled}</Td>
+                <Td align="right" tabular>{r.open}</Td>
+                <Td align="right" tabular>{r.avgDriftDays == null ? "—" : `${r.avgDriftDays}d`}</Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
