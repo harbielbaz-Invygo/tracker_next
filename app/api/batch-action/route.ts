@@ -225,7 +225,8 @@ export async function POST(req: NextRequest) {
     const autoUnblockedIds: number[] = [];
     const cascadeRevertedIds: number[] = [];
     let autoClosed = false;
-    const becameDone   = newStatus === "done";
+    const becameDone    = newStatus === "done";
+    const becameSkipped = newStatus === "skipped";
     const leftDoneState = current.status === "done" && newStatus !== "done";
 
     if (leftDoneState) {
@@ -238,8 +239,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (becameDone) {
+    if (becameDone || becameSkipped) {
+      // Both `done` and `skipped` satisfy a downstream dep — the parent
+      // is settled either way, so children can advance. (Previously
+      // only `done` triggered the cascade, which meant Skip-ping a
+      // parent silently stranded its dependents.)
       autoUnblockedIds.push(...await unblockDependents(tx, current.batchId, current.actionTypeId, nowIso));
+    }
+
+    if (becameDone) {
 
       // Look up the action type once — used by both auto-close and
       // auto-shift logic below.
@@ -403,12 +411,28 @@ async function unblockDependents(
   for (const r of batchRows) rowByActionType.set(r.actionTypeId, r);
 
   // 4. Compute eligible promotions in memory.
+  //
+  // A child is eligible when every parent dependency on this batch is
+  // SATISFIED. Two cases count as satisfied:
+  //   • Parent batch_action exists and is `done` or `skipped` — the
+  //     work is settled (or explicitly opted out).
+  //   • Parent action_type was never picked on this batch (no row in
+  //     batch_actions) — the dependency is dormant for this batch.
+  //     Without this case, a child blocked by a parent that's absent
+  //     from intake stays blocked forever (the old bug — e.g. "Create
+  //     SKU" depends on "Cars specs" + "Car Trim"; if Car Trim isn't
+  //     picked, marking Cars specs done could never unblock SKU).
   const promoteIds: number[] = [];
   for (const childActionTypeId of childActionTypeIds) {
     const childRow = rowByActionType.get(childActionTypeId);
     if (!childRow || childRow.status !== "blocked") continue;
     const parentIds = parentsByChild.get(childActionTypeId) ?? [];
-    if (parentIds.every((pid) => rowByActionType.get(pid)?.status === "done")) {
+    const allParentsSatisfied = parentIds.every((pid) => {
+      const parentRow = rowByActionType.get(pid);
+      if (!parentRow) return true; // not on this batch → dormant dep
+      return parentRow.status === "done" || parentRow.status === "skipped";
+    });
+    if (allParentsSatisfied) {
       promoteIds.push(childRow.id);
     }
   }
