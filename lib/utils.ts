@@ -11,10 +11,10 @@ export function cn(...inputs: ClassValue[]) {
 // ──────────────────────────────────────────────────────────────────
 //
 // Format:
-//   PO-{number}-{Dealer}-{n}of{total}-{City}-{qty}-{Carname}
+//   PO-{number}-{Dealer}-{n} of {total}-{Carname}-{City}-{qty}
 //
 // Example:
-//   PO-0114-Capital-2of3-Jeddah-5-Accent
+//   PO-0114-Capital-2 of 3-Accent-Jeddah-5
 //
 // Rules:
 //   - PO number is normalised to start with "PO-".
@@ -24,8 +24,12 @@ export function cn(...inputs: ClassValue[]) {
 //   - Carname strips the brand (the first word) and slugs the rest, so
 //     "Hyundai Accent" → "Accent", "Toyota Land Cruiser" → "LandCruiser",
 //     "BMW X5" → "X5". Single-word inputs are kept as-is.
-//   - Splits inside one PO submission are numbered 1of{total}…{total}of{total}.
-//   - URL-safe: only A-Z, a-z, 0-9, and `-`.
+//   - Splits inside one PO submission are numbered "1 of {total}"…"{total} of {total}".
+//   - Allowed characters: A-Z, a-z, 0-9, hyphen, and the literal " of "
+//     spaces between the split numbers (gets URL-encoded as %20 when
+//     the code appears in a query string; everywhere else displays
+//     with the readable spaces). Previous URL-safe guarantee dropped
+//     deliberately in favour of human readability.
 // ──────────────────────────────────────────────────────────────────
 
 export interface BatchCodeArgs {
@@ -49,10 +53,10 @@ export function makeBatchCode(args: BatchCodeArgs): string {
   return [
     normalizePoNumber(args.poNumber),
     firstWordSlug(args.dealerName),
-    `${args.splitN}of${args.splitTotal}`,
+    `${args.splitN} of ${args.splitTotal}`,
+    carNameSlug(args.model),
     firstWordSlug(args.city),
     String(args.qty),
-    carNameSlug(args.model),
   ].join("-");
 }
 
