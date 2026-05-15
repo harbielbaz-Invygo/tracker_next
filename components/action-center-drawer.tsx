@@ -639,8 +639,13 @@ function DrawerHeader({
                 Batch {data.batchNumberInPo} / {data.totalBatchesInPo}
               </span>
             )}
-            <span className="text-[0.65rem] text-ink-400 font-mono">{data.batchCode}</span>
           </div>
+
+          {/* Batch name — the full slug, explicitly labelled. */}
+          <p className="text-xs text-ink-600 flex flex-wrap items-baseline gap-x-2">
+            <span className="font-medium text-midnight">🏷️ Batch name:</span>
+            <span className="font-mono text-midnight">{data.batchCode}</span>
+          </p>
 
           {/* Model + year — large, prominent. */}
           <h2 className="text-xl font-bold text-midnight flex items-center gap-2">
@@ -1428,14 +1433,29 @@ function ActionsList({
   }
 
   // Two clusters render the drawer's two-flow mental model.
+  //   • Internal phase — parallel admin work (Specs / Pricing / SKU /
+  //     etc.) driven by `batch_actions`. Kanban variant; status flips
+  //     hit /api/batch-action. Surfaces FIRST — ops wraps the
+  //     paperwork before the dealer-side chain matters.
   //   • VIN chase — a strict linear chain driven by the `vin_chase_stages`
   //     table (its own catalogue, configured in Settings). One active
   //     step at a time; status flips hit /api/vin-stage.
-  //   • Internal phase — parallel admin work (Specs / Pricing / SKU /
-  //     etc.) driven by `batch_actions`. Kanban variant; status flips
-  //     hit /api/batch-action.
   return (
     <div className="space-y-6">
+      {internalActions.length > 0 && (
+        <ClusterSection
+          title="🏢 Internal phase"
+          subtitle="Specs · Pricing · SKU — runs in parallel"
+          accent="brand"
+          variant="kanban"
+          actions={internalActions}
+          alertsByActionId={alertsByActionId}
+          onMutated={onMutated}
+          layout={layout}
+          disabled={disabled}
+          lifecycleState={data.lifecycleState}
+        />
+      )}
       {vinStages.length > 0 && (
         <ClusterSection
           title="🔑 VIN chase"
@@ -1445,20 +1465,6 @@ function ActionsList({
           actions={[]}
           vinStages={vinStages}
           batchId={data.batchId}
-          alertsByActionId={alertsByActionId}
-          onMutated={onMutated}
-          layout={layout}
-          disabled={disabled}
-          lifecycleState={data.lifecycleState}
-        />
-      )}
-      {internalActions.length > 0 && (
-        <ClusterSection
-          title="🏢 Internal phase"
-          subtitle="Specs · Pricing · SKU — runs in parallel"
-          accent="brand"
-          variant="kanban"
-          actions={internalActions}
           alertsByActionId={alertsByActionId}
           onMutated={onMutated}
           layout={layout}
