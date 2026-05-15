@@ -8,8 +8,9 @@
 import { db } from "@/lib/db";
 import {
   batches, dealers, batchActions, actionTypes, departments, stakeholders,
+  vinChaseStages, batchVinStages,
 } from "@/lib/db/schema";
-import { eq, desc, and, asc } from "drizzle-orm";
+import { eq, desc, and, asc, sql } from "drizzle-orm";
 
 // ──────────────────────────────────────────────────────────────────
 // Display types
@@ -207,35 +208,55 @@ export async function getDashboardRows(): Promise<DashboardRow[]> {
     .leftJoin(dealers, eq(batches.dealerId, dealers.id))
     .orderBy(desc(batches.requestedAt));
 
-  // Pull every completed Delivery action and every completed VIN action in
-  // parallel. Delivery = batch is fully delivered; VIN done = execution zone.
-  const [delivered, vinActions] = await Promise.all([
-    db
-      .select({
-        batchId:     batchActions.batchId,
-        completedAt: batchActions.completedAt,
-      })
-      .from(batchActions)
-      .innerJoin(actionTypes, eq(batchActions.actionTypeId, actionTypes.id))
-      .where(and(
-        eq(batchActions.status, "done"),
-        eq(actionTypes.name, "Delivery"),
-      )),
-    db
-      .select({ batchId: batchActions.batchId })
-      .from(batchActions)
-      .innerJoin(actionTypes, eq(batchActions.actionTypeId, actionTypes.id))
-      .where(and(
-        eq(batchActions.status, "done"),
-        eq(actionTypes.name, "VIN"),
-      )),
-  ]);
+  // Pull every completed Delivery action and every completed VIN-Receiving
+  // stage in parallel. Delivery = batch is fully delivered; VIN done =
+  // execution zone (the pivot from "uncertain" to "predictable lead time").
+  //
+  // VIN moved from action_types into vin_chase_stages in PR #53, so we
+  // query batch_vin_stages here. Defensive try/catch so a pre-migration
+  // DB falls back to empty (won't 500 the dashboard).
+  const vinStageDone = await (async () => {
+    try {
+      return await db
+        .select({ batchId: batchVinStages.batchId })
+        .from(batchVinStages)
+        .innerJoin(vinChaseStages, eq(batchVinStages.stageId, vinChaseStages.id))
+        .where(and(
+          eq(batchVinStages.status, "done"),
+          // Match any stage with "vin" in its name (canonical name is
+          // "VIN Receiving"; admin can edit but most rename variants
+          // still contain "vin"). Permissive on purpose — false
+          // positives are harmless (we'd over-flag a batch as post-VIN),
+          // false negatives strand the signal.
+          sql`LOWER(${vinChaseStages.name}) LIKE '%vin%'`,
+        ));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table/i.test(msg)) return [];
+      throw err;
+    }
+  })();
+  const delivered = await db
+    .select({
+      batchId:     batchActions.batchId,
+      completedAt: batchActions.completedAt,
+    })
+    .from(batchActions)
+    .innerJoin(actionTypes, eq(batchActions.actionTypeId, actionTypes.id))
+    .where(and(
+      eq(batchActions.status, "done"),
+      eq(actionTypes.name, "Delivery"),
+    ));
 
   const deliveredByBatch = new Map<number, string>();
   for (const m of delivered) {
     if (m.completedAt) deliveredByBatch.set(m.batchId, m.completedAt.slice(0, 10));
   }
-  const vinDoneBatches = new Set<number>(vinActions.map((a) => a.batchId));
+  // A batch is "vin done" if it has at least one done VIN-related stage.
+  // We're permissive (any stage matching "vin") rather than checking a
+  // specific canonical stage id — admin renames + ordering shouldn't
+  // strand this signal.
+  const vinDoneBatches = new Set<number>(vinStageDone.map((a) => a.batchId));
 
   return rows.map(({ b, dealerName }) =>
     buildRow(b, dealerName, deliveredByBatch.get(b.id), vinDoneBatches.has(b.id)),
@@ -287,6 +308,33 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
     .where(eq(batchActions.batchId, b.id))
     .orderBy(asc(actionTypes.sortOrder));
 
+  // VIN chase stages on this batch — moved out of action_types in
+  // PR #53. Each done stage becomes a tick on the Reality track AND
+  // a row in the activity table, alongside batch_actions. Defensive
+  // try/catch for pre-migration DBs.
+  const vinStageRows = await (async () => {
+    try {
+      return await db
+        .select({
+          status:      batchVinStages.status,
+          completedAt: batchVinStages.completedAt,
+          notes:       batchVinStages.notes,
+          stageName:   vinChaseStages.name,
+          waitingLabel:vinChaseStages.waitingLabel,
+          doneLabel:   vinChaseStages.doneLabel,
+          sortOrder:   vinChaseStages.sortOrder,
+        })
+        .from(batchVinStages)
+        .innerJoin(vinChaseStages, eq(batchVinStages.stageId, vinChaseStages.id))
+        .where(eq(batchVinStages.batchId, b.id))
+        .orderBy(asc(vinChaseStages.sortOrder));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table/i.test(msg)) return [];
+      throw err;
+    }
+  })();
+
   const completedActions = allActions.filter((a) => a.status === "done");
 
   const deliveryAction = completedActions.find((a) => a.actionTypeName === "Delivery");
@@ -294,10 +342,16 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
     ? deliveryAction.completedAt.slice(0, 10)
     : null;
 
-  // ── Activity table rows — every batch_action with owner + delay ──
-  // We pass through the full ISO `completedAt` (date + time + timezone)
-  // rather than truncating to date-only so the UI can render the time too.
-  // Day-based delay math uses just the date portion.
+  // ── Activity table rows ─────────────────────────────────────────
+  // Three sources, all flattened into the same TimelineActivity shape:
+  //   1. batch_actions (internal phase work)
+  //   2. batch_vin_stages (VIN chase chain — its own table since PR #53)
+  //   3. batches.app_listed_at (App Listing milestone — its own column
+  //      since PR #71, single-event)
+  //
+  // We pass through the full ISO `completedAt` rather than truncating
+  // to date-only so the UI can render the time too. Day-based delay
+  // math uses just the date portion.
   const todayIso = new Date().toISOString().slice(0, 10);
   const activity: TimelineActivity[] = allActions.map((a) => {
     const completedDateOnly = a.completedAt ? a.completedAt.slice(0, 10) : null;
@@ -321,6 +375,40 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
     };
   });
 
+  // VIN chase stages → activity rows. No planned date (the chain has no
+  // expectedDate; ops marks done when the real-world event happens) so
+  // delayDays is always null. No department/stakeholder ownership
+  // either — VIN chase is dealer-side work, not internal.
+  for (const s of vinStageRows) {
+    activity.push({
+      actionTypeName: s.stageName,
+      actionLabel:    s.status === "done" ? s.doneLabel : s.waitingLabel,
+      status:         s.status as TimelineActivity["status"],
+      departmentName: null,
+      stakeholderName:null,
+      expectedDate:   null,
+      completedAt:    s.completedAt ?? null,
+      delayDays:      null,
+      notes:          s.notes ?? null,
+    });
+  }
+
+  // App Listing → activity row (when set). One synthetic row matching
+  // the TimelineActivity shape so the UI doesn't need a special case.
+  if (b.appListedAt) {
+    activity.push({
+      actionTypeName: "App Listing",
+      actionLabel:    "Listed in app",
+      status:         "done",
+      departmentName: null,
+      stakeholderName:null,
+      expectedDate:   null,
+      completedAt:    b.appListedAt,
+      delayDays:      null,
+      notes:          null,
+    });
+  }
+
   // Sort the activity narrative chronologically: skipped go to the
   // bottom; done/waiting/blocked sort by expectedDate (or the date
   // portion of completedAt when no plan), with rows missing both
@@ -334,9 +422,15 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
     return aKey.localeCompare(bKey);
   });
 
-  // Every completed action except Delivery → Reality ticks.
-  // delayDays = completed − expected (signed). 0 when no expectedDate or on time.
-  const realityActions = completedActions
+  // Reality ticks — three sources, all flattened into one ordered list:
+  //   1. Completed batch_actions (excluding Delivery — that's the
+  //      end-of-Reality marker rendered separately).
+  //   2. Completed VIN chase stages (each is a milestone tick).
+  //   3. App Listing milestone if set on this batch.
+  // delayDays = completed − expected (signed). 0 when no expectedDate
+  // or when the source has no concept of planned date (VIN chain, App
+  // Listing).
+  const realityFromActions = completedActions
     .filter((a) => a.actionTypeName !== "Delivery" && a.completedAt)
     .map((a) => {
       const completedIso = a.completedAt!.slice(0, 10);
@@ -347,6 +441,21 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
         delayDays,
       };
     });
+  const realityFromVinStages = vinStageRows
+    .filter((s) => s.status === "done" && s.completedAt)
+    .map((s) => ({
+      date:      s.completedAt!.slice(0, 10),
+      label:     s.doneLabel,
+      delayDays: 0,
+    }));
+  const realityFromAppListing = b.appListedAt
+    ? [{ date: b.appListedAt.slice(0, 10), label: "Listed in app", delayDays: 0 }]
+    : [];
+  const realityActions = [
+    ...realityFromActions,
+    ...realityFromVinStages,
+    ...realityFromAppListing,
+  ].sort((a, b) => a.date.localeCompare(b.date));
 
   const built = buildRow(b, dealerName, deliveredAt ?? undefined);
 
