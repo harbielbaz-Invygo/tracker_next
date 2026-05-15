@@ -249,7 +249,10 @@ function CarDeliveryModal({
 }) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const [closedAt, setClosedAt] = useState<string>(todayIso);
-  const [deliveredQty, setDeliveredQty] = useState<number>(data.quantity);
+  // Manual entry — only consulted when there are no per-city legs.
+  // When legs exist (length > 1), the effective delivered qty is
+  // derived from the sum of leg inputs and this state is ignored.
+  const [manualDeliveredQty, setManualDeliveredQty] = useState<number>(data.quantity);
   const [colorQtys, setColorQtys] = useState<Record<string, number>>(
     Object.fromEntries(
       data.colorMatrix.map((c) => [c.color, c.deliveredQuantity || c.requestedQuantity]),
@@ -265,6 +268,19 @@ function CarDeliveryModal({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Same for legs: sum across legs should equal total delivered.
+  const legSum = data.legs.reduce(
+    (sum, l) => sum + (legQtys[l.id] ?? 0),
+    0,
+  );
+
+  // Multi-leg batches treat the per-city inputs as the source of
+  // truth — the top "Delivered quantity" derives from legSum instead
+  // of being its own input. Single-leg / no-leg batches keep the
+  // manual top field. (One-row leg tables are hidden anyway.)
+  const hasLegs = data.legs.length > 1;
+  const deliveredQty = hasLegs ? legSum : manualDeliveredQty;
+
   // Color sum vs delivered qty — helpful sanity check.
   const colorSum = data.colorMatrix.reduce(
     (sum, c) => sum + (colorQtys[c.color] ?? 0),
@@ -272,14 +288,6 @@ function CarDeliveryModal({
   );
   const showColorMismatch =
     data.colorMatrix.length > 0 && colorSum !== deliveredQty;
-
-  // Same for legs: sum across legs should equal total delivered.
-  const legSum = data.legs.reduce(
-    (sum, l) => sum + (legQtys[l.id] ?? 0),
-    0,
-  );
-  const showLegMismatch =
-    data.legs.length > 0 && legSum !== deliveredQty;
 
   async function confirm() {
     setPending(true);
@@ -352,7 +360,8 @@ function CarDeliveryModal({
             </span>
           </label>
 
-          {/* Total qty */}
+          {/* Total qty — auto-derived from per-city sum when legs exist
+              (read-only in that case), otherwise a free input. */}
           <label className="block">
             <span className="block text-xs font-medium text-ink-600 mb-1">
               Delivered quantity
@@ -363,11 +372,23 @@ function CarDeliveryModal({
             <input
               type="number"
               min={0}
-              className="input tabular-nums"
+              className={cn(
+                "input tabular-nums",
+                hasLegs && "bg-ink-50 text-midnight cursor-not-allowed",
+              )}
               value={deliveredQty}
-              onChange={(e) => setDeliveredQty(parseInt(e.target.value || "0", 10))}
+              readOnly={hasLegs}
+              onChange={hasLegs
+                ? undefined
+                : (e) => setManualDeliveredQty(parseInt(e.target.value || "0", 10))}
               disabled={pending}
+              title={hasLegs ? "Auto-calculated from Per city totals below" : undefined}
             />
+            {hasLegs && (
+              <span className="block text-[0.65rem] text-ink-500 mt-1">
+                Σ Auto-calculated from Per city totals below.
+              </span>
+            )}
             {deliveredQty < data.quantity && (
               <span className="block text-[0.65rem] text-flame-dark mt-1">
                 ⚠️ Partial delivery — {data.quantity - deliveredQty} unit(s) short of the request.
@@ -382,11 +403,9 @@ function CarDeliveryModal({
             <div>
               <p className="text-xs font-medium text-ink-600 mb-1.5">
                 Per city
-                {showLegMismatch && (
-                  <span className="text-[0.65rem] font-normal text-flame-dark ml-1.5">
-                    (sum {legSum} ≠ delivered {deliveredQty})
-                  </span>
-                )}
+                <span className="text-[0.65rem] font-normal text-ink-500 ml-1.5 tabular-nums">
+                  (sum {legSum})
+                </span>
               </p>
               <div className="rounded-md border border-ink-200 overflow-hidden">
                 <table className="w-full text-sm">
