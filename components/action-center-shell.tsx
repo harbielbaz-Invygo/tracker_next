@@ -8,7 +8,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { ActionCenterRow } from "@/lib/action-center-data";
+import { type ActionCenterRow, isFullySettled } from "@/lib/action-center-data";
 import ActionCenterTable from "./action-center-table";
 import ActionCenterBatchList from "./action-center-batch-list";
 import ActionCenterDrawer from "./action-center-drawer";
@@ -85,11 +85,10 @@ export default function ActionCenterShell({ rows, totals }: Props) {
 
       if (departmentFilter !== "all" && !r.pendingDepartments.includes(departmentFilter)) return false;
 
-      // "Hide completed" — fully-done batches with no remaining waiting/blocked.
-      if (!showCompleted) {
-        const fullyDone = r.totalActions > 0 && r.actionsDone + r.actionsSkipped === r.totalActions;
-        if (fullyDone) return false;
-      }
+      // "Hide completed" — batches where every internal action AND
+      // every VIN chase stage is in a terminal state. Shared predicate
+      // with the top "Fully done" metric so both surfaces agree.
+      if (!showCompleted && isFullySettled(r)) return false;
       return true;
     }).sort((a, b) => {
       // Default sort: most-waiting first, then most-blocked, then delay desc.

@@ -35,12 +35,21 @@ export interface ActionCenterRow {
   closedAt: string | null;                                     // ISO yyyy-mm-dd
   closureReason: "delivered" | "cancelled" | null;
 
-  /* Action aggregates */
+  /* Action aggregates (internal phase — batch_actions) */
   actionsWaiting: number;
   actionsBlocked: number;
   actionsDone: number;
   actionsSkipped: number;
   totalActions: number;
+
+  /* VIN chase aggregates (batch_vin_stages) — separate model now, so
+   * we count them independently. A "fully done" batch in the
+   * operational sense requires both internal phase and VIN chase to
+   * be terminal (done or skipped). */
+  vinStagesWaiting: number;
+  vinStagesDone: number;
+  vinStagesSkipped: number;
+  totalVinStages: number;
 
   /* Next pending — for the "what's needed" column. */
   nextActionLabel: string | null;       // e.g. "Waiting VIN"
@@ -307,6 +316,33 @@ export async function getActionCenterRows(
     byBatch.set(a.batchId, arr);
   }
 
+  // VIN chase aggregates — one row per (batch × stage) in batch_vin_stages.
+  // Wrapped in try/catch so a DB without the migration applied falls back
+  // to empty counts rather than 500ing the whole Action Center.
+  const vinStageRows = await (async () => {
+    try {
+      return await db
+        .select({
+          batchId: batchVinStages.batchId,
+          status:  batchVinStages.status,
+        })
+        .from(batchVinStages);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table/i.test(msg)) return [];
+      throw err;
+    }
+  })();
+  const vinByBatch = new Map<number, { waiting: number; done: number; skipped: number; total: number }>();
+  for (const v of vinStageRows) {
+    const tally = vinByBatch.get(v.batchId) ?? { waiting: 0, done: 0, skipped: 0, total: 0 };
+    tally.total++;
+    if (v.status === "done") tally.done++;
+    else if (v.status === "skipped") tally.skipped++;
+    else tally.waiting++;
+    vinByBatch.set(v.batchId, tally);
+  }
+
   return batchRows.map(({ b, dealerName }) => {
     const bAct = (byBatch.get(b.id) ?? []).slice().sort((x, y) => x.sortOrder - y.sortOrder);
 
@@ -362,6 +398,11 @@ export async function getActionCenterRows(
       actionsDone,
       actionsSkipped,
       totalActions: bAct.length,
+
+      vinStagesWaiting: vinByBatch.get(b.id)?.waiting ?? 0,
+      vinStagesDone:    vinByBatch.get(b.id)?.done ?? 0,
+      vinStagesSkipped: vinByBatch.get(b.id)?.skipped ?? 0,
+      totalVinStages:   vinByBatch.get(b.id)?.total ?? 0,
 
       nextActionLabel:    next?.waitingLabel ?? null,
       nextDepartmentName: next?.departmentName ?? null,
@@ -623,9 +664,34 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
 export function summarizeActionCenter(rows: ActionCenterRow[]) {
   const total = rows.length;
   const withWaiting = rows.filter((r) => r.actionsWaiting > 0).length;
-  const fullyDone   = rows.filter((r) => r.totalActions > 0 && r.actionsDone === r.totalActions).length;
-  const delayed     = rows.filter((r) => r.delayDays > 0).length;
+  // "Fully done" = every internal-phase batch_action AND every VIN
+  // chase stage on the batch is in a terminal state (done or skipped).
+  // Catches the case where ops settled all the paperwork but the VIN
+  // chain is still empty/waiting — those batches aren't really done,
+  // and the metric used to mis-count them by ignoring VIN stages.
+  const fullyDone = rows.filter((r) => isFullySettled(r)).length;
+  const delayed   = rows.filter((r) => r.delayDays > 0).length;
   return { total, withWaiting, fullyDone, delayed };
+}
+
+/**
+ * Shared "every step is settled" predicate. Used by the top metric and
+ * by the "Show completed" filter so both surfaces stay in sync.
+ *
+ * Note: this is the OPERATIONAL completion state — every step done or
+ * explicitly skipped. It is NOT the same as `batches.closedAt`. A batch
+ * is only formally CLOSED when the canonical "Delivery" action_type is
+ * marked done (auto-close) or ops cancels it. A "fully settled" batch
+ * is one where all work is wrapped up and ops just needs to click the
+ * Delivery action to officially close.
+ */
+export function isFullySettled(r: ActionCenterRow): boolean {
+  if (r.totalActions === 0 && r.totalVinStages === 0) return false;
+  const internalSettled = r.totalActions === 0
+    || r.actionsDone + r.actionsSkipped === r.totalActions;
+  const vinSettled = r.totalVinStages === 0
+    || r.vinStagesDone + r.vinStagesSkipped === r.totalVinStages;
+  return internalSettled && vinSettled;
 }
 
 // Slack formatter moved to `lib/action-center-slack.ts` so client components can
