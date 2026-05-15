@@ -166,6 +166,17 @@ async function handleDepartment(b: Extract<Body, { resource: "department" }>) {
 // Action types
 // ──────────────────────────────────────────────────────────────────
 
+/**
+ * The action_type that closes the batch. Multiple code paths
+ * (api/batch-action auto-close, api/batch-close modal flow,
+ * dashboard timeline, etc.) match by literal name. Renaming or
+ * deleting this row would silently break batch closure — so we
+ * refuse both at the API level. Display labels (waitingLabel,
+ * doneLabel) and other metadata (department, sortOrder,
+ * dependencies) remain freely editable.
+ */
+const DELIVERY_ACTION_TYPE_NAME = "Delivery";
+
 async function handleActionType(b: Extract<Body, { resource: "action-type" }>) {
   if (b.op === "create") {
     if (!b.name?.trim() || !b.waitingLabel?.trim() || !b.doneLabel?.trim()) {
@@ -173,6 +184,22 @@ async function handleActionType(b: Extract<Body, { resource: "action-type" }>) {
         { error: "name, waitingLabel, doneLabel all required" },
         { status: 400 },
       );
+    }
+    if (b.name.trim() === DELIVERY_ACTION_TYPE_NAME) {
+      // Don't allow accidentally creating a SECOND "Delivery" row —
+      // would shadow the canonical one (or hit the unique constraint
+      // with a confusing error). Tell admin why.
+      const [existing] = await db
+        .select({ id: actionTypes.id })
+        .from(actionTypes)
+        .where(eq(actionTypes.name, DELIVERY_ACTION_TYPE_NAME))
+        .limit(1);
+      if (existing) {
+        return NextResponse.json(
+          { error: `An action type named "${DELIVERY_ACTION_TYPE_NAME}" already exists. It's the canonical batch-closing action and is locked.` },
+          { status: 409 },
+        );
+      }
     }
     const [row] = await db.insert(actionTypes).values({
       name: b.name.trim(),
@@ -184,6 +211,37 @@ async function handleActionType(b: Extract<Body, { resource: "action-type" }>) {
     return NextResponse.json({ ok: true, row });
   }
   if (b.op === "update") {
+    // Look up the target row so we can detect (a) renames of the
+    // canonical Delivery row, and (b) any other row trying to take
+    // the name "Delivery".
+    const [target] = await db
+      .select({ id: actionTypes.id, name: actionTypes.name })
+      .from(actionTypes)
+      .where(eq(actionTypes.id, b.id))
+      .limit(1);
+    if (!target) {
+      return NextResponse.json({ error: `action_type #${b.id} not found` }, { status: 404 });
+    }
+    if (b.name !== undefined) {
+      const newName = b.name.trim();
+      if (target.name === DELIVERY_ACTION_TYPE_NAME && newName !== DELIVERY_ACTION_TYPE_NAME) {
+        return NextResponse.json(
+          {
+            error: `Cannot rename "${DELIVERY_ACTION_TYPE_NAME}" — it's the batch-closing action and is hard-referenced by name in multiple code paths. Change the waiting/done LABELS instead (those are pure display strings and safe to rename).`,
+          },
+          { status: 409 },
+        );
+      }
+      if (newName === DELIVERY_ACTION_TYPE_NAME && target.name !== DELIVERY_ACTION_TYPE_NAME) {
+        return NextResponse.json(
+          {
+            error: `Cannot rename to "${DELIVERY_ACTION_TYPE_NAME}" — that name is reserved for the canonical batch-closing action.`,
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     const updates: Partial<typeof actionTypes.$inferInsert> = {};
     if (b.name !== undefined)               updates.name = b.name.trim();
     if (b.waitingLabel !== undefined)       updates.waitingLabel = b.waitingLabel.trim();
@@ -197,6 +255,21 @@ async function handleActionType(b: Extract<Body, { resource: "action-type" }>) {
     return NextResponse.json({ ok: true });
   }
   if (b.op === "delete") {
+    // Refuse deleting the canonical Delivery row — batch-close logic
+    // would have no way to mark a batch delivered.
+    const [target] = await db
+      .select({ name: actionTypes.name })
+      .from(actionTypes)
+      .where(eq(actionTypes.id, b.id))
+      .limit(1);
+    if (target?.name === DELIVERY_ACTION_TYPE_NAME) {
+      return NextResponse.json(
+        {
+          error: `Cannot delete "${DELIVERY_ACTION_TYPE_NAME}" — it's the batch-closing action and is hard-referenced by name in multiple code paths.`,
+        },
+        { status: 409 },
+      );
+    }
     // batch_actions references action_types ON DELETE RESTRICT — refuse if
     // the action type is in use anywhere. Schema dependency cascade is
     // already cascade-on-delete for action_dependencies.
