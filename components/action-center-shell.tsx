@@ -8,7 +8,8 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { type ActionCenterRow, isFullySettled } from "@/lib/action-center-data";
+import type { ActionCenterRow } from "@/lib/action-center-data";
+import { isFullySettled } from "@/lib/action-center-predicates";
 import ActionCenterTable from "./action-center-table";
 import ActionCenterBatchList from "./action-center-batch-list";
 import ActionCenterDrawer from "./action-center-drawer";
