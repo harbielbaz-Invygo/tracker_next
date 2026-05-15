@@ -569,18 +569,18 @@ function DrawerHeader({
 
   return (
     <div className="mb-6 pb-5 border-b border-ink-100">
-      {/* PO code — the primary headline. Mono font, prominent. */}
+      {/* ── Title row ────────────────────────────────────────────
+          PO code on top (mono, bold) — the canonical identifier ops
+          searches by. Model name below, large and prominent — what
+          ops actually NAMES the batch in conversation. Quantity /
+          dealer / lifecycle as a meta sub-line. */}
       <p className="text-base font-mono font-semibold text-midnight tracking-tight">
         {data.batchCode}
       </p>
-
-      {/* Model + year — secondary identifier under the PO code. */}
-      <h2 className="text-base font-semibold text-ink-700 mt-1 flex items-center gap-2">
+      <h2 className="text-xl font-bold text-midnight mt-1 flex items-center gap-2">
         <span aria-hidden="true">🛠️</span>
         {data.modelYear}
       </h2>
-
-      {/* Quantity · dealer · lifecycle */}
       <p className="text-xs text-ink-500 mt-1">
         <span className="tabular-nums">{data.quantity}×</span>
         <Sep />
@@ -591,55 +591,44 @@ function DrawerHeader({
         </span>
       </p>
 
-      {/* Multi-city legs breakdown */}
-      {data.legs.length > 1 && (
-        <p className="text-[0.7rem] text-ink-500 mt-1 flex flex-wrap gap-x-2">
-          <span className="font-medium text-midnight">🚚 {data.legs.length} legs:</span>
-          {data.legs.map((leg, i) => (
-            <span key={leg.id} className="tabular-nums">
-              {leg.city} ({leg.requestedQuantity}
-              {leg.deliveredQuantity > 0 && (
-                <> · {leg.deliveredQuantity} delivered</>
-              )})
-              {i < data.legs.length - 1 && <span className="text-ink-400 ml-1">·</span>}
-            </span>
-          ))}
-        </p>
-      )}
-
-      {/* Availability dates — important info ops navigates by. */}
-      <AvailabilityDatesLine data={data} />
-
-      {/* Unified action bar — all top-level batch actions on one row.
-          Layout: 3 secondary buttons left-aligned (📱 Mark as listed,
-          📅 Shift date, 🚫 Cancel batch), spacer pushes the primary
-          🚚 Mark as delivered to the right. Secondary buttons are
-          equal size; primary is bolder + larger to draw the eye.
-          When the batch is closed everything is hidden — the
+      {/* ── Two-column body ──────────────────────────────────────
+          LEFT  = shipment details (legs, PO/Ops availability dates,
+                 status delta) — the "what & when" ops reads.
+          RIGHT = action bar — vertical stack of 4 buttons. Mark as
+                 delivered is the bottom anchor (the closing
+                 action) rendered larger + emerald-green-filled to
+                 stand apart from the three secondary buttons above
+                 it.
+          Collapses to a single column on small screens. The right
+          column hides entirely when the batch is closed — the
           ClosedBanner below carries the final state. */}
-      {!isClosed && (
-        <div className="mt-4 flex items-center gap-2 flex-wrap">
-          {/* Mark as listed — three render modes (listed, editing, idle). */}
-          {appListingForm !== false ? (
-            <AppListingInlineForm
-              batchId={data.batchId}
-              initialAt={
-                appListingForm === "edit" && data.appListedAt
-                  ? data.appListedAt
-                  : null
-              }
-              onSaved={() => {
-                setAppListingForm(false);
-                onAppListed();
-              }}
-              onCancel={() => setAppListingForm(false)}
-            />
-          ) : isListed ? (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
+      <div className="mt-4 grid grid-cols-1 lg:grid-cols-[1fr,16rem] gap-x-6 gap-y-4 items-start">
+        {/* LEFT column */}
+        <div className="space-y-2">
+          {data.legs.length > 1 && (
+            <p className="text-xs text-ink-600 flex flex-wrap gap-x-2 items-baseline">
+              <span className="font-semibold text-midnight">🚚 {data.legs.length} legs:</span>
+              {data.legs.map((leg, i) => (
+                <span key={leg.id} className="tabular-nums">
+                  {leg.city} ({leg.requestedQuantity}
+                  {leg.deliveredQuantity > 0 && (
+                    <> · {leg.deliveredQuantity} delivered</>
+                  )})
+                  {i < data.legs.length - 1 && <span className="text-ink-400 ml-1">·</span>}
+                </span>
+              ))}
+            </p>
+          )}
+          <AvailabilityDatesLine data={data} />
+          {/* Listed-state chip lives in the left column when the
+              batch is already listed, so the right column is purely
+              forward-looking actions. */}
+          {isListed && appListingForm === false && !isClosed && (
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md
                             bg-green-pale border border-green/40
-                            text-xs font-medium text-green-dark">
+                            text-[0.7rem] font-medium text-green-dark">
               <span aria-hidden="true">📱</span>
-              <span>Listed · </span>
+              <span>Listed ·</span>
               <span className="tabular-nums">
                 {data.appListedAt ? fmtLocalDateTime(data.appListedAt) : "—"}
               </span>
@@ -653,58 +642,84 @@ function DrawerHeader({
                 ✎
               </button>
             </div>
-          ) : (
+          )}
+        </div>
+
+        {/* RIGHT column — vertical action stack */}
+        {!isClosed && (
+          <div className="flex flex-col gap-2 lg:w-full">
+            {/* Mark as listed — either the button, the inline picker,
+                or hidden (chip moved to the left column when listed). */}
+            {appListingForm !== false ? (
+              <AppListingInlineForm
+                batchId={data.batchId}
+                initialAt={
+                  appListingForm === "edit" && data.appListedAt
+                    ? data.appListedAt
+                    : null
+                }
+                onSaved={() => {
+                  setAppListingForm(false);
+                  onAppListed();
+                }}
+                onCancel={() => setAppListingForm(false)}
+              />
+            ) : !isListed ? (
+              <button
+                type="button"
+                onClick={() => setAppListingForm("new")}
+                className="text-sm font-medium px-3 py-2 rounded-md
+                           border border-brand text-brand-dark
+                           bg-white hover:bg-brand-pastel transition-colors
+                           w-full"
+                title="Mark cars as listed in the app. Defaults to now; you can pick a different time."
+              >
+                📱 Mark as listed
+              </button>
+            ) : null}
+
             <button
               type="button"
-              onClick={() => setAppListingForm("new")}
-              className="text-xs font-medium px-3 py-1.5 rounded-md
-                         border border-brand text-brand-dark
-                         bg-white hover:bg-brand-pastel transition-colors"
-              title="Mark cars as listed in the app. Defaults to now; you can pick a different time."
+              onClick={() => setShifting(true)}
+              className="text-sm font-medium px-3 py-2 rounded-md
+                         border border-gold text-gold-dark
+                         bg-white hover:bg-gold-pale transition-colors
+                         w-full"
+              title="Shift the projected availability date — captures bookings + reason"
             >
-              📱 Mark as listed
+              📅 Shift availability date
             </button>
-          )}
 
-          <button
-            type="button"
-            onClick={() => setShifting(true)}
-            className="text-xs font-medium px-3 py-1.5 rounded-md
-                       border border-gold text-gold-dark
-                       bg-white hover:bg-gold-pale transition-colors"
-            title="Shift the projected availability date — captures bookings + reason"
-          >
-            📅 Shift availability date
-          </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              className="text-sm font-medium px-3 py-2 rounded-md
+                         border border-flame text-flame-dark
+                         bg-white hover:bg-flame-pale transition-colors
+                         w-full"
+              title="Cancel this batch — destructive. Ops can no longer update its actions."
+            >
+              🚫 Cancel batch
+            </button>
 
-          <button
-            type="button"
-            onClick={() => setConfirming(true)}
-            className="text-xs font-medium px-3 py-1.5 rounded-md
-                       border border-flame text-flame-dark
-                       bg-white hover:bg-flame-pale transition-colors"
-            title="Cancel this batch — destructive. Ops can no longer update its actions."
-          >
-            🚫 Cancel batch
-          </button>
-
-          {/* Push the primary action to the right edge so it visually
-              stands apart from the secondary buttons. */}
-          <span className="flex-1 min-w-0" aria-hidden="true" />
-
-          <button
-            type="button"
-            onClick={() => setDelivering(true)}
-            className="text-sm font-semibold px-4 py-2 rounded-md
-                       bg-green-dark text-white border border-green-dark
-                       hover:bg-green transition-colors
-                       shadow-sm"
-            title="Mark this batch delivered — opens the qty + colours confirmation"
-          >
-            🚚 Mark as delivered
-          </button>
-        </div>
-      )}
+            {/* Mark as delivered — visual anchor of the column.
+                Larger padding, bolder, filled emerald, shadow. */}
+            <button
+              type="button"
+              onClick={() => setDelivering(true)}
+              className="mt-1 text-base font-bold px-4 py-3 rounded-md
+                         bg-green-dark text-white border-2 border-green-dark
+                         hover:bg-green hover:border-green
+                         shadow-md transition-colors
+                         w-full flex items-center justify-center gap-2"
+              title="Mark this batch delivered — opens the qty + colours confirmation"
+            >
+              <span aria-hidden="true">🚚</span>
+              <span>Mark as delivered</span>
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Modals — same triggers, just consolidated up here. */}
       {confirming && (
