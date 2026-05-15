@@ -17,6 +17,7 @@ import {
 import type { ActiveAlert } from "@/lib/alert-engine";
 import { highestSeverity } from "@/lib/alert-engine";
 import { getLeadTimeDays } from "@/lib/rules";
+import { isFullySettled } from "./action-center-predicates";
 
 // ──────────────────────────────────────────────────────────────────
 // Public types
@@ -682,6 +683,10 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
   };
 }
 
+// Re-export the predicate so existing server callers that imported
+// `isFullySettled` from this module keep working.
+export { isFullySettled };
+
 /** Aggregate summary metrics for the top of the page. */
 export function summarizeActionCenter(rows: ActionCenterRow[]) {
   const total = rows.length;
@@ -694,26 +699,6 @@ export function summarizeActionCenter(rows: ActionCenterRow[]) {
   const fullyDone = rows.filter((r) => isFullySettled(r)).length;
   const delayed   = rows.filter((r) => r.delayDays > 0).length;
   return { total, withWaiting, fullyDone, delayed };
-}
-
-/**
- * Shared "every step is settled" predicate. Used by the top metric and
- * by the "Show completed" filter so both surfaces stay in sync.
- *
- * Note: this is the OPERATIONAL completion state — every step done or
- * explicitly skipped. It is NOT the same as `batches.closedAt`. A batch
- * is only formally CLOSED when the canonical "Delivery" action_type is
- * marked done (auto-close) or ops cancels it. A "fully settled" batch
- * is one where all work is wrapped up and ops just needs to click the
- * Delivery action to officially close.
- */
-export function isFullySettled(r: ActionCenterRow): boolean {
-  if (r.totalActions === 0 && r.totalVinStages === 0) return false;
-  const internalSettled = r.totalActions === 0
-    || r.actionsDone + r.actionsSkipped === r.totalActions;
-  const vinSettled = r.totalVinStages === 0
-    || r.vinStagesDone + r.vinStagesSkipped === r.totalVinStages;
-  return internalSettled && vinSettled;
 }
 
 // Slack formatter moved to `lib/action-center-slack.ts` so client components can
