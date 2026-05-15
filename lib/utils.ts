@@ -121,6 +121,36 @@ function carNameSlug(s: string | null | undefined): string {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// Forecast batch code
+// ──────────────────────────────────────────────────────────────────
+//
+// Forecast batches don't have a PO number or a confirmed model — they
+// come in with only Qty / City / Expected Date / Submitter. The code
+// uses a `FCST` prefix and the dealer + city + qty slugs, suffixed
+// with the unix-second timestamp for uniqueness (multiple Forecasts
+// for the same {dealer, city, qty} are normal).
+//
+// Example: `FCST-Capital-Riyadh-30-1747843200`
+// ──────────────────────────────────────────────────────────────────
+
+export interface ForecastBatchCodeArgs {
+  dealerName: string;
+  city: string;
+  qty: number;
+}
+
+export function makeForecastBatchCode(args: ForecastBatchCodeArgs): string {
+  const seconds = Math.floor(Date.now() / 1000);
+  return [
+    "FCST",
+    firstWordSlug(args.dealerName),
+    firstWordSlug(args.city),
+    String(args.qty),
+    String(seconds),
+  ].join("-");
+}
+
+// ──────────────────────────────────────────────────────────────────
 // Misc
 // ──────────────────────────────────────────────────────────────────
 

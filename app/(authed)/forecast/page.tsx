@@ -1,32 +1,44 @@
 /**
  * Forecast — the Pre-PO exception flow.
  *
- * Cars get tracked BEFORE the PO is signed, on the strength of Partnership's
- * confidence. The system locks confidence at submit so we can later answer:
- * "was the partnership team's confidence trustworthy?"
+ * Partnership team commits to a Qty / City / Expected Delivery Date
+ * before the PO is signed. We capture the commitment so we can later
+ * measure how confident their commitments actually were.
  *
- * When the PO arrives, Ops opens the Forecast record, hits "Convert to Intake",
- * lands on the Intake page pre-filled, and the batch flips from `pre_po` to
- * `post_po`. Confidence-at-conversion is preserved for the analytic.
+ * On submit we create:
+ *   - a pre_po `batches` row with only those minimum fields
+ *   - a 1:1 `batch_forecasts` row (submission date + submitter)
+ *   - a "Pre-PO App Listing" action (auto-created on every Forecast)
  *
- * Access: Ops + Admin (Ops captures the request on behalf of Partnership).
+ * When the real PO arrives, Ops links the Forecast via Intake (PR 3)
+ * and the same record flips to post_po. The Forecast row stays for
+ * accuracy tracking (drift, listing accuracy, qty shortfall).
  *
- * Phase D ports the request-details + commitment form here.
+ * Access: Ops + Admin.
  */
 import AccessGate from "@/components/access-gate";
 import PageHeader from "@/components/page-header";
+import ForecastShell from "@/components/forecast-shell";
+import { getForecastRows, getForecastFormOptions } from "@/lib/forecast-data";
 
-export default function ForecastPage() {
+export const dynamic = "force-dynamic";
+
+export default async function ForecastPage() {
+  const [rows, options] = await Promise.all([
+    getForecastRows(),
+    getForecastFormOptions(),
+  ]);
+
   return (
     <AccessGate view="Forecast">
       <div>
         <PageHeader
           view="Forecast"
-          subtitle={<>Pre-PO bets. Capture an upcoming batch before the PO is signed, on Partnership&apos;s confidence. Used to track whether confidence-driven bets actually hit their dates.</>}
+          subtitle={<>Pre-PO bets. Capture an upcoming batch before the PO is signed, on Partnership&apos;s commitment. Used to track whether confidence-driven bets actually translate into delivered cars.</>}
         />
 
         <div
-          className="card !bg-gold-pale !border-gold-brand flex gap-3"
+          className="card !bg-gold-pale !border-gold flex gap-3 mb-4"
           role="note"
         >
           <span aria-hidden="true" className="text-lg leading-snug">⚠️</span>
@@ -38,12 +50,7 @@ export default function ForecastPage() {
           </p>
         </div>
 
-        <div className="card mt-4">
-          <p className="text-sm text-ink-600">
-            🚧 Scaffold placeholder — Phase D delivers the request-details form
-            with locked-at-submit Partnership confidence.
-          </p>
-        </div>
+        <ForecastShell rows={rows} options={options} />
       </div>
     </AccessGate>
   );
