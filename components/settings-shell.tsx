@@ -477,6 +477,20 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
           const dirty = JSON.stringify(draft) !== JSON.stringify(fb);
           const isFirst = idx === 0;
           const isLast  = idx === data.actionTypes.length - 1;
+          // The canonical batch-closing action. Hard-referenced by name
+          // in /api/batch-close, /api/batch-action's auto-close cascade,
+          // and the dashboard timeline — renaming or deleting it would
+          // silently break batch closure. So we lock the Name input +
+          // Delete button on this row. Labels, department, sort order,
+          // and dependencies stay freely editable.
+          const isClosingAction = t.name === "Delivery";
+          // If admin tampered with the name in the draft, drop the
+          // attempted change when computing "dirty" so the Save button
+          // doesn't enable from a no-op rename attempt on a locked row.
+          const effectiveDraft = isClosingAction
+            ? { ...draft, name: t.name }
+            : draft;
+          const effectiveDirty = JSON.stringify(effectiveDraft) !== JSON.stringify(fb);
           return (
             <div key={t.id} className="border border-ink-200 rounded-md p-3 bg-white flex flex-col gap-3">
               {/* Header: reorder arrows + sort_order · name · save/delete */}
@@ -506,21 +520,40 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
                     title="Move down"
                   >▼</button>
                 </div>
-                <Field label="Name">
+                <Field label={
+                  isClosingAction
+                    ? <span className="inline-flex items-center gap-1.5">
+                        <span>Name</span>
+                        <span className="text-[0.6rem] uppercase tracking-wide font-semibold text-green-dark
+                                         bg-green-pale border border-green/40 rounded-sm px-1.5 py-0.5"
+                              title="This action_type is hard-referenced by name across batch-close logic. Renaming it would break batch closure.">
+                          🔒 Closes the batch
+                        </span>
+                      </span>
+                    : "Name"
+                }>
                   <input className="input"
                          value={draft.name}
+                         readOnly={isClosingAction}
+                         aria-readonly={isClosingAction || undefined}
+                         title={isClosingAction
+                           ? "Name is locked — this row is the canonical batch-closing action. Labels and other fields are still editable."
+                           : undefined}
                          onChange={(e) => setDraft(t.id, { name: e.target.value })} />
                 </Field>
                 <div className="inline-flex gap-1.5 self-end">
                   <button
                     type="button"
-                    disabled={!dirty || pending}
+                    disabled={!effectiveDirty || pending}
                     className="btn btn-primary text-xs"
                     onClick={() => run((async () => {
                       await callApi({
                         resource: "action-type", op: "update",
                         id: t.id,
-                        name: draft.name.trim(),
+                        // Submit the locked name verbatim — server-side
+                        // guard would refuse a rename anyway, but
+                        // sending the canonical value avoids a 409.
+                        name: isClosingAction ? t.name : draft.name.trim(),
                         waitingLabel: draft.waitingLabel.trim(),
                         doneLabel: draft.doneLabel.trim(),
                         defaultDepartmentId: draft.defaultDepartmentId,
@@ -530,9 +563,13 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
                   >Save</button>
                   <button
                     type="button"
-                    disabled={pending}
+                    disabled={pending || isClosingAction}
                     className="btn text-xs"
+                    title={isClosingAction
+                      ? "Cannot delete — this is the canonical batch-closing action."
+                      : undefined}
                     onClick={() => {
+                      if (isClosingAction) return;
                       if (!confirm(`Delete action type "${t.name}"?`)) return;
                       run(callApi({ resource: "action-type", op: "delete", id: t.id }));
                     }}
