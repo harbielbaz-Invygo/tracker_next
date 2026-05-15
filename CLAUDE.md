@@ -34,6 +34,13 @@ Don't auto-merge — pause and confirm — if the change involves any of:
 ### Quality gates before merging
 
 - `npx tsc --noEmit` exits 0.
+- **Run `npm run build` when a change moves runtime values across the
+  client/server boundary** — e.g. extracting a function into a shared
+  module that's imported by both a server route and a `"use client"`
+  component. TypeScript doesn't enforce these boundaries; webpack
+  does. `tsc` passing has shipped builds that fail on Vercel with
+  `UnhandledSchemeError: node:fs is not handled by plugins`. The
+  bundle-time check catches it; the type-check doesn't.
 - No `console.log` left in committed code.
 - No unrelated formatting noise in the diff.
 - Commit message + PR body explain the *why*, not just the *what*.
