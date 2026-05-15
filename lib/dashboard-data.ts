@@ -10,7 +10,21 @@ import {
   batches, dealers, batchActions, actionTypes, departments, stakeholders,
   vinChaseStages, batchVinStages,
 } from "@/lib/db/schema";
-import { eq, desc, and, asc, sql } from "drizzle-orm";
+import { eq, desc, and, asc, gte, or, isNull, sql } from "drizzle-orm";
+import type { ReportPeriod } from "./reports-period";
+
+/**
+ * Compute the inclusive lower-bound ISO date for a given period.
+ * Returns null for "all" — caller should treat that as "no filter".
+ * Duplicated from reports-data.ts so dashboard-data can stay
+ * self-contained without circular imports.
+ */
+function fromIsoForPeriod(period: ReportPeriod): string | null {
+  if (period === "all") return null;
+  const days = { "30d": 30, "90d": 90, "6m": 183 }[period];
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  return new Date(d.getTime() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
 
 // ──────────────────────────────────────────────────────────────────
 // Display types
@@ -198,15 +212,24 @@ function stageDisplay(code: string | null | undefined): string {
  * with the canonical name "Delivery" — the seed/Settings always uses
  * that name as the action_type identity for the final hand-off.
  */
-export async function getDashboardRows(): Promise<DashboardRow[]> {
-  const rows = await db
+export async function getDashboardRows(period: ReportPeriod = "all"): Promise<DashboardRow[]> {
+  const fromIso = fromIsoForPeriod(period);
+  // Same period semantics as Reports: open batches always show
+  // (current state), closed batches must have closedAt within the
+  // window. Filters at the DB layer so the dashboard row count
+  // matches the metric tiles exactly.
+  const rowsQuery = db
     .select({
       b: batches,
       dealerName: dealers.name,
     })
     .from(batches)
     .leftJoin(dealers, eq(batches.dealerId, dealers.id))
-    .orderBy(desc(batches.requestedAt));
+    .orderBy(desc(batches.requestedAt))
+    .$dynamic();
+  const rows = fromIso
+    ? await rowsQuery.where(or(isNull(batches.closedAt), gte(batches.closedAt, fromIso)))
+    : await rowsQuery;
 
   // Pull every completed Delivery action and every completed VIN-Receiving
   // stage in parallel. Delivery = batch is fully delivered; VIN done =
