@@ -176,6 +176,19 @@ export interface ActionDetail {
 export interface DrawerData {
   batchId: number;
   batchCode: string;
+  /**
+   * The actual PO Number (e.g. "PO-0117") — separated from the
+   * batchCode slug so the drawer can label it cleanly. Null when
+   * intake didn't capture one (legacy data only).
+   */
+  poNumber: string | null;
+  /**
+   * Position of this batch within all batches sharing the same
+   * poNumber. 1-indexed. Both null when this batch's poNumber is
+   * itself null (can't position a batch with no PO).
+   */
+  batchNumberInPo: number | null;
+  totalBatchesInPo: number | null;
   modelYear: string;
   dealerName: string;
   quantity: number;
@@ -441,6 +454,23 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
   if (!row) return null;
   const b = row.b;
 
+  // Position this batch within its PO cohort — "Batch 4 of 9" style.
+  // Same poNumber across batches = same parent PO; order by createdAt
+  // so the numbering matches intake submission order. Cheap query
+  // (single-PO cohorts are small).
+  let batchNumberInPo: number | null = null;
+  let totalBatchesInPo: number | null = null;
+  if (b.poNumber) {
+    const siblings = await db
+      .select({ id: batches.id })
+      .from(batches)
+      .where(eq(batches.poNumber, b.poNumber))
+      .orderBy(asc(batches.createdAt), asc(batches.id));
+    totalBatchesInPo = siblings.length;
+    const idx = siblings.findIndex((s) => s.id === b.id);
+    batchNumberInPo = idx >= 0 ? idx + 1 : null;
+  }
+
   // All batch_actions for this batch, plus action_type + department + stakeholder.
   const actionRows = await db
     .select({
@@ -615,6 +645,9 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
   return {
     batchId:    b.id,
     batchCode:  b.batchCode,
+    poNumber:   b.poNumber ?? null,
+    batchNumberInPo,
+    totalBatchesInPo,
     modelYear:  [b.model, b.year].filter(Boolean).join(" ") || "—",
     dealerName: row.dealerName ?? "—",
     quantity:   b.requestedQuantity,

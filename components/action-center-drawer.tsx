@@ -578,34 +578,61 @@ function DrawerHeader({
           batch is closed; the ClosedBanner below carries the final
           state. */}
       <div className="grid grid-cols-1 lg:grid-cols-[1fr,16rem] gap-x-6 gap-y-4 items-start">
-        {/* LEFT column — identity + shipment details */}
-        <div className="space-y-1">
-          {/* PO code — mono, bold, primary headline. */}
-          <p className="text-base font-mono font-semibold text-midnight tracking-tight">
-            {data.batchCode}
-          </p>
-          {/* Model + year — what ops actually names the batch. */}
+        {/* LEFT column — every required field clearly labeled so ops
+            can find each datum at a glance:
+              • PO Number + Batch X of Y
+              • Model + year (large)
+              • Dealer name
+              • Quantity + per-city breakdown
+              • PO availability + Ops projection
+            Each field has a label so renamed/extended fields stay
+            self-describing. */}
+        <div className="space-y-2">
+          {/* PO Number + Batch position — the primary identifiers. */}
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            {data.poNumber && (
+              <p className="text-base font-mono font-semibold text-midnight tracking-tight">
+                {data.poNumber}
+              </p>
+            )}
+            {data.batchNumberInPo != null && data.totalBatchesInPo != null && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded
+                           bg-brand-pastel text-brand-dark
+                           text-[0.7rem] font-semibold uppercase tracking-wide"
+                title={`This batch is #${data.batchNumberInPo} of ${data.totalBatchesInPo} batches under PO ${data.poNumber ?? "—"}`}
+              >
+                Batch {data.batchNumberInPo} / {data.totalBatchesInPo}
+              </span>
+            )}
+            <span className="text-[0.65rem] text-ink-400 font-mono">{data.batchCode}</span>
+          </div>
+
+          {/* Model + year — large, prominent. */}
           <h2 className="text-xl font-bold text-midnight flex items-center gap-2">
             <span aria-hidden="true">🛠️</span>
             {data.modelYear}
           </h2>
-          {/* Quantity / dealer / lifecycle meta. */}
-          <p className="text-xs text-ink-500">
-            <span className="tabular-nums">{data.quantity}×</span>
-            <Sep />
+
+          {/* Dealer name (labelled) + lifecycle chip. */}
+          <p className="text-xs text-ink-600 flex flex-wrap items-baseline gap-x-2">
+            <span className="font-medium text-midnight">🏢 Dealer:</span>
             <span>{data.dealerName}</span>
             <Sep />
-            <span className="uppercase tracking-wide">
+            <span className="uppercase tracking-wide text-ink-500">
               {data.lifecycleState === "pre_po" ? "Pre-PO" : "Post-PO"}
             </span>
           </p>
 
-          {/* Slight visual gap before the data block — keeps title
-              and details readable as two distinct rhythm groups. */}
-          <div className="pt-2 space-y-2">
-            {data.legs.length > 1 && (
-              <p className="text-xs text-ink-600 flex flex-wrap gap-x-2 items-baseline">
-                <span className="font-semibold text-midnight">🚚 {data.legs.length} legs:</span>
+          {/* Quantity + per-city breakdown — same line when single-leg,
+              second line when multi-leg so per-city is readable. */}
+          <p className="text-xs text-ink-600 flex flex-wrap items-baseline gap-x-2">
+            <span className="font-medium text-midnight">🚚 Qty:</span>
+            <span className="tabular-nums">{data.quantity}×</span>
+            {data.legs.length > 0 && (
+              <>
+                <Sep />
+                <span className="font-medium text-midnight">Per city:</span>
                 {data.legs.map((leg, i) => (
                   <span key={leg.id} className="tabular-nums">
                     {leg.city} ({leg.requestedQuantity}
@@ -615,8 +642,12 @@ function DrawerHeader({
                     {i < data.legs.length - 1 && <span className="text-ink-400 ml-1">·</span>}
                   </span>
                 ))}
-              </p>
+              </>
             )}
+          </p>
+
+          {/* Slight visual gap before the date block. */}
+          <div className="pt-1 space-y-2">
             <AvailabilityDatesLine data={data} />
             {/* Listed-state chip lives in the left column when the
                 batch is already listed, so the right column is purely
