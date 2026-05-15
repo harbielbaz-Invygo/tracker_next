@@ -333,14 +333,15 @@ export default function ActionCenterShell({ rows, totals }: Props) {
           {/* Left column — search above the batch list. The completion-view
               toggle that used to live next to the search moved into the
               right column header so the narrow left column has more room
-              for the search input. */}
+              for the search input. Header row is a fixed 40px so it
+              aligns with the toggle on the right side. */}
           <div className="flex flex-col gap-2 min-h-0">
-            <label className="block shrink-0">
+            <label className="block shrink-0 h-10">
               <span className="sr-only">Search batches</span>
-              <div className="relative">
+              <div className="relative h-full">
                 <input
                   type="search"
-                  className="input pr-9 text-sm"
+                  className="input pr-9 text-sm h-full"
                   placeholder="🔎 Search PO, dealer, model…"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
@@ -392,9 +393,11 @@ export default function ActionCenterShell({ rows, totals }: Props) {
           {/* Right column — completion-view toggle sits above the drawer
               box. Even though it filters the batch LIST on the left,
               hosting it here gives both elements more horizontal room
-              and matches the visual rhythm of the drawer header below. */}
+              and matches the visual rhythm of the drawer header below.
+              Header row matches the search input's 40px height so the
+              two columns' content boxes start at the same Y. */}
           <div className="flex flex-col gap-2 min-h-0 lg:ml-2">
-            <div className="flex items-center shrink-0">
+            <div className="flex items-center shrink-0 h-10">
               <CompletionViewToggle value={completionView} onChange={setCompletionView} />
             </div>
             <div className="flex-1 min-h-0 overflow-auto rounded-lg">
