@@ -23,6 +23,14 @@ const DEFAULT_LEFT_WIDTH = 280;
 const MIN_LEFT_WIDTH = 200;
 const MAX_LEFT_WIDTH = 640;
 
+// Completion view — segmented control above the batch list. Determines
+// which slice of the dataset is in scope:
+//   active    — batches with work still pending (default daily-use view)
+//   all       — everything, regardless of completion state
+//   completed — fully settled OR closed (delivered / cancelled)
+type CompletionView = "active" | "all" | "completed";
+const COMPLETION_VIEW_KEY = "action-center-completion-view";
+
 interface Props {
   rows: ActionCenterRow[];
   totals: { total: number; withWaiting: number; fullyDone: number; delayed: number };
@@ -37,8 +45,20 @@ export default function ActionCenterShell({ rows, totals }: Props) {
   const [departmentFilter, setDepartmentFilter] = useState<string>("all");
   const [lifecycleFilter,  setLifecycleFilter]  = useState<LifecycleFilter>("all");
   const [statusFilter,     setStatusFilter]     = useState<StatusFilter>("all");
-  const [showCompleted,    setShowCompleted]    = useState<boolean>(false);
+  const [completionView,   setCompletionView]   = useState<CompletionView>("active");
   const [selected,         setSelected]         = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(COMPLETION_VIEW_KEY);
+      if (stored === "active" || stored === "all" || stored === "completed") {
+        setCompletionView(stored);
+      }
+    } catch { /* SSR / private mode */ }
+  }, []);
+  useEffect(() => {
+    try { window.localStorage.setItem(COMPLETION_VIEW_KEY, completionView); } catch { /* ignore */ }
+  }, [completionView]);
   /**
    * Free-text search — matches the Dashboard's pattern (PO number,
    * dealer, model, batch code; case-insensitive substring). Applied
@@ -120,10 +140,14 @@ export default function ActionCenterShell({ rows, totals }: Props) {
 
       if (departmentFilter !== "all" && !r.pendingDepartments.includes(departmentFilter)) return false;
 
-      // "Hide completed" — batches where every internal action AND
-      // every VIN chase stage is in a terminal state. Shared predicate
-      // with the top "Fully done" metric so both surfaces agree.
-      if (!showCompleted && isFullySettled(r)) return false;
+      // Completion view — Active hides anything fully wrapped up
+      // (operationally settled or already closed). Completed inverts
+      // that. All bypasses the cut entirely. `isFullySettled` is the
+      // same predicate that drives the "Ready to deliver" tile, so
+      // the surfaces stay in sync.
+      const done = isFullySettled(r) || r.closedAt != null;
+      if (completionView === "active"    && done)  return false;
+      if (completionView === "completed" && !done) return false;
 
       // Free-text search — case-insensitive substring against the
       // batch identity fields ops searches by in practice.
@@ -142,7 +166,7 @@ export default function ActionCenterShell({ rows, totals }: Props) {
       if (b.actionsBlocked !== a.actionsBlocked) return b.actionsBlocked - a.actionsBlocked;
       return b.delayDays - a.delayDays;
     });
-  }, [rows, departmentFilter, lifecycleFilter, statusFilter, showCompleted, search]);
+  }, [rows, departmentFilter, lifecycleFilter, statusFilter, completionView, search]);
 
   const filtered = useMemo(() => {
     if (aggregateFilter == null) return topLevelFiltered;
@@ -213,7 +237,7 @@ export default function ActionCenterShell({ rows, totals }: Props) {
 
       {/* Filters */}
       <div className="card mb-4">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <Select
             label="Department (waiting in)"
             value={departmentFilter}
@@ -245,15 +269,6 @@ export default function ActionCenterShell({ rows, totals }: Props) {
               { value: "delivered", label: "🎉 Delivered" },
             ]}
           />
-          <label className="flex items-end gap-2 text-sm text-midnight pb-2 select-none cursor-pointer">
-            <input
-              type="checkbox"
-              checked={showCompleted}
-              onChange={(e) => setShowCompleted(e.target.checked)}
-              className="h-4 w-4 accent-brand"
-            />
-            Show completed
-          </label>
         </div>
       </div>
 
@@ -272,35 +287,37 @@ export default function ActionCenterShell({ rows, totals }: Props) {
         className="grid grid-cols-1 gap-4 lg:gap-0 h-[min(76vh,820px)] min-h-[480px] lg:[grid-template-columns:var(--ac-cols)]"
         style={{ "--ac-cols": `${leftWidth}px 14px 1fr` } as React.CSSProperties}
       >
-          {/* Left column — search input + batch list, stacked. The
-              search is constrained to the same column width as the
-              list below it (no media break, both are inside the
-              same grid cell). Matches the Dashboard search UX
-              (PO / dealer / model substring + ✕ clear button). */}
+          {/* Left column — search + completion-view toggle row, then
+              batch list. The toggle sits on the same line as the search
+              (flex-wrap kicks in if the column is too narrow to fit
+              both, in which case the toggle wraps below the search). */}
           <div className="flex flex-col gap-2 min-h-0">
-            <label className="block shrink-0">
-              <span className="sr-only">Search batches</span>
-              <div className="relative">
-                <input
-                  type="search"
-                  className="input pr-9 text-sm"
-                  placeholder="🔎 Search PO, dealer, model…"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                />
-                {search && (
-                  <button
-                    type="button"
-                    aria-label="Clear search"
-                    onClick={() => setSearch("")}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 hover:text-midnight
-                               text-sm rounded px-1.5 py-0.5"
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
-            </label>
+            <div className="flex items-center gap-2 flex-wrap shrink-0">
+              <label className="flex-1 min-w-[160px]">
+                <span className="sr-only">Search batches</span>
+                <div className="relative">
+                  <input
+                    type="search"
+                    className="input pr-9 text-sm"
+                    placeholder="🔎 Search PO, dealer, model…"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                  {search && (
+                    <button
+                      type="button"
+                      aria-label="Clear search"
+                      onClick={() => setSearch("")}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 hover:text-midnight
+                                 text-sm rounded px-1.5 py-0.5"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              </label>
+              <CompletionViewToggle value={completionView} onChange={setCompletionView} />
+            </div>
             <div className="flex-1 min-h-0">
               <ActionCenterBatchList
                 rows={filtered}
@@ -352,6 +369,47 @@ export default function ActionCenterShell({ rows, totals }: Props) {
             )}
           </div>
         </div>
+    </div>
+  );
+}
+
+// ── Completion-view segmented control ─────────────────────────
+
+function CompletionViewToggle({
+  value, onChange,
+}: {
+  value: CompletionView;
+  onChange: (v: CompletionView) => void;
+}) {
+  const options: { value: CompletionView; label: string; title: string }[] = [
+    { value: "active",    label: "Active",    title: "Batches with work still pending" },
+    { value: "all",       label: "All",       title: "All batches, regardless of state" },
+    { value: "completed", label: "Completed", title: "Fully settled or closed batches" },
+  ];
+  return (
+    <div
+      role="tablist"
+      aria-label="Completion view"
+      className="inline-flex items-center bg-ink-100 rounded-md p-0.5 shrink-0"
+    >
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="tab"
+          aria-selected={value === o.value}
+          title={o.title}
+          onClick={() => onChange(o.value)}
+          className={cn(
+            "px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap",
+            value === o.value
+              ? "bg-white text-midnight shadow-sm"
+              : "text-ink-500 hover:text-midnight",
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
     </div>
   );
 }
