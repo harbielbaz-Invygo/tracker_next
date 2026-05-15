@@ -59,7 +59,7 @@ export default function ReportsShell({ report }: Props) {
           <CompactReportMetric
             label="⚠️ Late"
             value={totals.deliveredLate}
-            valueColor="text-flame-dark"
+            valueColor="text-gold-dark"
           />
         </div>
       </div>
@@ -207,7 +207,7 @@ function PerformanceTable({
                   </Td>
                   <Td align="right" tabular>
                     {row.delayedBatchesOwned > 0 ? (
-                      <span className="font-semibold text-flame-dark">{row.delayedBatchesOwned}</span>
+                      <span className="font-semibold text-gold-dark">{row.delayedBatchesOwned}</span>
                     ) : (
                       <span className="text-ink-400">0</span>
                     )}
@@ -268,7 +268,7 @@ function DeltaArrow({
     <span
       className={cn(
         "text-[0.65rem] font-medium tabular-nums",
-        good ? "text-green-dark" : "text-flame-dark",
+        good ? "text-green-dark" : "text-gold-dark",
       )}
       title={`${up ? "Above" : "Below"} cohort average by ${display}${unit}`}
     >
@@ -662,10 +662,10 @@ function CustomerImpactTable({ batches }: { batches: CustomerImpactBatch[] }) {
               <Td align="right" tabular className="text-ink-500">{b.promisedDate}</Td>
               <Td align="right" tabular>{b.effectiveDate}</Td>
               <Td align="right" tabular>
-                <span className="font-semibold text-flame-dark">+{b.delayDays}d</span>
+                <span className="font-semibold text-gold-dark">+{b.delayDays}d</span>
               </Td>
               <Td align="right" tabular>
-                <span className="font-bold text-flame-dark text-base">
+                <span className="font-bold text-gold-dark text-base">
                   {b.customerDaysImpact.toLocaleString()}
                 </span>
               </Td>
@@ -714,7 +714,7 @@ function StateChip({ state }: { state: CustomerImpactBatch["state"] }) {
 function SeverityChip({ severity }: { severity: CustomerImpactBatch["severity"] }) {
   const map = {
     mild:     { label: "Mild",     cls: "bg-gold-pale  text-gold-dark  border-gold" },
-    moderate: { label: "Moderate", cls: "bg-flame-pale text-flame-dark border-flame" },
+    moderate: { label: "Moderate", cls: "bg-gold-pale text-gold-dark border-gold" },
     severe:   { label: "🔥 Severe", cls: "bg-flame-dark text-white      border-flame-dark" },
   }[severity];
   return (

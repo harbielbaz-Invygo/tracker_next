@@ -260,7 +260,7 @@ function StatusChip({
   delivered: boolean; delayed: boolean; ahead: boolean; label: string;
 }) {
   const cls = delivered ? "bg-ink-100 text-ink-700 border-ink-300"
-    : delayed   ? "bg-flame-pale text-flame-dark border-flame"
+    : delayed   ? "bg-gold-pale text-gold-dark border-gold"
     : ahead     ? "bg-brand-pastel text-brand-dark border-brand"
     :             "bg-green-pale text-green-dark border-green";
   return (
@@ -289,7 +289,7 @@ function CountPill({ value, tone }: { value: number; tone: "waiting" | "blocked"
 
 function ClosureChip({ cancelled, closedAt }: { cancelled: boolean; closedAt: string }) {
   const cls = cancelled
-    ? "bg-flame-pale text-flame-dark border-flame"
+    ? "bg-gold-pale text-gold-dark border-gold"
     : "bg-green-pale text-green-dark border-green";
   return (
     <span className={cn(

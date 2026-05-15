@@ -302,7 +302,7 @@ function HeroMetric({
       title={title}
       className={cn(
         "card border-l-4 px-5 py-4 flex flex-col gap-1",
-        ok ? "border-l-green bg-green-pale/30" : "border-l-flame bg-flame-pale/30",
+        ok ? "border-l-green bg-green-pale/30" : "border-l-gold bg-gold-pale/30",
       )}
     >
       <span className="text-xs font-semibold uppercase tracking-wide text-ink-600">
@@ -310,7 +310,7 @@ function HeroMetric({
       </span>
       <span className={cn(
         "text-4xl font-bold tabular-nums leading-none",
-        ok ? "text-green-dark" : "text-flame-dark",
+        ok ? "text-green-dark" : "text-gold-dark",
       )}>
         {value}
       </span>
