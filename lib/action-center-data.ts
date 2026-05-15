@@ -746,6 +746,15 @@ export function summarizeActionCenter(rows: ActionCenterRow[]) {
   // cancelled units so it stays a stable headline number.
   const totalQuantity = rows.reduce((acc, r) => acc + (r.quantity ?? 0), 0);
 
+  // Car-level (not batch-level) volumes for the headline metrics that
+  // map most directly to "cars to customers": units in listed batches,
+  // and units that have actually shipped (cumulative deliveredQuantity).
+  // Both feed the % readout next to their batch-count tiles.
+  const carsListed = rows
+    .filter((r) => r.appListedAt != null)
+    .reduce((acc, r) => acc + (r.quantity ?? 0), 0);
+  const carsDelivered = rows.reduce((acc, r) => acc + (r.deliveredQuantity ?? 0), 0);
+
   return {
     total,
     withWaiting,
@@ -756,6 +765,8 @@ export function summarizeActionCenter(rows: ActionCenterRow[]) {
     partlyDelivered,
     listed,
     totalQuantity,
+    carsListed,
+    carsDelivered,
   };
 }
 
