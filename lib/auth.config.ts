@@ -18,6 +18,12 @@ export const authConfig = {
   // exposure if a token leaks.
   session: { strategy: "jwt", maxAge: 60 * 60 * 8, updateAge: 60 * 60 },
   pages:   { signIn: "/login" },
+  // Trust the forwarded host header. Required on Vercel — without this,
+  // NextAuth v5 throws MissingCSRF on POST /api/auth/callback/credentials
+  // because the Host header (the Vercel proxy domain) doesn't match the
+  // request URL host that NextAuth expects.
+  // https://authjs.dev/getting-started/migrating-to-v5#trust-host
+  trustHost: true,
   /**
    * Pin cookie defaults so a future NextAuth upgrade can't quietly weaken
    * them. `__Secure-` prefix is enforced by browsers when cookies declare
