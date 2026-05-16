@@ -24,6 +24,17 @@ export const authConfig = {
   // request URL host that NextAuth expects.
   // https://authjs.dev/getting-started/migrating-to-v5#trust-host
   trustHost: true,
+  // Bind the secret EXPLICITLY rather than relying on NextAuth's env
+  // auto-discovery. The symptom of not doing this on Vercel: cookies
+  // get encrypted with one auto-generated secret on the function that
+  // issued the login, then decrypted on a different function instance
+  // that generated its own — resulting in
+  //   "JWTSessionError: no matching decryption secret"
+  // on every request after sign-in.
+  //
+  // Reads AUTH_SECRET (v5 canonical name) first, then NEXTAUTH_SECRET
+  // (v4 / Vercel-defaulted name) so existing prod env vars keep working.
+  secret: process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET,
   /**
    * Pin cookie defaults so a future NextAuth upgrade can't quietly weaken
    * them. `__Secure-` prefix is enforced by browsers when cookies declare
