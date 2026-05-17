@@ -79,6 +79,14 @@ interface CreateBody {
    * gets `parentForecastBatchId` set.
    */
   forecastBatchId?: number | null;
+  /**
+   * Optional historical submission date — used when ops backfills an
+   * old PO. When set, becomes `batches.requestedAt`, anchors the
+   * Plan-vs-Reality timeline, and seeds the action expected-date
+   * offsets. When null/undefined, defaults to today (the default).
+   * Must be ISO yyyy-mm-dd and not in the future.
+   */
+  submittedAt?: string | null;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -262,6 +270,25 @@ export async function POST(req: NextRequest) {
   const leadTimeDays = await getLeadTimeDays();
   const splitTotal = body.items.reduce((sum, it) => sum + it.splits.length, 0);
 
+  // Submission anchor — today for new POs, or a historical date when
+  // ops is backfilling. Validated here: must be a real ISO date and
+  // not in the future. Everything downstream that anchors on
+  // "submission" (action expectedDate offsets, the Plan-vs-Reality
+  // timeline) reads this single variable.
+  const requestedAt = (() => {
+    const raw = body.submittedAt?.trim() || "";
+    if (!raw) return today;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      // Bad format — silently fall through to today rather than 500.
+      return today;
+    }
+    if (raw > today) {
+      // Future-dated submission makes no sense.
+      return today;
+    }
+    return raw;
+  })();
+
   // ── Feasibility flag — Ops behind dealer promise? ──────────────
   // The form locks PO Availability (the dealer date) and auto-floors
   // Ops Expected to today + leadTimeDays. So the only risk signal at
@@ -403,7 +430,7 @@ export async function POST(req: NextRequest) {
         poReference: body.po.reference ?? undefined,
 
         requestedQuantity: totalQty,
-        requestedAt: today,
+        requestedAt,
         dealerPromisedDeliveryDate: availabilityDate,
         targetPoDate,
         expectedPoDate: body.po.date,
@@ -487,7 +514,7 @@ export async function POST(req: NextRequest) {
           ? computeExpectedDate({
               anchor:     type.offsetAnchor,
               offsetDays: type.offsetDays,
-              submission: today,
+              submission: requestedAt,
               vin:        null,
               promised:   availabilityDate,
             })
@@ -517,7 +544,7 @@ export async function POST(req: NextRequest) {
         const deliveryExpectedDate = computeExpectedDate({
           anchor:     deliveryActionType.offsetAnchor,
           offsetDays: deliveryActionType.offsetDays,
-          submission: today,
+          submission: requestedAt,
           vin:        null,
           promised:   availabilityDate,
         });

@@ -190,6 +190,15 @@ export default function IntakeForm({ options }: Props) {
 
   const [notes, setNotes] = useState<string>("");
 
+  // Backdated submission — for ops backfilling an old PO into the
+  // system after it actually happened. When the toggle is off (the
+  // default) the API sets `requestedAt` to today; when on, the
+  // selected date is sent and used as the historical submission
+  // anchor. Affects the Plan-vs-Reality timeline start, the action
+  // expectedDate computation offsets, and Insights period filtering.
+  const [backdate,    setBackdate]    = useState<boolean>(false);
+  const [submittedAt, setSubmittedAt] = useState<string>("");
+
   // Submit state
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -366,6 +375,9 @@ export default function IntakeForm({ options }: Props) {
         vinReceivedAtIntake,
         notes: notes.trim() || null,
         forecastBatchId: linkedForecastBatchId,
+        // Only send the override when the checkbox is on AND the
+        // operator picked a date. Empty string = no override.
+        submittedAt: (backdate && submittedAt) ? submittedAt : null,
       };
 
       const res = await fetch("/api/intake/create", {
@@ -392,6 +404,8 @@ export default function IntakeForm({ options }: Props) {
     setDealerId(null); setDealerName("");
     setItems([]);
     setNotes("");
+    setBackdate(false);
+    setSubmittedAt("");
     setLinkedForecastBatchId(null);
     setActions(options.actionTypes.map((t) => ({
       actionTypeId: t.id, selected: false,
@@ -685,6 +699,43 @@ export default function IntakeForm({ options }: Props) {
               <textarea className="input min-h-[80px]" value={notes}
                         onChange={(e) => setNotes(e.target.value)} />
             </FormField>
+
+            {/* Backdate — only relevant when ops is filing an old PO
+                that happened in the past. Default flow stays untouched. */}
+            <div className="mt-3">
+              <label className="inline-flex items-center gap-2 text-sm text-midnight cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-brand"
+                  checked={backdate}
+                  onChange={(e) => {
+                    setBackdate(e.target.checked);
+                    if (!e.target.checked) setSubmittedAt("");
+                  }}
+                />
+                <span>Backdate this submission</span>
+                <span className="text-xs text-ink-500">
+                  (use when filing an old PO so the timeline reflects reality)
+                </span>
+              </label>
+              {backdate && (
+                <div className="mt-2 grid grid-cols-1 md:grid-cols-[16rem,1fr] gap-2 items-baseline">
+                  <input
+                    type="date"
+                    className="input tabular-nums"
+                    value={submittedAt}
+                    onChange={(e) => setSubmittedAt(e.target.value)}
+                    max={new Date().toISOString().slice(0, 10)}
+                    aria-label="Historical submission date"
+                  />
+                  <p className="text-[0.7rem] text-ink-500 leading-snug">
+                    Stored as <code className="text-midnight">batches.requested_at</code>.
+                    Anchors the Plan-vs-Reality timeline + each action's expected-date
+                    offset. Leave the checkbox off for new POs — today's date is used.
+                  </p>
+                </div>
+              )}
+            </div>
 
             <div className="flex flex-wrap items-center justify-between gap-3 mt-4">
               <p className="text-xs text-ink-500">
