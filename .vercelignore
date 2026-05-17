@@ -1,0 +1,25 @@
+# Files / directories that exist locally but should never be deployed.
+# `vercel --prod --force` uploads the entire working tree, including
+# untracked files — so anything not handled by .gitignore also needs
+# to land here when it would break the build.
+
+# Stray nested example app a teammate scaffolded locally; not part of
+# the production project. Caused build failures (Type error on
+# StaticImageData in App.tsx) when Vercel picked it up.
+my-app/
+
+# The fluent-ui skill bundle is a local reference dropped at the root.
+# Doesn't compile, doesn't need to ship.
+fluent-ui.skill
+
+# Editor/temp artefacts in case any slip through .gitignore.
+.DS_Store
+*.tsbuildinfo
+.idea/
+.vscode/
+
+# Local DB files (already in .gitignore but doubly safe here).
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.db-journal
