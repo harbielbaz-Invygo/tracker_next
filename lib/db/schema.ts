@@ -188,6 +188,17 @@ export const batches = sqliteTable("batches", {
    */
   appListedAt:         text("app_listed_at"),
 
+  // ── Wave linkage (phase 1 of the scope-aware restructure) ─────
+  /**
+   * The wave this batch belongs to — its (PO, availability_date)
+   * cohort. Nullable for backwards-compat: existing rows from before
+   * the restructure are orphans (no wave); new Intake rows from
+   * phase 2 onward MUST set this. The wave owns VIN-chase actions;
+   * the wave's parent PO owns Internal-phase actions.
+   */
+  waveId:                integer("wave_id")
+                           .references(() => waves.id, { onDelete: "set null" }),
+
   // ── Forecast linkage ───────────────────────────────────────────
   /**
    * When this batch was created as a child of a Forecast split (one
@@ -216,6 +227,7 @@ export const batches = sqliteTable("batches", {
   byPoNumber:  index("batches_po_number_idx").on(t.poNumber),
   byLifecycle: index("batches_lifecycle_idx").on(t.lifecycleState),
   byStage:     index("batches_stage_idx").on(t.currentStage),
+  byWave:      index("batches_wave_idx").on(t.waveId),
 }));
 
 // ─────────────────────────────────────────────────────────
@@ -528,6 +540,18 @@ export const actionTypes = sqliteTable("action_types", {
   offsetAnchor:        text("offset_anchor",
                             { enum: ["submission", "vin", "promised"] })
                        .notNull().default("submission"),
+  /**
+   * Which entity carries the state for this action_type:
+   *   - "po"    → one action per PO (Specs / Pricing / SKU / App Listing)
+   *   - "wave"  → one action per (PO, availability_date) cohort
+   *               (VIN / Plate / Customs / Tracking / Inspection / Ready)
+   *   - "batch" → one action per batch (Delivery, Pre-PO App Listing)
+   * Drives both Intake-time action creation and the Action Center
+   * drawer's three sections (PO / Wave / Batch). Default "batch" keeps
+   * legacy behaviour for any row added before this column existed.
+   */
+  scope:               text("scope", { enum: ["po", "wave", "batch"] })
+                       .notNull().default("batch"),
   sortOrder:           integer("sort_order").notNull().default(0),
   createdAt:           text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
 });
@@ -640,6 +664,109 @@ export const batchVinStages = sqliteTable("batch_vin_stages", {
   uniq:    uniqueIndex("batch_vin_stage_uniq").on(t.batchId, t.stageId),
   byBatch: index("batch_vin_stages_batch_idx").on(t.batchId),
   byStatus:index("batch_vin_stages_status_idx").on(t.status),
+}));
+
+// ─────────────────────────────────────────────────────────
+// PO — one row per po_number. Header data the whole PO shares.
+//
+// Phase 1 of the scope-aware restructure. Sits alongside the
+// existing `batches` table; lookups still go through batches for
+// now. Phase 2 onward wires Intake + Action Center to read/write
+// here. Phase 5 drops the duplicated header columns from batches.
+// ─────────────────────────────────────────────────────────
+export const pos = sqliteTable("pos", {
+  id:                          integer("id").primaryKey({ autoIncrement: true }),
+  poNumber:                    text("po_number").notNull().unique(),
+  dealerId:                    integer("dealer_id").notNull()
+                                 .references(() => dealers.id),
+  poDate:                      text("po_date"),
+  poReference:                 text("po_reference"),
+  poTermsNotes:                text("po_terms_notes"),
+  /* Commercial terms — PO-wide, same for every batch under it. */
+  buyBackRate:                 real("buy_back_rate"),
+  contractLengthMonths:        integer("contract_length_months"),
+  unitPriceSar:                real("unit_price_sar"),
+  taxPct:                      integer("tax_pct"),
+  /* Confidence — PO scope per Q-Intake-5. */
+  partnershipConfidence:       real("partnership_confidence").default(50),
+  partnershipConfidenceAtLock: real("partnership_confidence_at_lock"),
+  operationsConfidence:        real("operations_confidence").default(40),
+  operationsConfidenceAtLock:  real("operations_confidence_at_lock"),
+  notes:                       text("notes"),
+  /* Closure — set when every wave + batch under this PO is closed. */
+  closedAt:                    text("closed_at"),
+  createdAt:                   text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
+  updatedAt:                   text("updated_at").default(sql`(CURRENT_TIMESTAMP)`),
+}, (t) => ({
+  byDealer:    index("pos_dealer_idx").on(t.dealerId),
+  byPoDate:    index("pos_po_date_idx").on(t.poDate),
+  byClosed:    index("pos_closed_at_idx").on(t.closedAt),
+}));
+
+// ─────────────────────────────────────────────────────────
+// Wave — one row per (PO, availability_date). VIN-chase actions
+// scope here; batches sharing a wave share the VIN handoff.
+// ─────────────────────────────────────────────────────────
+export const waves = sqliteTable("waves", {
+  id:                  integer("id").primaryKey({ autoIncrement: true }),
+  poId:                integer("po_id").notNull()
+                         .references(() => pos.id, { onDelete: "cascade" }),
+  availabilityDate:    text("availability_date").notNull(),    // ISO yyyy-mm-dd
+  vinReceivingDate:    text("vin_receiving_date"),
+  opsExpectedDate:     text("ops_expected_date"),
+  vinReceivedAtIntake: integer("vin_received_at_intake", { mode: "boolean" })
+                         .notNull().default(false),
+  /* Closure — set when every batch + wave action is closed. */
+  closedAt:            text("closed_at"),
+  createdAt:           text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
+  updatedAt:           text("updated_at").default(sql`(CURRENT_TIMESTAMP)`),
+}, (t) => ({
+  byPo:                index("waves_po_idx").on(t.poId),
+  byAvailability:      index("waves_availability_idx").on(t.availabilityDate),
+  uniqPoAvailability:  uniqueIndex("waves_po_availability_uniq")
+                         .on(t.poId, t.availabilityDate),
+}));
+
+// ─────────────────────────────────────────────────────────
+// Scoped actions — generic action_status table keyed by
+// (scope, scope_id, action_type_id). Replaces batch_actions and
+// batch_vin_stages once phases 2-5 land. For now both tables
+// coexist; the legacy ones stay until Phase 5 drops them.
+//
+// One row per action instance. Uniqueness on
+// (scope, scope_id, action_type_id) — you can't have two "Pricing"
+// actions on the same PO.
+// ─────────────────────────────────────────────────────────
+export const actions = sqliteTable("actions", {
+  id:                    integer("id").primaryKey({ autoIncrement: true }),
+  scope:                 text("scope", { enum: ["po", "wave", "batch"] }).notNull(),
+  /**
+   * FK target depends on `scope` — pos.id, waves.id, or batches.id.
+   * Drizzle can't model polymorphic FKs, so this is an integer with
+   * the join handled in application code.
+   */
+  scopeId:               integer("scope_id").notNull(),
+  actionTypeId:          integer("action_type_id").notNull()
+                           .references(() => actionTypes.id, { onDelete: "restrict" }),
+  departmentId:          integer("department_id")
+                           .references(() => departments.id, { onDelete: "set null" }),
+  assignedStakeholderId: integer("assigned_stakeholder_id")
+                           .references(() => stakeholders.id, { onDelete: "set null" }),
+  status:                text("status",
+                              { enum: ["waiting", "blocked", "done", "skipped"] })
+                         .notNull().default("waiting"),
+  expectedDate:          text("expected_date"),
+  completedAt:           text("completed_at"),
+  notes:                 text("notes"),
+  createdAt:             text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
+  updatedAt:             text("updated_at").default(sql`(CURRENT_TIMESTAMP)`),
+}, (t) => ({
+  byScope:    index("actions_scope_idx").on(t.scope, t.scopeId),
+  byType:     index("actions_action_type_idx").on(t.actionTypeId),
+  byStakeholder: index("actions_stakeholder_idx").on(t.assignedStakeholderId),
+  byStatus:   index("actions_status_idx").on(t.status),
+  uniq:       uniqueIndex("actions_scope_type_uniq")
+                .on(t.scope, t.scopeId, t.actionTypeId),
 }));
 
 // Convenient TS types
