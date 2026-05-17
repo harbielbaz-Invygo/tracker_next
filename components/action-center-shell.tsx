@@ -9,7 +9,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ActionCenterRow } from "@/lib/action-center-data";
-import { isFullySettled } from "@/lib/action-center-predicates";
 import ActionCenterBatchList from "./action-center-batch-list";
 import ActionCenterDrawer from "./action-center-drawer";
 import ActionCenterDelayedStrip, { type AggregateFilter } from "./action-center-delayed-strip";
@@ -26,10 +25,14 @@ const MAX_LEFT_WIDTH = 640;
 
 // Completion view — segmented control above the batch list. Determines
 // which slice of the dataset is in scope:
-//   active    — batches with work still pending (default daily-use view)
-//   all       — everything, regardless of completion state
-//   completed — fully settled OR closed (delivered / cancelled)
-type CompletionView = "active" | "all" | "completed";
+//   all       — every batch, no filter
+//   completed — closureReason === "delivered" (marked-as-delivered batches)
+//   partly    — deliveredQuantity > 0 && < quantity (partial deliveries)
+//   active    — neither completed nor partly (open + cleanly cancelled)
+//
+// Buckets may overlap (e.g. a delivered-partial batch counts in both
+// Completed and Partly). The toggle is a lens, not a partition.
+type CompletionView = "active" | "all" | "completed" | "partly";
 const COMPLETION_VIEW_KEY = "action-center-completion-view";
 
 interface Props {
@@ -69,7 +72,7 @@ export default function ActionCenterShell({ rows, totals }: Props) {
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(COMPLETION_VIEW_KEY);
-      if (stored === "active" || stored === "all" || stored === "completed") {
+      if (stored === "active" || stored === "all" || stored === "completed" || stored === "partly") {
         setCompletionView(stored);
       }
     } catch { /* SSR / private mode */ }
@@ -158,14 +161,19 @@ export default function ActionCenterShell({ rows, totals }: Props) {
 
       if (departmentFilter !== "all" && !r.pendingDepartments.includes(departmentFilter)) return false;
 
-      // Completion view — Active hides anything fully wrapped up
-      // (operationally settled or already closed). Completed inverts
-      // that. All bypasses the cut entirely. `isFullySettled` is the
-      // same predicate that drives the "Ready to deliver" tile, so
-      // the surfaces stay in sync.
-      const done = isFullySettled(r) || r.closedAt != null;
-      if (completionView === "active"    && done)  return false;
-      if (completionView === "completed" && !done) return false;
+      // Completion view (four lenses):
+      //   completed = closureReason='delivered'
+      //   partly    = deliveredQuantity > 0 && < quantity
+      //   active    = NEITHER of the above
+      //   all       = no cut
+      // Buckets may overlap (e.g. a delivered-partial batch shows in
+      // both Completed and Partly); the toggle is a lens, not a strict
+      // partition.
+      const isCompleted = r.closureReason === "delivered";
+      const isPartly    = r.deliveredQuantity > 0 && r.deliveredQuantity < r.quantity;
+      if (completionView === "completed" && !isCompleted)             return false;
+      if (completionView === "partly"    && !isPartly)                return false;
+      if (completionView === "active"    && (isCompleted || isPartly)) return false;
 
       // Free-text search — case-insensitive substring against the
       // batch identity fields ops searches by in practice.
@@ -477,9 +485,10 @@ function CompletionViewToggle({
   onChange: (v: CompletionView) => void;
 }) {
   const options: { value: CompletionView; label: string; title: string }[] = [
-    { value: "active",    label: "Active",    title: "Batches with work still pending" },
-    { value: "all",       label: "All",       title: "All batches, regardless of state" },
-    { value: "completed", label: "Completed", title: "Fully settled or closed batches" },
+    { value: "active",    label: "Active",    title: "Neither marked-as-delivered nor partly-delivered (open + cleanly cancelled)" },
+    { value: "all",       label: "All",       title: "Every batch, no filter" },
+    { value: "completed", label: "Completed", title: "Marked as delivered (closure reason = delivered)" },
+    { value: "partly",    label: "Partly",    title: "Partial delivery (some units shipped but not all)" },
   ];
   return (
     <div
