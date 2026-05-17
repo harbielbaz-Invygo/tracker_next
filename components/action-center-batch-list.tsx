@@ -18,9 +18,7 @@ import { useState } from "react";
 // `import type` ensures the type imports are erased at compile time —
 // they don't drag the server-only `lib/action-center-data.ts` (which imports
 // better-sqlite3) into the client bundle.
-import type { ActionCenterRow, DrawerData } from "@/lib/action-center-data";
-// Pure formatter (no DB imports), safe to use from client components.
-import { formatStatusCheckMessage } from "@/lib/action-center-slack";
+import type { ActionCenterRow } from "@/lib/action-center-data";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -47,11 +45,12 @@ export default function ActionCenterBatchList({
     setBusyCode(row.batchCode);
     setCopyError(null);
     try {
-      const res = await fetch(`/api/action-center-drawer?code=${encodeURIComponent(row.batchCode)}`);
+      // PO-level Slack message — server returns the formatted text
+      // already; client just copies it to the clipboard.
+      const res = await fetch(`/api/po-slack-message?code=${encodeURIComponent(row.batchCode)}`);
       if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as DrawerData;
-      const msg = formatStatusCheckMessage(data);
-      await navigator.clipboard.writeText(msg);
+      const { message } = (await res.json()) as { message: string };
+      await navigator.clipboard.writeText(message);
       setCopiedCode(row.batchCode);
       setTimeout(() => setCopiedCode((c) => (c === row.batchCode ? null : c)), 1600);
     } catch (e) {
