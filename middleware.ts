@@ -18,6 +18,10 @@ const PUBLIC_PATHS = new Set<string>(["/", "/login", "/dashboard", "/insights", 
 
 export default auth((req) => {
   const path = req.nextUrl.pathname;
+  // Public-mode escape hatch — set DISABLE_AUTH=true in Vercel to let
+  // every page render unauthenticated while the auth flow is broken.
+  // TEMPORARY. Remove the moment NextAuth is working again.
+  if (process.env.DISABLE_AUTH === "true") return;
   if (PUBLIC_PATHS.has(path)) return;
   // Never redirect API routes — they should return their own JSON status
   // codes (401/403/404). Each route owns its auth check.

@@ -16,6 +16,16 @@ export default async function AccessGate({
   view: ViewName;
   children: React.ReactNode;
 }) {
+  // Public-mode escape hatch — set DISABLE_AUTH=true in Vercel to
+  // bypass every gate while the auth flow is broken. TEMPORARY. Take
+  // this flag off the moment NextAuth is working again. Logged so
+  // it's obvious from runtime logs the gate is wide open.
+  if (process.env.DISABLE_AUTH === "true") {
+    // eslint-disable-next-line no-console
+    console.warn(`[access-gate] DISABLE_AUTH=true → bypassing gate for view=${view}`);
+    return <>{children}</>;
+  }
+
   const session = await auth();
   const role: Role = ((session?.user as any)?.role ?? "guest") as Role;
 

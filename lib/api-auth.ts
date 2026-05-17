@@ -18,6 +18,19 @@ export type AuthOk   = { ok: true;  user: { id: string; username: string; role: 
 export type AuthFail = { ok: false; response: NextResponse };
 
 export async function requireAuth(allowedRoles?: Role[]): Promise<AuthOk | AuthFail> {
+  // Public-mode escape hatch — TEMPORARY. While DISABLE_AUTH=true
+  // every API call is treated as a synthetic admin so writes and
+  // reads alike work without a session. Remove this branch once
+  // NextAuth is healthy.
+  if (process.env.DISABLE_AUTH === "true") {
+    // eslint-disable-next-line no-console
+    console.warn("[api-auth] DISABLE_AUTH=true → returning synthetic admin");
+    return {
+      ok: true,
+      user: { id: "0", username: "disable-auth", role: "admin" },
+    };
+  }
+
   const session = await auth();
   const role = session?.user?.role;
   const username = session?.user?.username;
