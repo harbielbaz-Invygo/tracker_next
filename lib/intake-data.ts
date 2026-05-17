@@ -117,21 +117,33 @@ export async function getIntakeOptions(): Promise<IntakeOptions> {
     stakeholdersByDept.set(s.departmentId, arr);
   }
 
+  // Action types that are auto-attached by the system rather than
+  // user-picked at Intake time:
+  //   - Delivery: every Intake batch needs one (closure trigger);
+  //     attached by /api/intake/create on every new batch.
+  //   - Pre-PO App Listing: only meaningful on Forecast batches;
+  //     attached by /api/forecast/create or copied during a split.
+  // Hidden from the Intake action picker so ops doesn't have to
+  // remember to tick them.
+  const AUTO_ATTACHED_ACTION_NAMES = new Set(["Delivery", "Pre-PO App Listing"]);
+
   return {
     leadTimeDays,
     departments: deptsRaw.map((d) => ({
       id: d.id, name: d.name, sortOrder: d.sortOrder,
       stakeholders: stakeholdersByDept.get(d.id) ?? [],
     })),
-    actionTypes: typesRaw.map((t) => ({
-      id: t.id,
-      name: t.name,
-      waitingLabel: t.waitingLabel,
-      doneLabel: t.doneLabel,
-      defaultDepartmentId: t.defaultDepartmentId,
-      sortOrder: t.sortOrder,
-      dependsOnNames: dependsOnByChild.get(t.id) ?? [],
-    })),
+    actionTypes: typesRaw
+      .filter((t) => !AUTO_ATTACHED_ACTION_NAMES.has(t.name))
+      .map((t) => ({
+        id: t.id,
+        name: t.name,
+        waitingLabel: t.waitingLabel,
+        doneLabel: t.doneLabel,
+        defaultDepartmentId: t.defaultDepartmentId,
+        sortOrder: t.sortOrder,
+        dependsOnNames: dependsOnByChild.get(t.id) ?? [],
+      })),
     dealers: dealersRaw.map((d) => ({
       id: d.id, name: d.name, homeCity: d.homeCity,
     })),

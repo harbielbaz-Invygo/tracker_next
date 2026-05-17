@@ -200,6 +200,21 @@ export async function POST(req: NextRequest) {
     (s) => s.name.toLowerCase().includes("vin"),
   )?.id ?? null;
 
+  // Canonical Delivery action_type. Auto-attached to every new Intake
+  // batch — it's the closure trigger that the drawer's "Mark as
+  // Delivered" button completes. We hide it from the Intake action
+  // picker (lib/intake-data.ts already filters it out) because every
+  // batch needs one, so user-picking is just a chance to forget.
+  const [deliveryActionType] = await db.select({
+    id:           actionTypes.id,
+    offsetDays:   actionTypes.offsetDays,
+    offsetAnchor: actionTypes.offsetAnchor,
+    defaultDepartmentId: actionTypes.defaultDepartmentId,
+  })
+    .from(actionTypes)
+    .where(eq(actionTypes.name, "Delivery"))
+    .limit(1);
+
   // ── Optional: Forecast linkage ────────────────────────────────
   // When set, this Intake fulfils a Partnership pre-PO bet. We need
   // the parent's existing Pre-PO App Listing batch_action so we can
@@ -484,6 +499,34 @@ export async function POST(req: NextRequest) {
           assignedStakeholderId: a.assignedStakeholderId ?? undefined,
           status,
           expectedDate: expectedDate ?? undefined,
+        });
+      }
+
+      // ── Auto-attach Delivery action on every new batch.
+      //    Hidden from the Intake picker because every batch needs
+      //    one — letting ops opt-in is just a chance to forget. The
+      //    drawer's Mark-as-Delivered button completes this action,
+      //    which in turn auto-closes the batch.
+      //
+      //    For the 1:1 fulfilment path the existing batch (formerly
+      //    pre_po) already has its action set from the Forecast flow,
+      //    and the Pre-PO App Listing carries over — but Delivery
+      //    wasn't created on the Forecast row, so it needs adding
+      //    here regardless of fulfilment mode.
+      if (deliveryActionType) {
+        const deliveryExpectedDate = computeExpectedDate({
+          anchor:     deliveryActionType.offsetAnchor,
+          offsetDays: deliveryActionType.offsetDays,
+          submission: today,
+          vin:        null,
+          promised:   availabilityDate,
+        });
+        await tx.insert(batchActions).values({
+          batchId:      batchRow.id,
+          actionTypeId: deliveryActionType.id,
+          departmentId: deliveryActionType.defaultDepartmentId ?? undefined,
+          status:       "waiting",
+          expectedDate: deliveryExpectedDate ?? undefined,
         });
       }
 
