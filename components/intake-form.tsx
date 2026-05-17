@@ -34,9 +34,10 @@ interface SplitDraft {
   city: string;
   /**
    * PO Availability date — the dealer-promised date from the PO.
-   * Fixed by partnership; the plan against which Partnership Confidence
-   * is measured. Read-only in the form: changing it would mean amending
-   * the PO, not editing the row.
+   * Plan against which Partnership Confidence is measured. Editable
+   * so operators can fill in manual entries / new items that aren't
+   * pre-filled by the PDF parser. PDF-parsed items get this value
+   * auto-populated; ops can adjust if the parse missed.
    */
   date: string; // ISO yyyy-mm-dd
   /**
@@ -275,9 +276,10 @@ export default function IntakeForm({ options }: Props) {
     ));
   }
   function addSplit(i: number) {
-    // Availability is locked once set, so a new split inherits the
-    // existing availability from the first split in the same item.
-    // Ops expected re-defaults from there.
+    // New splits inherit the availability date from the first split
+    // in the same item — convenient default; the field is editable
+    // so ops can change it after if needed. Ops expected re-defaults
+    // from the inherited date.
     setItems((curr) => curr.map((it, idx) => {
       if (idx !== i) return it;
       const inheritedAvail = it.splits[0]?.date ?? "";
@@ -868,9 +870,9 @@ function ItemEditor({
           <button type="button" onClick={onAddSplit} className="btn text-xs">+ Add split</button>
         </div>
         <p className="text-[0.7rem] text-ink-500 mb-2 leading-snug">
-          <strong>PO Availability date</strong> 🔒 = the dealer-promised date from the PO.
-          Fixed by partnership; used to measure <em>Partnership Confidence</em>.
-          Cannot be edited here — amend the PO if it's wrong.{" "}
+          <strong>PO Availability date</strong> = the dealer-promised date from the PO.
+          Editable here so new items / manual entries can be filled in — the PDF parser pre-fills
+          this when a PO is uploaded. Used to measure <em>Partnership Confidence</em>.{" "}
           <strong>Ops expected delivery</strong> = the operational commitment for when this split
           actually lands. Auto-set to <code className="text-midnight">max(PO date, today + {leadTimeDays}d)</code>{" "}
           so it always satisfies the Pre PO Ops Lead Time. Editable — used to measure <em>Ops Confidence</em>.
@@ -896,11 +898,28 @@ function ItemEditor({
                        onChange={(e) => onSplitChange(j, { city: e.target.value })} />
                 <input
                   type="date"
-                  className="input bg-ink-50 text-midnight cursor-not-allowed"
+                  className="input"
                   value={s.date}
-                  readOnly
-                  aria-label="PO Availability date (locked — set by the PO)"
-                  title="PO Availability date — fixed by partnership. Amend the PO to change."
+                  aria-label="PO Availability date"
+                  title="PO Availability date — dealer-promised date from the PO. Editable so manual entries / new items can be filled in."
+                  onChange={(e) => {
+                    const nextDate = e.target.value;
+                    // When the PO date moves, the Ops-expected default
+                    // should move with it — but only when the operator
+                    // hasn't manually adjusted Ops-expected to something
+                    // different. Heuristic: if current Ops-expected
+                    // equals the previous PO date (i.e. they were in
+                    // sync), recompute. Otherwise leave Ops-expected
+                    // untouched.
+                    const inSync = s.opsExpectedDate === s.date
+                      || s.opsExpectedDate === "";
+                    onSplitChange(j, {
+                      date: nextDate,
+                      opsExpectedDate: inSync
+                        ? defaultOpsDate(nextDate, leadTimeDays)
+                        : s.opsExpectedDate,
+                    });
+                  }}
                 />
                 <input type="date" className="input" value={s.opsExpectedDate}
                        aria-label="Ops expected delivery date"
