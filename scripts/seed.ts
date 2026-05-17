@@ -117,26 +117,23 @@ const SEED_STAKEHOLDERS: { departmentName: string; name: string; sortOrder: numb
  *    12 Delivery (depends on App Listing AND Car Ready in Showroom)
  */
 const SEED_ACTION_TYPES = [
-  // Forecast (pre-PO) ─────────────────────────────────────────────
-  // Lives ONLY on Forecast batches. Auto-created when Partnership
-  // submits a pre-PO commitment; compared against the regular
-  // "App Listing" action once the PO arrives for listing accuracy.
-  { name: "Pre-PO App Listing",           waitingLabel: "Pre-PO list pending",    doneLabel: "Pre-PO listed",       defaultDepartment: "Operations", sortOrder:  0, offsetDays:  0, offsetAnchor: "submission" as const },
-  // Internal phase ────────────────────────────────────────────────
-  { name: "Car Specs",                    waitingLabel: "Waiting Car Specs",      doneLabel: "Specs Received",      defaultDepartment: "Specs",      sortOrder:  1, offsetDays:  1, offsetAnchor: "submission" as const },
-  { name: "Pricing",                      waitingLabel: "Waiting Pricing",        doneLabel: "Pricing Received",    defaultDepartment: "Pricing",    sortOrder:  2, offsetDays:  1, offsetAnchor: "submission" as const },
-  { name: "SKU",                          waitingLabel: "Waiting SKU",            doneLabel: "SKU Created",         defaultDepartment: "Specs",      sortOrder:  3, offsetDays:  2, offsetAnchor: "submission" as const },
-  { name: "App Listing",                  waitingLabel: "Waiting App Listing",    doneLabel: "Listed in App",       defaultDepartment: "Operations", sortOrder:  4, offsetDays:  5, offsetAnchor: "submission" as const },
-  // VIN-chase flow ────────────────────────────────────────────────
-  { name: "Send Dealer Confirmation Email", waitingLabel: "Waiting Dealer Email", doneLabel: "Email Sent",          defaultDepartment: "Operations", sortOrder:  5, offsetDays:  1, offsetAnchor: "submission" as const },
-  { name: "VIN",                          waitingLabel: "Waiting VIN",            doneLabel: "VIN Received",        defaultDepartment: "Operations", sortOrder:  6, offsetDays:  5, offsetAnchor: "submission" as const },
-  { name: "Plate",                        waitingLabel: "Waiting Plate",          doneLabel: "Plate Assigned",      defaultDepartment: "Operations", sortOrder:  7, offsetDays:  3, offsetAnchor: "vin"        as const },
-  { name: "Customs Card",                 waitingLabel: "Waiting Customs",        doneLabel: "Customs Received",    defaultDepartment: "Logistics",  sortOrder:  8, offsetDays:  5, offsetAnchor: "vin"        as const },
-  { name: "Tracking System Installed",    waitingLabel: "Waiting Tracking",       doneLabel: "Tracking Installed",  defaultDepartment: "Operations", sortOrder:  9, offsetDays:  6, offsetAnchor: "vin"        as const },
-  { name: "Car Inspection",               waitingLabel: "Waiting Inspection",     doneLabel: "Inspection Done",     defaultDepartment: "Operations", sortOrder: 10, offsetDays:  8, offsetAnchor: "vin"        as const },
-  { name: "Car Ready in Showroom",        waitingLabel: "Waiting Showroom Ready", doneLabel: "Ready in Showroom",   defaultDepartment: "Operations", sortOrder: 11, offsetDays: 10, offsetAnchor: "vin"        as const },
-  // Final ────────────────────────────────────────────────────────
-  { name: "Delivery",                     waitingLabel: "Waiting Delivery",       doneLabel: "Delivered",           defaultDepartment: "Logistics",  sortOrder: 12, offsetDays:  0, offsetAnchor: "promised"   as const },
+  // Pre-PO — batch scope (lives on Forecast rows before a real PO exists).
+  { name: "Pre-PO App Listing",           waitingLabel: "Pre-PO list pending",    doneLabel: "Pre-PO listed",       defaultDepartment: "Operations", scope: "batch" as const, sortOrder:  0, offsetDays:  0, offsetAnchor: "submission" as const },
+  // Internal phase — PO scope (one set per PO).
+  { name: "Car Specs",                    waitingLabel: "Waiting Car Specs",      doneLabel: "Specs Received",      defaultDepartment: "Specs",      scope: "po"    as const, sortOrder:  1, offsetDays:  1, offsetAnchor: "submission" as const },
+  { name: "Pricing",                      waitingLabel: "Waiting Pricing",        doneLabel: "Pricing Received",    defaultDepartment: "Pricing",    scope: "po"    as const, sortOrder:  2, offsetDays:  1, offsetAnchor: "submission" as const },
+  { name: "SKU",                          waitingLabel: "Waiting SKU",            doneLabel: "SKU Created",         defaultDepartment: "Specs",      scope: "po"    as const, sortOrder:  3, offsetDays:  2, offsetAnchor: "submission" as const },
+  { name: "App Listing",                  waitingLabel: "Waiting App Listing",    doneLabel: "Listed in App",       defaultDepartment: "Operations", scope: "po"    as const, sortOrder:  4, offsetDays:  5, offsetAnchor: "submission" as const },
+  // VIN-chase flow — wave scope (one set per (PO, availability_date) cohort).
+  { name: "Send Dealer Confirmation Email", waitingLabel: "Waiting Dealer Email", doneLabel: "Email Sent",          defaultDepartment: "Operations", scope: "wave"  as const, sortOrder:  5, offsetDays:  1, offsetAnchor: "submission" as const },
+  { name: "VIN",                          waitingLabel: "Waiting VIN",            doneLabel: "VIN Received",        defaultDepartment: "Operations", scope: "wave"  as const, sortOrder:  6, offsetDays:  5, offsetAnchor: "submission" as const },
+  { name: "Plate",                        waitingLabel: "Waiting Plate",          doneLabel: "Plate Assigned",      defaultDepartment: "Operations", scope: "wave"  as const, sortOrder:  7, offsetDays:  3, offsetAnchor: "vin"        as const },
+  { name: "Customs Card",                 waitingLabel: "Waiting Customs",        doneLabel: "Customs Received",    defaultDepartment: "Logistics",  scope: "wave"  as const, sortOrder:  8, offsetDays:  5, offsetAnchor: "vin"        as const },
+  { name: "Tracking System Installed",    waitingLabel: "Waiting Tracking",       doneLabel: "Tracking Installed",  defaultDepartment: "Operations", scope: "wave"  as const, sortOrder:  9, offsetDays:  6, offsetAnchor: "vin"        as const },
+  { name: "Car Inspection",               waitingLabel: "Waiting Inspection",     doneLabel: "Inspection Done",     defaultDepartment: "Operations", scope: "wave"  as const, sortOrder: 10, offsetDays:  8, offsetAnchor: "vin"        as const },
+  { name: "Car Ready in Showroom",        waitingLabel: "Waiting Showroom Ready", doneLabel: "Ready in Showroom",   defaultDepartment: "Operations", scope: "wave"  as const, sortOrder: 11, offsetDays: 10, offsetAnchor: "vin"        as const },
+  // Closure — batch scope (per-batch close trigger).
+  { name: "Delivery",                     waitingLabel: "Waiting Delivery",       doneLabel: "Delivered",           defaultDepartment: "Logistics",  scope: "batch" as const, sortOrder: 12, offsetDays:  0, offsetAnchor: "promised"   as const },
 ];
 
 /**
@@ -583,6 +580,7 @@ async function seed() {
       defaultDepartmentId: departmentIdByName.get(a.defaultDepartment) ?? null,
       offsetDays: a.offsetDays,
       offsetAnchor: a.offsetAnchor,
+      scope: a.scope,
       sortOrder: a.sortOrder,
     }).returning({ id: actionTypes.id });
     actionTypeIdByName.set(a.name, row.id);
