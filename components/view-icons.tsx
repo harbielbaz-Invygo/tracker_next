@@ -119,13 +119,12 @@ function SettingsIcon({ className }: IconProps) {
   );
 }
 
-/** Info — a lowercase "i" inside a circle. Mark for the About page. */
-function AboutIcon({ className }: IconProps) {
+/** Open book — Guide page (renamed from "About"). */
+function GuideIcon({ className }: IconProps) {
   return (
-    <IconBase label="About icon" className={className}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 11v5" />
-      <circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none" />
+    <IconBase label="Guide icon" className={className}>
+      <path d="M3.5 5.5h6a3 3 0 0 1 3 3v11a2 2 0 0 0-2-2h-7Z" />
+      <path d="M20.5 5.5h-6a3 3 0 0 0-3 3v11a2 2 0 0 1 2-2h7Z" />
     </IconBase>
   );
 }
@@ -138,7 +137,7 @@ const ICONS: Record<ViewName, (p: IconProps) => React.ReactElement> = {
   "Action Center": ActionCenterIcon,
   "Reports":       ReportsIcon,
   "Settings":      SettingsIcon,
-  "About":         AboutIcon,
+  "Guide":         GuideIcon,
 };
 
 /**
