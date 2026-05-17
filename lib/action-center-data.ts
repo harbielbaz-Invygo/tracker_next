@@ -715,6 +715,170 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
 // `isFullySettled` from this module keep working.
 export { isFullySettled };
 
+// ──────────────────────────────────────────────────────────────────
+// PO-level status check — pulls everything across batches sharing a
+// poNumber, then hands the structured result to the Slack formatter.
+// Returns null when the source batch has no poNumber (legacy data
+// or pre_po batches that haven't been linked to a real PO yet).
+// ──────────────────────────────────────────────────────────────────
+import type { PoStatusCheckData, PoActionLine } from "./action-center-slack";
+
+export async function getPoStatusCheckData(batchCode: string): Promise<PoStatusCheckData | null> {
+  // Find the source batch + its PO number.
+  const [src] = await db
+    .select({ id: batches.id, poNumber: batches.poNumber, dealerId: batches.dealerId })
+    .from(batches).where(eq(batches.batchCode, batchCode)).limit(1);
+  if (!src || !src.poNumber) return null;
+
+  // All sibling batches under the same PO.
+  const siblings = await db
+    .select({
+      id:                 batches.id,
+      batchCode:          batches.batchCode,
+      model:              batches.model,
+      year:               batches.year,
+      requestedQuantity:  batches.requestedQuantity,
+      promisedDate:       batches.dealerPromisedDeliveryDate,
+      contractLengthMonths: batches.contractLengthMonths,
+      buyBackRate:        batches.buyBackRate,
+      dealerReceivingCity: batches.dealerReceivingCity,
+      dealerName:         dealers.name,
+    })
+    .from(batches)
+    .leftJoin(dealers, eq(batches.dealerId, dealers.id))
+    .where(eq(batches.poNumber, src.poNumber))
+    .orderBy(asc(batches.createdAt), asc(batches.id));
+
+  if (siblings.length === 0) return null;
+  const dealerName = siblings[0].dealerName ?? "—";
+
+  // Legs per batch — for the per-city breakdown inside each wave.
+  const siblingIds = siblings.map((s) => s.id);
+  const legs = siblingIds.length === 0 ? [] : await (async () => {
+    try {
+      return await db.select({
+        batchId:           batchDeliveryLegs.batchId,
+        city:              batchDeliveryLegs.city,
+        requestedQuantity: batchDeliveryLegs.requestedQuantity,
+      })
+      .from(batchDeliveryLegs)
+      .where(inArray(batchDeliveryLegs.batchId, siblingIds));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table|no such column/i.test(msg)) return [];
+      throw err;
+    }
+  })();
+
+  // Actions across all sibling batches (with stakeholder + department).
+  const actionRows = siblingIds.length === 0 ? [] : await db
+    .select({
+      batchId:           batchActions.batchId,
+      status:            batchActions.status,
+      expectedDate:      batchActions.expectedDate,
+      completedAt:       batchActions.completedAt,
+      sortOrder:         actionTypes.sortOrder,
+      actionTypeName:    actionTypes.name,
+      waitingLabel:      actionTypes.waitingLabel,
+      doneLabel:         actionTypes.doneLabel,
+      departmentName:    departments.name,
+      stakeholderName:   stakeholders.name,
+    })
+    .from(batchActions)
+    .innerJoin(actionTypes,  eq(batchActions.actionTypeId, actionTypes.id))
+    .leftJoin(departments,   eq(batchActions.departmentId, departments.id))
+    .leftJoin(stakeholders,  eq(batchActions.assignedStakeholderId, stakeholders.id))
+    .where(inArray(batchActions.batchId, siblingIds))
+    .orderBy(asc(actionTypes.sortOrder));
+
+  // Group legs by batch for fast lookup.
+  const legsByBatch = new Map<number, { city: string; quantity: number }[]>();
+  for (const l of legs) {
+    const arr = legsByBatch.get(l.batchId) ?? [];
+    arr.push({ city: l.city, quantity: l.requestedQuantity });
+    legsByBatch.set(l.batchId, arr);
+  }
+
+  // Build delivery waves. Group siblings by promisedDate → city →
+  // (modelYear → qty), summing across batches that share keys.
+  const waveMap = new Map<string, Map<string, Map<string, number>>>();
+  for (const s of siblings) {
+    const modelYear = [s.model, s.year].filter(Boolean).join(" ") || "—";
+    // If the batch has legs, use them; otherwise fall back to a single
+    // synthetic leg with the receiving city + full quantity.
+    const batchLegs = legsByBatch.get(s.id);
+    const effectiveLegs = (batchLegs && batchLegs.length > 0)
+      ? batchLegs
+      : [{ city: s.dealerReceivingCity ?? "—", quantity: s.requestedQuantity }];
+    const cities = waveMap.get(s.promisedDate) ?? new Map<string, Map<string, number>>();
+    for (const leg of effectiveLegs) {
+      const models = cities.get(leg.city) ?? new Map<string, number>();
+      models.set(modelYear, (models.get(modelYear) ?? 0) + leg.quantity);
+      cities.set(leg.city, models);
+    }
+    waveMap.set(s.promisedDate, cities);
+  }
+  const waves = Array.from(waveMap.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([promisedDate, cities]) => {
+      const cityList = Array.from(cities.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([city, models]) => {
+          const modelList = Array.from(models.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([modelYear, quantity]) => ({ modelYear, quantity }));
+          const totalCars = modelList.reduce((s, m) => s + m.quantity, 0);
+          return { city, totalCars, models: modelList };
+        });
+      const totalCars = cityList.reduce((s, c) => s + c.totalCars, 0);
+      return { promisedDate, totalCars, cities: cityList };
+    });
+
+  // Commercial terms — single value when uniform across the PO, null otherwise.
+  const contractLens = new Set(siblings.map((s) => s.contractLengthMonths ?? null));
+  const contractLengthMonths = contractLens.size === 1
+    ? Array.from(contractLens)[0]
+    : null;
+  const buyBacks = siblings.map((s) => s.buyBackRate).filter((v): v is number => v != null);
+  const buyBackRange = buyBacks.length > 0
+    ? { min: Math.min(...buyBacks), max: Math.max(...buyBacks) }
+    : null;
+
+  // Group + format actions. Build a short batchRef from the sibling
+  // batchCode so the same stakeholder's lines tell ops which batch
+  // each action belongs to.
+  const batchRefById = new Map<number, string>();
+  for (const s of siblings) {
+    batchRefById.set(s.id, `${s.batchCode}`);
+  }
+  const actions: PoActionLine[] = actionRows.map((a) => {
+    const tag = a.stakeholderName
+      ? `@${a.stakeholderName}${a.departmentName ? ` (${a.departmentName})` : ""}`
+      : a.departmentName
+        ? `(unassigned — ${a.departmentName})`
+        : "(unassigned)";
+    return {
+      tag,
+      status:  a.status as ActionDetail["status"],
+      label:   a.status === "done" ? a.doneLabel : a.waitingLabel,
+      batchRef: batchRefById.get(a.batchId) ?? `batch ${a.batchId}`,
+      date:     (a.status === "done" ? a.completedAt : a.expectedDate) ?? null,
+      blockedBy: [], // Computing blockedBy across N batches is heavy; omit for the PO summary.
+    };
+  }).sort((a, b) => a.tag.localeCompare(b.tag));
+
+  return {
+    poNumber:    src.poNumber,
+    dealerName,
+    totalCars:   siblings.reduce((s, b) => s + b.requestedQuantity, 0),
+    totalBatchesInPo: siblings.length,
+    waves,
+    contractLengthMonths,
+    buyBackRange,
+    actions,
+  };
+}
+
 /** Aggregate summary metrics for the top of the page. */
 export function summarizeActionCenter(rows: ActionCenterRow[]) {
   const total = rows.length;
