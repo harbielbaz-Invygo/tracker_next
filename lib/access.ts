@@ -24,7 +24,7 @@ export const ALL_VIEWS = [
   "Action Center",
   "Reports",
   "Settings",
-  "About",
+  "Guide",
 ] as const;
 export type ViewName = (typeof ALL_VIEWS)[number];
 
@@ -40,8 +40,9 @@ export const ACCESS: Record<ViewName, Role[] | "public"> = {
   "Action Center": ["ops", "admin"],
   "Reports":       ["ops", "admin"],
   "Settings":      ["admin"],
-  // Public — describes what the tool is, no data exposure.
-  "About":         "public",
+  // Public — pages overview, workflow, roles, glossary, tech stack.
+  // Renamed from "About" once the content grew past a simple landing.
+  "Guide":         "public",
 };
 
 /** Sidebar display labels. Equal to names since the rename. */
@@ -53,7 +54,7 @@ export const VIEW_LABELS: Record<ViewName, string> = {
   "Action Center": "Action Center",
   "Reports":       "Reports",
   "Settings":      "Settings",
-  "About":         "About",
+  "Guide":         "Guide",
 };
 
 export function canAccess(view: ViewName, role: Role): boolean {
