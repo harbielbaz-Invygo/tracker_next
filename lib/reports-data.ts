@@ -708,7 +708,10 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     colorByDealer.set(row.dealerId, c);
   }
 
-  // Build dealer reliability rows — include every dealer even if no batches.
+  // Build dealer reliability rows. Dealers with zero batches in the
+  // current period are filtered out below — they're noise that makes
+  // the table feel stale (showing dealer rows that never had any
+  // activity in the window the user is looking at).
   const dealerReliability: DealerReliabilityRow[] = allDealers.map((d) => {
     const acc = dealerAcc.get(d.id) ?? {
       total: 0, open: 0, delivered: 0, cancelled: 0,
@@ -758,8 +761,11 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     };
   });
 
-  // Sort: dealers with most batches first (most relevant at top).
-  dealerReliability.sort((a, b) => b.totalBatches - a.totalBatches);
+  // Filter out dealers with no batches in scope — they're noise.
+  // Then sort so the most-active dealers land at the top.
+  const dealerReliabilityFiltered = dealerReliability
+    .filter((r) => r.totalBatches > 0)
+    .sort((a, b) => b.totalBatches - a.totalBatches);
 
   // ── City reliability (Phase δ) ─────────────────────────────────────
   // Aggregates batch_delivery_legs joined with their parent batch so the
@@ -979,7 +985,7 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     },
     departments: rankBy(departmentsList),
     stakeholders: rankBy(stakeholdersList),
-    dealerReliability,
+    dealerReliability: dealerReliabilityFiltered,
     customerImpact,
     cityReliability,
     onTimeRateWeekly,
