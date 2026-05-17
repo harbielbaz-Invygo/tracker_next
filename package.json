@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.7.4",
+    "@fluentui/react-components": "^9.73.8",
     "@libsql/client": "^0.17.3",
     "bcryptjs": "^2.4.3",
     "clsx": "^2.1.1",

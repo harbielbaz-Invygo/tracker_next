@@ -29,6 +29,15 @@ import TimelineSvg from "./timeline-svg";
 import { PeriodSelect } from "./period-select";
 import { REPORT_PERIODS, type ReportPeriod } from "@/lib/reports-period";
 import { cn } from "@/lib/utils";
+// Fluent UI v9 — first integration test, scoped to the Insights page
+// only. FluentProvider supplies the theme; TabList + Tab replace the
+// home-rolled trust-tab buttons. Other pages remain Tailwind-only.
+import {
+  FluentProvider,
+  webLightTheme,
+  TabList,
+  Tab,
+} from "@fluentui/react-components";
 
 interface Props {
   data: InsightsData;
@@ -43,7 +52,12 @@ export default function InsightsShell({ data, period }: Props) {
   const periodLabel = REPORT_PERIODS.find((p) => p.value === period)?.label ?? "All time";
 
   return (
-    <div className="space-y-6">
+    // FluentProvider wraps the whole Insights surface so any Fluent UI
+    // component inside picks up the web-light theme. Scoped to this
+    // page only — no other pages render under a Fluent provider yet.
+    // First Fluent component test below: the Trust panel's TabList.
+    <FluentProvider theme={webLightTheme}>
+     <div className="space-y-6">
       <PageHeader
         view="Insights"
         subtitle="The unified view — leadership-level health up top, drilling into customer impact, the three trust lenses, and the per-batch Plan-vs-Reality timeline at the bottom."
@@ -79,7 +93,8 @@ export default function InsightsShell({ data, period }: Props) {
       />
 
       <BatchExplorer rows={data.batchRows} />
-    </div>
+     </div>
+    </FluentProvider>
   );
 }
 
@@ -401,12 +416,22 @@ function TrustPanel({
         </p>
       </header>
 
-      <div role="tablist" className="flex border-b border-ink-200 bg-ink-50 overflow-x-auto">
-        <TrustTabButton id="dealer"   active={active} onChange={onChange} label="Dealer Reliability" />
-        <TrustTabButton id="ops"      active={active} onChange={onChange} label="Ops Performance" />
-        <TrustTabButton id="cities"   active={active} onChange={onChange} label="Cities" />
-        <TrustTabButton id="forecast" active={active} onChange={onChange} label="Forecast Reliability" />
-        <TrustTabButton id="risk"     active={active} onChange={onChange} label="Risk Engine" />
+      {/* Fluent UI v9 TabList — replaces the home-rolled TrustTabButton
+          row. `appearance="subtle"` is closest to our previous
+          underline-on-active look; FluentProvider above supplies the
+          theme tokens. */}
+      <div className="border-b border-ink-200 bg-ink-50 px-2 overflow-x-auto">
+        <TabList
+          selectedValue={active}
+          onTabSelect={(_, d) => onChange(d.value as TrustTab)}
+          appearance="subtle"
+        >
+          <Tab value="dealer">Dealer Reliability</Tab>
+          <Tab value="ops">Ops Performance</Tab>
+          <Tab value="cities">Cities</Tab>
+          <Tab value="forecast">Forecast Reliability</Tab>
+          <Tab value="risk">Risk Engine</Tab>
+        </TabList>
       </div>
 
       <div className="p-3">
@@ -483,10 +508,14 @@ function TrustTabButton({
       aria-selected={isActive}
       onClick={() => onChange(id)}
       className={cn(
-        "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
+        // Slightly more breathing room + Fluent-style reveal: the
+        // background eases in with a brand tint rather than a flat
+        // grey, so the hover state previews the active state.
+        "px-4 py-2 text-sm font-medium border-b-2 -mb-px",
+        "transition-[background-color,color,border-color] duration-200",
         isActive
-          ? "border-brand text-brand-dark bg-white"
-          : "border-transparent text-ink-600 hover:text-midnight hover:bg-ink-100",
+          ? "border-brand text-brand-dark bg-white shadow-[inset_0_-2px_0_rgba(0,0,0,0)]"
+          : "border-transparent text-ink-600 hover:text-midnight hover:bg-brand-pastel/40",
       )}
     >
       {label}
