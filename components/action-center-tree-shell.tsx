@@ -1,16 +1,19 @@
 "use client";
 
 /**
- * Action Center v2 — Dealer ▸ PO tree on the left, PO detail drawer
+ * Action Center — Dealer ▸ PO tree on the left, PO detail drawer
  * on the right. The drawer's content swaps between Internal Phase and
- * VIN Chase via a top toggle, per the spec discussion.
+ * External Phase via a top toggle.
  *
  *   Internal Phase view → PO-scope actions (one set, applies to every
- *                          batch under this PO)
- *   VIN Chase view     → Wave-scope actions, grouped per availability
- *                         date. Each wave's batches listed beneath.
+ *                          batch under this PO). Specs, pricing, SKU.
+ *   External Phase view → Wave-scope actions, grouped per Delivery
+ *                          Window (availability date). Each delivery
+ *                          window's batches listed beneath. Dealer-
+ *                          side execution: VIN, plate, customs, etc.
  *
- * Read-only in phase 3a; mutations (mark done / skip) land in phase 3b.
+ * Internal code keeps the schema-aligned `wave` / `WaveNode` names;
+ * user-facing strings say "Delivery Window".
  */
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -297,7 +300,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   // Global keyboard shortcuts. Listens once on the document; ignores
   // events that originate inside a text input / textarea / contentEditable
   // so the operator can still type freely in forms and the tree search.
-  // - i / v: switch drawer view (Internal Phase / VIN Chase)
+  // - i / e: switch drawer view (Internal Phase / External Phase)
   // - m:     jump to Mine inbox
   // - /:     focus the tree search box
   // - Esc:   close inline form / dismiss flash / close help
@@ -335,7 +338,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
         if (selection.kind === "po") setView("internal");
         return;
       }
-      if (e.key === "v" || e.key === "V") {
+      if (e.key === "e" || e.key === "E") {
         if (selection.kind === "po") setView("vin");
         return;
       }
@@ -414,7 +417,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
                 {[
                   ["m",        "Jump to Inbox (all pending actions)"],
                   ["i",        "Switch drawer to Internal Phase"],
-                  ["v",        "Switch drawer to VIN Chase"],
+                  ["e",        "Switch drawer to External Phase"],
                   ["/",        "Focus the tree search box"],
                   ["Esc",      "Close inline form / dismiss flash / close this overlay"],
                   ["?",        "Toggle this overlay"],
@@ -703,7 +706,7 @@ function DealerTree({
                             )}
                           </div>
                           <div className="text-[0.65rem] text-ink-500 mt-0.5 tabular-nums">
-                            {p.totalCars} cars · {p.waves.length} wave{p.waves.length === 1 ? "" : "s"}
+                            {p.totalCars} cars · {p.waves.length} window{p.waves.length === 1 ? "" : "s"}
                             {counts.total > 0 && (
                               <> · {counts.done}/{counts.total} done</>
                             )}
@@ -775,7 +778,7 @@ function PoDrawer({
             </>
           )}
           <span className="text-ink-300 mx-1.5">·</span>
-          <span className="tabular-nums">{po.waves.length} wave{po.waves.length === 1 ? "" : "s"}</span>
+          <span className="tabular-nums">{po.waves.length} delivery window{po.waves.length === 1 ? "" : "s"}</span>
           {po.nextAvailability && (() => {
             const today = todayIso();
             const days = Math.round(
@@ -783,9 +786,9 @@ function PoDrawer({
               / (24 * 60 * 60 * 1000),
             );
             const txt = days < 0
-              ? `${-days}d past first wave`
+              ? `${-days}d past first window`
               : days === 0
-                ? "first wave today"
+                ? "first window today"
                 : `in ${days}d`;
             return (
               <>
@@ -812,7 +815,7 @@ function PoDrawer({
       <div className="px-4 py-2 border-b border-ink-200 shrink-0 bg-white">
         <div role="tablist" className="inline-flex items-center bg-ink-100 rounded-md p-0.5">
           <ToggleBtn active={view === "internal"} onClick={() => onChangeView("internal")} label="Internal Phase" />
-          <ToggleBtn active={view === "vin"}      onClick={() => onChangeView("vin")}      label="VIN Chase" />
+          <ToggleBtn active={view === "vin"}      onClick={() => onChangeView("vin")}      label="External Phase" />
         </div>
       </div>
 
@@ -956,7 +959,7 @@ function MineView({
           for (const a of w.actions) {
             if (a.status !== "waiting" && a.status !== "blocked") continue;
             acc.push({ action: a, poId, poNumber, dealerName,
-              contextLabel: `Wave · ${w.availabilityDate}` });
+              contextLabel: `Delivery Window · ${w.availabilityDate}` });
           }
           // Batch-scope (skip Delivery; surfaced via Mark-as-delivered UI)
           for (const b of w.batches) {
@@ -1440,7 +1443,8 @@ function Column({
 }
 
 // ─────────────────────────────────────────────────────────────
-// VIN Chase — per-wave sections with wave-scope actions + batches
+// External Phase — per-window sections with window-scope actions
+// + the batches landing in that window
 // ─────────────────────────────────────────────────────────────
 
 function VinChaseView({
@@ -1454,7 +1458,7 @@ function VinChaseView({
   if (po.waves.length === 0) {
     return (
       <p className="text-sm text-ink-500 italic px-2">
-        No waves yet. Submit an Intake on this PO to create waves.
+        No delivery windows yet. Submit an Intake on this PO to create them.
       </p>
     );
   }
@@ -1509,7 +1513,7 @@ function WaveSection({
       .map((a) => a.id);
     if (ids.length === 0) return;
     const ok = window.confirm(
-      `Mark ${ids.length} waiting wave-action${ids.length === 1 ? "" : "s"} done?\n\n` +
+      `Mark ${ids.length} waiting External-Phase action${ids.length === 1 ? "" : "s"} done in this window?\n\n` +
       `Blocked rows are excluded — unblock them first if they should also flip.`,
     );
     if (ok) onBulkSetStatus(ids, "done");
@@ -1531,7 +1535,7 @@ function WaveSection({
         <span aria-hidden className="text-ink-400 text-xs">
           {expanded ? "▾" : "▸"}
         </span>
-        <span className="text-sm font-semibold text-midnight">📅 Wave · {wave.availabilityDate}</span>
+        <span className="text-sm font-semibold text-midnight">📅 Delivery Window · {wave.availabilityDate}</span>
         <span className="text-xs text-ink-500 tabular-nums">
           {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
         </span>
@@ -1558,7 +1562,7 @@ function WaveSection({
             onKeyDown={(e) => e.stopPropagation()}
             className="ml-auto text-[0.7rem] px-2 py-0.5 rounded border border-green text-green-dark hover:bg-green-pale"
           >
-            ✓ Mark all wave actions done ({waitingCount})
+            ✓ Mark all External-Phase actions done ({waitingCount})
           </button>
         )}
       </div>
@@ -1589,7 +1593,7 @@ function WaveSection({
               ActionCard is reused for the rich label + status buttons. */}
           {wave.actions.length === 0 ? (
             <p className="text-xs text-ink-500 italic px-2 py-1">
-              No VIN-chase actions on this wave.
+              No External-Phase actions on this delivery window.
             </p>
           ) : (
             <ul className="space-y-2">
@@ -1642,7 +1646,7 @@ function BatchListInWave({
   return (
     <div className="px-2 py-1.5 border border-ink-200 rounded-md bg-white">
       <p className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 mb-1.5">
-        Batches in this wave
+        Batches in this delivery window
       </p>
       <ul className="space-y-2">
         {wave.batches.map((b) => (
@@ -1710,7 +1714,7 @@ function BatchRow({
     if (!delivery)             return { ok: false, reason: "No Delivery action on this batch." };
     if (closed)                return { ok: false, reason: "Batch already closed." };
     if (!internalPhaseDone)    return { ok: false, reason: "Internal-phase actions still pending on the PO." };
-    if (!waveReady)            return { ok: false, reason: `${wavePending} wave action${wavePending === 1 ? "" : "s"} still pending.` };
+    if (!waveReady)            return { ok: false, reason: `${wavePending} External-Phase action${wavePending === 1 ? "" : "s"} still pending in this window.` };
     if (!isListed)             return { ok: false, reason: "Batch not yet app-listed (do it via Internal Phase → App listed)." };
     return { ok: true, reason: "Marks the Delivery action done and auto-closes the batch." };
   })();

@@ -27,7 +27,7 @@ export default async function ActionCenterPage() {
       <div>
         <PageHeader
           view="Action Center"
-          subtitle={<>Dealer ▸ PO ▸ Wave hierarchy. Internal-phase actions apply to the whole PO; VIN-chase actions apply per delivery wave.</>}
+          subtitle={<>Dealer ▸ PO ▸ Delivery Window. Internal-Phase actions apply to the whole PO; External-Phase actions apply per delivery window.</>}
         />
         <ActionCenterTreeShell tree={tree} />
       </div>
