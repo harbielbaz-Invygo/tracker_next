@@ -71,9 +71,34 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   // Track which row is busy / errored so the buttons can show pending
   // state. Single-shot is fine for a list of dozens.
   const [busyActionId,  setBusyActionId]  = useState<number | null>(null);
+  const [busyBatchId,   setBusyBatchId]   = useState<number | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   /** Transient toast — shows cascade results ("2 actions unblocked"). */
   const [cascadeFlash,  setCascadeFlash]  = useState<string | null>(null);
+
+  /**
+   * Generic batch-level mutation runner. Used by the per-batch buttons
+   * (Mark as listed / Shift availability date / Cancel batch) that hit
+   * REST endpoints other than /api/scope-action. Handles loading state,
+   * surface-level error messaging, and router refresh on success.
+   */
+  async function runBatchOp(batchId: number, url: string, body: unknown): Promise<void> {
+    setBusyBatchId(batchId);
+    setMutationError(null);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setMutationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyBatchId(null);
+    }
+  }
 
   async function setActionStatus(actionId: number, status: Status) {
     setBusyActionId(actionId);
@@ -163,7 +188,9 @@ export default function ActionCenterTreeShell({ tree }: Props) {
             view={view}
             onChangeView={setView}
             busyActionId={busyActionId}
+            busyBatchId={busyBatchId}
             onChangeStatus={setActionStatus}
+            onBatchOp={runBatchOp}
             mutationError={mutationError}
             cascadeFlash={cascadeFlash}
           />
@@ -183,6 +210,11 @@ interface MutationProps {
   busyActionId:   number | null;
   onChangeStatus: (actionId: number, status: Status) => void;
   mutationError:  string | null;
+}
+
+interface BatchOpProps {
+  busyBatchId: number | null;
+  onBatchOp:   (batchId: number, url: string, body: unknown) => Promise<void>;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -299,14 +331,15 @@ function DealerTree({
 
 function PoDrawer({
   po, dealerName, view, onChangeView,
-  busyActionId, onChangeStatus, mutationError, cascadeFlash,
+  busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  mutationError, cascadeFlash,
 }: {
   po: PoNode;
   dealerName: string;
   view: DrawerView;
   onChangeView: (v: DrawerView) => void;
   cascadeFlash: string | null;
-} & MutationProps) {
+} & MutationProps & BatchOpProps) {
   return (
     <>
       {/* Header */}
@@ -355,7 +388,13 @@ function PoDrawer({
         {view === "internal" ? (
           <InternalPhaseView po={po} busyActionId={busyActionId} onChangeStatus={onChangeStatus} />
         ) : (
-          <VinChaseView po={po} busyActionId={busyActionId} onChangeStatus={onChangeStatus} />
+          <VinChaseView
+            po={po}
+            busyActionId={busyActionId}
+            busyBatchId={busyBatchId}
+            onChangeStatus={onChangeStatus}
+            onBatchOp={onBatchOp}
+          />
         )}
       </div>
     </>
@@ -566,8 +605,11 @@ function Column({
 // ─────────────────────────────────────────────────────────────
 
 function VinChaseView({
-  po, busyActionId, onChangeStatus,
-}: { po: PoNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
+  po, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+}: { po: PoNode }
+  & Pick<MutationProps, "busyActionId" | "onChangeStatus">
+  & BatchOpProps
+) {
   if (po.waves.length === 0) {
     return (
       <p className="text-sm text-ink-500 italic px-2">
@@ -578,15 +620,25 @@ function VinChaseView({
   return (
     <div className="space-y-4">
       {po.waves.map((w) => (
-        <WaveSection key={w.id} wave={w} busyActionId={busyActionId} onChangeStatus={onChangeStatus} />
+        <WaveSection
+          key={w.id}
+          wave={w}
+          busyActionId={busyActionId}
+          busyBatchId={busyBatchId}
+          onChangeStatus={onChangeStatus}
+          onBatchOp={onBatchOp}
+        />
       ))}
     </div>
   );
 }
 
 function WaveSection({
-  wave, busyActionId, onChangeStatus,
-}: { wave: WaveNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
+  wave, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+}: { wave: WaveNode }
+  & Pick<MutationProps, "busyActionId" | "onChangeStatus">
+  & BatchOpProps
+) {
   // Waves are collapsed by default — a PO can have many waves and the
   // VIN Chase view gets long fast. Click the header to open one.
   const [expanded, setExpanded] = useState(false);
@@ -638,7 +690,9 @@ function WaveSection({
           <BatchListInWave
             wave={wave}
             busyActionId={busyActionId}
+            busyBatchId={busyBatchId}
             onChangeStatus={onChangeStatus}
+            onBatchOp={onBatchOp}
           />
 
           {/* Wave-scope actions — flat list (no Blocked/Done columns
@@ -684,8 +738,11 @@ function WaveSection({
  *     button shows pending count and is disabled.
  */
 function BatchListInWave({
-  wave, busyActionId, onChangeStatus,
-}: { wave: WaveNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
+  wave, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+}: { wave: WaveNode }
+  & Pick<MutationProps, "busyActionId" | "onChangeStatus">
+  & BatchOpProps
+) {
   // "Wave ready" = every wave-scope action is settled.
   const wavePending = wave.actions.filter(
     (a) => a.status !== "done" && a.status !== "skipped",
@@ -697,64 +754,203 @@ function BatchListInWave({
       <p className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 mb-1.5">
         Batches in this wave
       </p>
-      <ul className="space-y-1.5">
-        {wave.batches.map((b) => {
-          const delivery = b.actions.find((a) => a.actionTypeName === "Delivery");
-          const alreadyDelivered = b.closedAt != null && b.closureReason === "delivered";
-          const cancelled       = b.closedAt != null && b.closureReason === "cancelled";
-          const canDeliver = !!delivery && !alreadyDelivered && !cancelled && waveReady;
-          const busy = !!delivery && busyActionId === delivery.id;
-          return (
-            <li key={b.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
-              <code className="text-[0.7rem] text-midnight font-mono">{b.batchCode}</code>
-              <span className="text-ink-600">{b.modelYear}</span>
-              <span className="text-ink-300">·</span>
-              <span className="tabular-nums">{b.requestedQuantity}× {b.city}</span>
-              {b.appListedAt && (
-                <span className="text-[0.6rem] text-green-dark tabular-nums">
-                  📱 listed {b.appListedAt.slice(0, 10)}
-                </span>
-              )}
-              {b.closedAt && (
-                <span className={cn(
-                  "text-[0.65rem] tabular-nums",
-                  b.closureReason === "delivered" ? "text-green-dark" : "text-flame-dark",
-                )}>
-                  {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
-                </span>
-              )}
-              <span className="ml-auto">
-                {delivery && !alreadyDelivered && !cancelled && (
-                  <button
-                    type="button"
-                    disabled={!canDeliver || busy}
-                    onClick={() => delivery && onChangeStatus(delivery.id, "done")}
-                    className={cn(
-                      "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
-                      canDeliver
-                        ? "border-green text-green-dark hover:bg-green-pale"
-                        : "border-ink-200 text-ink-400 cursor-not-allowed",
-                      busy && "opacity-50 cursor-wait",
-                    )}
-                    title={
-                      !waveReady
-                        ? `${wavePending} wave action${wavePending === 1 ? "" : "s"} still pending`
-                        : "Marks the batch's Delivery action done and auto-closes the batch."
-                    }
-                  >
-                    {busy
-                      ? "…"
-                      : waveReady
-                        ? "✓ Mark as delivered"
-                        : `🔒 Mark as delivered · ${wavePending} pending`}
-                  </button>
-                )}
-              </span>
-            </li>
-          );
-        })}
+      <ul className="space-y-2">
+        {wave.batches.map((b) => (
+          <BatchRow
+            key={b.id}
+            batch={b}
+            wavePending={wavePending}
+            waveReady={waveReady}
+            busyActionId={busyActionId}
+            busyBatchId={busyBatchId}
+            onChangeStatus={onChangeStatus}
+            onBatchOp={onBatchOp}
+          />
+        ))}
       </ul>
     </div>
+  );
+}
+
+/**
+ * One batch row inside a wave's batch list. Header line carries the
+ * usual identity fields; the right-hand action cluster mirrors the
+ * legacy per-batch drawer:
+ *   📱 Mark as listed (toggles batches.app_listed_at)
+ *   📅 Shift availability date (updates currentProjectedDeliveryDate)
+ *   🚫 Cancel batch (closes with closureReason='cancelled')
+ *   ✓ Mark as delivered (flips the Delivery action → auto-close)
+ *
+ * Each button is disabled / lock-styled when its preconditions aren't
+ * met: e.g. Mark as delivered shows "🔒 N pending" until every wave
+ * action is done/skipped; Cancel/Shift hide once the batch is closed.
+ */
+function BatchRow({
+  batch: b, wavePending, waveReady,
+  busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+}: {
+  batch: BatchNode;
+  wavePending: number;
+  waveReady: boolean;
+} & Pick<MutationProps, "busyActionId" | "onChangeStatus">
+  & BatchOpProps
+) {
+  const delivery = b.actions.find((a) => a.actionTypeName === "Delivery");
+  const alreadyDelivered = b.closedAt != null && b.closureReason === "delivered";
+  const cancelled        = b.closedAt != null && b.closureReason === "cancelled";
+  const closed = alreadyDelivered || cancelled;
+  const canDeliver = !!delivery && !closed && waveReady;
+  const deliveryBusy = !!delivery && busyActionId === delivery.id;
+  const batchBusy    = busyBatchId === b.id;
+  const isListed = b.appListedAt != null;
+
+  // Confirm + run helpers — small inline prompts keep this self-
+  // contained. window.prompt / window.confirm are intentionally crude
+  // until we wire a proper modal pattern.
+  function handleMarkListed() {
+    if (isListed) {
+      if (!window.confirm(`Un-list ${b.batchCode}? This clears the App Listing timestamp.`)) return;
+      onBatchOp(b.id, "/api/batch-app-listing", { batchId: b.id, appListedAt: null });
+    } else {
+      onBatchOp(b.id, "/api/batch-app-listing", {
+        batchId: b.id,
+        appListedAt: new Date().toISOString(),
+      });
+    }
+  }
+  function handleShiftDate() {
+    const current = "current projection";
+    const next = window.prompt(
+      `New projected availability date for ${b.batchCode} (${current})\n\nFormat: yyyy-mm-dd`,
+    );
+    if (!next) return;
+    const trimmed = next.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      window.alert("Date must be yyyy-mm-dd. Cancelled.");
+      return;
+    }
+    const reason = window.prompt("Reason for the shift (optional):") || null;
+    const bookingsStr = window.prompt("Bookings already held against this batch at the shift moment (optional, default 0):");
+    const bookingsAtShift = bookingsStr && /^\d+$/.test(bookingsStr.trim())
+      ? parseInt(bookingsStr.trim(), 10)
+      : 0;
+    onBatchOp(b.id, "/api/batch-shift", {
+      batchId: b.id,
+      newProjectedDate: trimmed,
+      bookingsAtShift,
+      reason,
+    });
+  }
+  function handleCancel() {
+    if (!window.confirm(`Cancel ${b.batchCode}? This closes the batch as cancelled.`)) return;
+    const note = window.prompt("Cancellation note (optional):") || null;
+    onBatchOp(b.id, "/api/batch-close", {
+      batchId: b.id,
+      reason: "cancelled",
+      note,
+    });
+  }
+
+  return (
+    <li className="border border-ink-200 rounded-md bg-white px-2 py-1.5">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
+        <code className="text-[0.7rem] text-midnight font-mono">{b.batchCode}</code>
+        <span className="text-ink-600">{b.modelYear}</span>
+        <span className="text-ink-300">·</span>
+        <span className="tabular-nums">{b.requestedQuantity}× {b.city}</span>
+        {isListed && (
+          <span className="text-[0.6rem] text-green-dark tabular-nums">
+            📱 listed {b.appListedAt!.slice(0, 10)}
+          </span>
+        )}
+        {b.closedAt && (
+          <span className={cn(
+            "text-[0.65rem] tabular-nums",
+            b.closureReason === "delivered" ? "text-green-dark" : "text-flame-dark",
+          )}>
+            {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
+          </span>
+        )}
+      </div>
+
+      {/* Action buttons — hide entirely once the batch is closed. */}
+      {!closed && (
+        <div className="flex flex-wrap gap-1.5 mt-1.5">
+          <BatchOpBtn
+            label={isListed ? "📱 Un-list" : "📱 Mark as listed"}
+            tone={isListed ? "ink" : "brand"}
+            busy={batchBusy}
+            onClick={handleMarkListed}
+          />
+          <BatchOpBtn
+            label="📅 Shift date"
+            tone="gold"
+            busy={batchBusy}
+            onClick={handleShiftDate}
+          />
+          <BatchOpBtn
+            label="🚫 Cancel"
+            tone="flame"
+            busy={batchBusy}
+            onClick={handleCancel}
+          />
+          {delivery && (
+            <button
+              type="button"
+              disabled={!canDeliver || deliveryBusy}
+              onClick={() => onChangeStatus(delivery.id, "done")}
+              className={cn(
+                "text-[0.7rem] px-2 py-0.5 rounded border transition-colors ml-auto",
+                canDeliver
+                  ? "border-green text-green-dark hover:bg-green-pale"
+                  : "border-ink-200 text-ink-400 cursor-not-allowed",
+                deliveryBusy && "opacity-50 cursor-wait",
+              )}
+              title={
+                !waveReady
+                  ? `${wavePending} wave action${wavePending === 1 ? "" : "s"} still pending`
+                  : "Marks the batch's Delivery action done and auto-closes the batch."
+              }
+            >
+              {deliveryBusy
+                ? "…"
+                : waveReady
+                  ? "✓ Mark as delivered"
+                  : `🔒 Mark as delivered · ${wavePending} pending`}
+            </button>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function BatchOpBtn({
+  label, tone, busy, onClick,
+}: {
+  label: string;
+  tone: "brand" | "ink" | "gold" | "flame";
+  busy: boolean;
+  onClick: () => void;
+}) {
+  const toneCls =
+    tone === "brand" ? "border-brand text-brand-dark hover:bg-brand-pastel" :
+    tone === "gold"  ? "border-gold text-gold-dark hover:bg-gold-pale"      :
+    tone === "flame" ? "border-flame text-flame-dark hover:bg-flame-pale"   :
+    "border-ink-300 text-ink-600 hover:bg-ink-50";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className={cn(
+        "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+        toneCls,
+        busy && "opacity-50 cursor-wait",
+      )}
+    >
+      {busy ? "…" : label}
+    </button>
   );
 }
 
