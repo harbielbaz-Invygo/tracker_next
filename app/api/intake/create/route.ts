@@ -15,10 +15,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
   batches, dealers, batchActions, actionDependencies, actionTypes, batchDeliveryLegs,
-  vinChaseStages, batchVinStages, batchForecasts,
-  // Phase 2 — scope-aware tables. Written alongside the legacy tables
-  // for now so the existing Action Center keeps rendering; phase 3
-  // switches the UI to read from these. Phase 5 drops the legacy.
+  batchForecasts,
+  // Phase 5b — `actions` (scope-aware) is now the only home for new
+  // action data. batch_actions remains imported only for the
+  // forecast-split Pre-PO App Listing copy (the forecast flow
+  // pre-dates the restructure and hasn't been migrated yet).
   pos, waves, actions as actionsTable,
 } from "@/lib/db/schema";
 import { makeBatchCode } from "@/lib/utils";
@@ -205,44 +206,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── Load the canonical VIN chase stages once. Every new batch gets
-  //    a `batch_vin_stages` row per stage so the drawer's stepper has
-  //    state from creation. If the migration hasn't run on this DB
-  //    yet (no stages exist), we silently skip — drawer falls back to
-  //    an empty VIN-chase section.
-  const allVinStages = await (async () => {
-    try {
-      return await db.select({
-        id:   vinChaseStages.id,
-        name: vinChaseStages.name,
-      }).from(vinChaseStages);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/no such table/i.test(msg)) return [];
-      throw err;
-    }
-  })();
-  // Find the "VIN Receiving" stage so we can pre-mark it when ops
-  // checked "VIN received at intake". Substring scan keeps it tolerant
-  // of admin renames as long as the new name still mentions VIN.
-  const vinReceivingStageId = allVinStages.find(
-    (s) => s.name.toLowerCase().includes("vin"),
-  )?.id ?? null;
-
-  // Canonical Delivery action_type. Auto-attached to every new Intake
-  // batch — it's the closure trigger that the drawer's "Mark as
-  // Delivered" button completes. We hide it from the Intake action
-  // picker (lib/intake-data.ts already filters it out) because every
-  // batch needs one, so user-picking is just a chance to forget.
-  const [deliveryActionType] = await db.select({
-    id:           actionTypes.id,
-    offsetDays:   actionTypes.offsetDays,
-    offsetAnchor: actionTypes.offsetAnchor,
-    defaultDepartmentId: actionTypes.defaultDepartmentId,
-  })
-    .from(actionTypes)
-    .where(eq(actionTypes.name, "Delivery"))
-    .limit(1);
+  // Phase 5b — legacy batch_actions / batch_vin_stages writes removed.
+  // Wave-scope VIN actions and batch-scope Delivery are auto-attached
+  // further down via the scope-aware `actions` table. The canonical
+  // Delivery action_type lookup also lives in that block now (was
+  // duplicated here pre-cutover).
 
   // ── Optional: Forecast linkage ────────────────────────────────
   // When set, this Intake fulfils a Partnership pre-PO bet. We need
@@ -568,68 +536,14 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // ── Per-picked-action batch_actions (one set per BATCH, not per leg) ──
-      // 1:1 fulfilment: the Pre-PO App Listing action is already on the
-      //                 parent row — skip any duplicate pick.
-      // Split child:    the parent's Pre-PO App Listing is copied onto
-      //                 each child below the standard action loop, so
-      //                 likewise skip any duplicate pick here.
-      const prePoActionTypeId = prePoActionOnParent?.actionTypeId ?? null;
-      for (const a of body.actions) {
-        if (prePoActionTypeId != null && a.actionTypeId === prePoActionTypeId) continue;
-        const status = hasParentDep.has(a.actionTypeId) ? "blocked" : "waiting";
-        const type = typeById.get(a.actionTypeId);
-        const expectedDate = type
-          ? computeExpectedDate({
-              anchor:     type.offsetAnchor,
-              offsetDays: type.offsetDays,
-              submission: requestedAt,
-              vin:        null,
-              promised:   availabilityDate,
-            })
-          : null;
-        await tx.insert(batchActions).values({
-          batchId:      batchRow.id,
-          actionTypeId: a.actionTypeId,
-          departmentId: a.departmentId ?? undefined,
-          assignedStakeholderId: a.assignedStakeholderId ?? undefined,
-          status,
-          expectedDate: expectedDate ?? undefined,
-        });
-      }
-
-      // ── Auto-attach Delivery action on every new batch.
-      //    Hidden from the Intake picker because every batch needs
-      //    one — letting ops opt-in is just a chance to forget. The
-      //    drawer's Mark-as-Delivered button completes this action,
-      //    which in turn auto-closes the batch.
+      // Phase 5b — legacy per-action / VIN-stage writes removed. The
+      // scope-aware `actions` table block below handles user-picked
+      // batch + wave + PO scopes, plus auto-Delivery on every batch.
       //
-      //    For the 1:1 fulfilment path the existing batch (formerly
-      //    pre_po) already has its action set from the Forecast flow,
-      //    and the Pre-PO App Listing carries over — but Delivery
-      //    wasn't created on the Forecast row, so it needs adding
-      //    here regardless of fulfilment mode.
-      if (deliveryActionType) {
-        const deliveryExpectedDate = computeExpectedDate({
-          anchor:     deliveryActionType.offsetAnchor,
-          offsetDays: deliveryActionType.offsetDays,
-          submission: requestedAt,
-          vin:        null,
-          promised:   availabilityDate,
-        });
-        await tx.insert(batchActions).values({
-          batchId:      batchRow.id,
-          actionTypeId: deliveryActionType.id,
-          departmentId: deliveryActionType.defaultDepartmentId ?? undefined,
-          status:       "waiting",
-          expectedDate: deliveryExpectedDate ?? undefined,
-        });
-      }
-
-      // ── Split case: copy the Pre-PO App Listing action from the
-      //    parent Forecast onto this child. Preserves status (which
-      //    might already be "done" if Ops listed the cars before PO
-      //    arrived) so accuracy tracking in PR 4 stays correct.
+      // Forecast split-fulfilment still copies Pre-PO App Listing
+      // from the parent forecast — that row lives in batch_actions
+      // because forecast/create predates the restructure. The copy
+      // below remains until the forecast flow is migrated separately.
       if (isSplitFulfilment && prePoActionOnParent) {
         await tx.insert(batchActions).values({
           batchId:      batchRow.id,
@@ -640,25 +554,6 @@ export async function POST(req: NextRequest) {
           expectedDate: prePoActionOnParent.expectedDate ?? undefined,
           completedAt:  prePoActionOnParent.completedAt ?? undefined,
           notes:        prePoActionOnParent.notes ?? undefined,
-        });
-      }
-
-      // ── VIN chase stages — one batch_vin_stages row per canonical
-      //    stage. Created here so the drawer's stepper has full state
-      //    on first render. If body.vinReceivedAtIntake is set, the
-      //    "VIN Receiving" stage starts as done (timestamped at PO
-      //    date noon UTC) instead of waiting.
-      const vinIntakeCompletedAt = `${body.po.date}T12:00:00Z`;
-      for (const stage of allVinStages) {
-        const isPreMarked = body.vinReceivedAtIntake && stage.id === vinReceivingStageId;
-        await tx.insert(batchVinStages).values({
-          batchId:     batchRow.id,
-          stageId:     stage.id,
-          status:      isPreMarked ? "done" : "waiting",
-          completedAt: isPreMarked ? vinIntakeCompletedAt : undefined,
-          notes:       isPreMarked
-            ? "Auto-completed: VIN received with the PO at intake."
-            : undefined,
         });
       }
 
