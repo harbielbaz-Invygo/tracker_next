@@ -55,10 +55,13 @@ const nextConfig = {
     ];
   },
   // Preserve bookmarks after the Cockpit → Action Center rename.
+  // The /api/cockpit-drawer redirect was removed when both the legacy
+  // /api/action-center-drawer endpoint and its only caller were deleted
+  // alongside the route swap (phase 3d). The page-level /cockpit
+  // bookmark redirect stays for ops who saved it years ago.
   async redirects() {
     return [
-      { source: "/cockpit",            destination: "/action-center",            permanent: true },
-      { source: "/api/cockpit-drawer", destination: "/api/action-center-drawer", permanent: true },
+      { source: "/cockpit", destination: "/action-center", permanent: true },
     ];
   },
 };
