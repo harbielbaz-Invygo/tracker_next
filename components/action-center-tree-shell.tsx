@@ -357,11 +357,26 @@ function VinChaseView({
 function WaveSection({
   wave, busyActionId, onChangeStatus,
 }: { wave: WaveNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
+  // Waves are collapsed by default — a PO can have many waves and the
+  // VIN Chase view gets long fast. Click the header to open one.
+  const [expanded, setExpanded] = useState(false);
   const totalCars = wave.batches.reduce((s, b) => s + b.requestedQuantity, 0);
+  // Tiny status summary in the collapsed header so ops can scan
+  // progress without expanding every wave.
+  const doneCount    = wave.actions.filter((a) => a.status === "done").length;
+  const blockedCount = wave.actions.filter((a) => a.status === "blocked").length;
   return (
     <section className="border border-ink-200 rounded-md bg-ink-50/30 overflow-hidden">
-      <header className="px-3 py-2 border-b border-ink-200 bg-white">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="w-full text-left px-3 py-2 border-b border-ink-200 bg-white hover:bg-ink-50 transition-colors"
+      >
         <p className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span aria-hidden className="text-ink-400 text-xs">
+            {expanded ? "▾" : "▸"}
+          </span>
           <span className="text-sm font-semibold text-midnight">📅 Wave · {wave.availabilityDate}</span>
           <span className="text-xs text-ink-500 tabular-nums">
             {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
@@ -371,54 +386,66 @@ function WaveSection({
               · ops projecting {wave.opsExpectedDate}
             </span>
           )}
-        </p>
-      </header>
-
-      {/* Wave-scope actions */}
-      <div className="px-3 py-2">
-        {wave.actions.length === 0 ? (
-          <p className="text-xs text-ink-500 italic">No VIN-chase actions on this wave.</p>
-        ) : (
-          <ul className="space-y-1.5">
-            {wave.actions
-              .slice()
-              .sort((a, b) => a.sortOrder - b.sortOrder)
-              .map((a) => (
-                <ActionRow
-                  key={a.id}
-                  action={a}
-                  busy={busyActionId === a.id}
-                  onChangeStatus={onChangeStatus}
-                />
-              ))}
-          </ul>
-        )}
-      </div>
-
-      {/* Batches in this wave */}
-      <div className="px-3 py-2 border-t border-ink-200/60 bg-white">
-        <p className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 mb-1.5">
-          Batches in this wave
-        </p>
-        <ul className="space-y-1">
-          {wave.batches.map((b) => (
-            <li key={b.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
-              <code className="text-[0.7rem] text-midnight font-mono">{b.batchCode}</code>
-              <span className="text-ink-600">{b.modelYear}</span>
-              <span className="text-ink-300">·</span>
-              <span className="tabular-nums">{b.requestedQuantity}× {b.city}</span>
-              {b.closedAt && (
-                <span className={cn(
-                  "ml-auto text-[0.65rem] tabular-nums",
-                  b.closureReason === "delivered" ? "text-green-dark" : "text-flame-dark",
-                )}>
-                  {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
-                </span>
+          {wave.actions.length > 0 && (
+            <span className="text-[0.65rem] text-ink-500 tabular-nums ml-auto">
+              {doneCount}/{wave.actions.length} done
+              {blockedCount > 0 && (
+                <span className="text-flame-dark ml-1">· {blockedCount} blocked</span>
               )}
-            </li>
-          ))}
-        </ul>
-      </div>
+            </span>
+          )}
+        </p>
+      </button>
+
+      {expanded && (
+        <>
+          {/* Wave-scope actions */}
+          <div className="px-3 py-2">
+            {wave.actions.length === 0 ? (
+              <p className="text-xs text-ink-500 italic">No VIN-chase actions on this wave.</p>
+            ) : (
+              <ul className="space-y-1.5">
+                {wave.actions
+                  .slice()
+                  .sort((a, b) => a.sortOrder - b.sortOrder)
+                  .map((a) => (
+                    <ActionRow
+                      key={a.id}
+                      action={a}
+                      busy={busyActionId === a.id}
+                      onChangeStatus={onChangeStatus}
+                    />
+                  ))}
+              </ul>
+            )}
+          </div>
+
+          {/* Batches in this wave */}
+          <div className="px-3 py-2 border-t border-ink-200/60 bg-white">
+            <p className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 mb-1.5">
+              Batches in this wave
+            </p>
+            <ul className="space-y-1">
+              {wave.batches.map((b) => (
+                <li key={b.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
+                  <code className="text-[0.7rem] text-midnight font-mono">{b.batchCode}</code>
+                  <span className="text-ink-600">{b.modelYear}</span>
+                  <span className="text-ink-300">·</span>
+                  <span className="tabular-nums">{b.requestedQuantity}× {b.city}</span>
+                  {b.closedAt && (
+                    <span className={cn(
+                      "ml-auto text-[0.65rem] tabular-nums",
+                      b.closureReason === "delivered" ? "text-green-dark" : "text-flame-dark",
+                    )}>
+                      {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </>
+      )}
     </section>
   );
 }
