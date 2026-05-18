@@ -39,10 +39,13 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   // state. Single-shot is fine for a list of dozens.
   const [busyActionId,  setBusyActionId]  = useState<number | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  /** Transient toast — shows cascade results ("2 actions unblocked"). */
+  const [cascadeFlash,  setCascadeFlash]  = useState<string | null>(null);
 
   async function setActionStatus(actionId: number, status: Status) {
     setBusyActionId(actionId);
     setMutationError(null);
+    setCascadeFlash(null);
     try {
       const res = await fetch("/api/scope-action", {
         method: "PATCH",
@@ -50,6 +53,19 @@ export default function ActionCenterTreeShell({ tree }: Props) {
         body: JSON.stringify({ actionId, status }),
       });
       if (!res.ok) throw new Error(await res.text());
+      // Surface cascade activity so ops sees what changed beyond the
+      // row they clicked. The route returns these arrays from phase 3c.
+      const data = await res.json().catch(() => null) as
+        | { autoUnblockedIds?: number[]; cascadeRevertedIds?: number[] }
+        | null;
+      const unblocked = data?.autoUnblockedIds?.length ?? 0;
+      const reverted  = data?.cascadeRevertedIds?.length ?? 0;
+      if (unblocked > 0 || reverted > 0) {
+        const parts: string[] = [];
+        if (unblocked > 0) parts.push(`${unblocked} action${unblocked === 1 ? "" : "s"} unblocked`);
+        if (reverted  > 0) parts.push(`${reverted} re-blocked`);
+        setCascadeFlash(parts.join(" · "));
+      }
       router.refresh();
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e));
@@ -57,6 +73,13 @@ export default function ActionCenterTreeShell({ tree }: Props) {
       setBusyActionId(null);
     }
   }
+  // Auto-clear the cascade flash after a few seconds so it doesn't
+  // linger on screen forever.
+  useEffect(() => {
+    if (cascadeFlash == null) return;
+    const t = window.setTimeout(() => setCascadeFlash(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [cascadeFlash]);
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(DRAWER_VIEW_KEY);
@@ -109,6 +132,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
             busyActionId={busyActionId}
             onChangeStatus={setActionStatus}
             mutationError={mutationError}
+            cascadeFlash={cascadeFlash}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-ink-500 text-center px-8">
@@ -219,12 +243,13 @@ function DealerTree({
 
 function PoDrawer({
   po, dealerName, view, onChangeView,
-  busyActionId, onChangeStatus, mutationError,
+  busyActionId, onChangeStatus, mutationError, cascadeFlash,
 }: {
   po: PoNode;
   dealerName: string;
   view: DrawerView;
   onChangeView: (v: DrawerView) => void;
+  cascadeFlash: string | null;
 } & MutationProps) {
   return (
     <>
@@ -264,6 +289,11 @@ function PoDrawer({
         {mutationError && (
           <p role="alert" className="text-xs text-flame-dark bg-flame-pale border border-flame px-3 py-2 rounded-md">
             Could not update: {mutationError}
+          </p>
+        )}
+        {cascadeFlash && (
+          <p role="status" className="text-xs text-green-dark bg-green-pale border border-green px-3 py-2 rounded-md">
+            ✓ {cascadeFlash}
           </p>
         )}
         {view === "internal" ? (
