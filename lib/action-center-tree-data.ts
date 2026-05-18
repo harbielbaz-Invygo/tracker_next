@@ -119,8 +119,20 @@ export interface DealerNode {
   pos:                PoNode[];        // sorted by po_date desc
 }
 
+export interface DepartmentCatalog {
+  id:           number;
+  name:         string;
+  stakeholders: { id: number; name: string }[];
+}
+
 export interface ActionCenterTree {
   dealers: DealerNode[];
+  /**
+   * Department + stakeholder catalog, used by the per-action stakeholder
+   * reassign picker. All active departments with their stakeholders;
+   * the picker filters by the action's current department.
+   */
+  departments: DepartmentCatalog[];
   /** Generation timestamp — useful for the UI's stale-data indicator. */
   generatedAt: string;
 }
@@ -135,7 +147,7 @@ export interface ActionCenterTree {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, actionRows, depRows, allTypesForDeps, dealersRows] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     db.select().from(batches),
@@ -167,6 +179,12 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     db.select({ id: actionTypes.id, name: actionTypes.name, sortOrder: actionTypes.sortOrder })
       .from(actionTypes),
     db.select({ id: dealers.id, name: dealers.name, homeCity: dealers.homeCity }).from(dealers),
+    db.select({ id: departments.id, name: departments.name, sortOrder: departments.sortOrder })
+      .from(departments)
+      .orderBy(asc(departments.sortOrder)),
+    db.select({ id: stakeholders.id, name: stakeholders.name, departmentId: stakeholders.departmentId, sortOrder: stakeholders.sortOrder })
+      .from(stakeholders)
+      .orderBy(asc(stakeholders.sortOrder)),
   ]);
 
   // Resolve "this action_type depends on these parent action_types".
@@ -414,5 +432,22 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  return { dealers: dealerNodes, generatedAt: new Date().toISOString() };
+  // Build the dept + stakeholder catalog used by the reassign picker.
+  const stakeholdersByDept = new Map<number, { id: number; name: string }[]>();
+  for (const s of stakeholderRows) {
+    const arr = stakeholdersByDept.get(s.departmentId) ?? [];
+    arr.push({ id: s.id, name: s.name });
+    stakeholdersByDept.set(s.departmentId, arr);
+  }
+  const deptCatalog: DepartmentCatalog[] = deptCatalogRows.map((d) => ({
+    id:           d.id,
+    name:         d.name,
+    stakeholders: stakeholdersByDept.get(d.id) ?? [],
+  }));
+
+  return {
+    dealers:     dealerNodes,
+    departments: deptCatalog,
+    generatedAt: new Date().toISOString(),
+  };
 }
