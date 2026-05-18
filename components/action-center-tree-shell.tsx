@@ -517,6 +517,7 @@ function appListedSyntheticAction(po: PoNode): ScopedActionDetail | null {
     // Sort after every real action by giving it a very large sortOrder.
     sortOrder:        999_999,
     blockedByNames:   [],
+    pendingDependentNames: [],
   };
 }
 
@@ -684,6 +685,7 @@ function VinChaseView({
         <WaveSection
           key={w.id}
           wave={w}
+          internalPhaseDone={po.internalPhaseDone}
           busyActionId={busyActionId}
           busyBatchId={busyBatchId}
           onChangeStatus={onChangeStatus}
@@ -700,9 +702,9 @@ function VinChaseView({
 }
 
 function WaveSection({
-  wave, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  wave, internalPhaseDone, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
   expandedWaveIds, onToggleWave, inlineForm, onOpenInlineForm, onCloseInlineForm,
-}: { wave: WaveNode }
+}: { wave: WaveNode; internalPhaseDone: boolean }
   & Pick<MutationProps, "busyActionId" | "onChangeStatus">
   & BatchOpProps
   & UiStateProps
@@ -758,6 +760,7 @@ function WaveSection({
               ahead. */}
           <BatchListInWave
             wave={wave}
+            internalPhaseDone={internalPhaseDone}
             busyActionId={busyActionId}
             busyBatchId={busyBatchId}
             onChangeStatus={onChangeStatus}
@@ -810,9 +813,9 @@ function WaveSection({
  *     button shows pending count and is disabled.
  */
 function BatchListInWave({
-  wave, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  wave, internalPhaseDone, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
   inlineForm, onOpenInlineForm, onCloseInlineForm,
-}: { wave: WaveNode }
+}: { wave: WaveNode; internalPhaseDone: boolean }
   & Pick<MutationProps, "busyActionId" | "onChangeStatus">
   & BatchOpProps
   & Pick<UiStateProps, "inlineForm" | "onOpenInlineForm" | "onCloseInlineForm">
@@ -835,6 +838,7 @@ function BatchListInWave({
             batch={b}
             wavePending={wavePending}
             waveReady={waveReady}
+            internalPhaseDone={internalPhaseDone}
             busyActionId={busyActionId}
             busyBatchId={busyBatchId}
             onChangeStatus={onChangeStatus}
@@ -863,13 +867,14 @@ function BatchListInWave({
  * action is done/skipped; Cancel/Shift hide once the batch is closed.
  */
 function BatchRow({
-  batch: b, wavePending, waveReady,
+  batch: b, wavePending, waveReady, internalPhaseDone,
   busyActionId, busyBatchId, onChangeStatus, onBatchOp,
   inlineForm, onOpenInlineForm, onCloseInlineForm,
 }: {
   batch: BatchNode;
   wavePending: number;
   waveReady: boolean;
+  internalPhaseDone: boolean;
 } & Pick<MutationProps, "busyActionId" | "onChangeStatus">
   & BatchOpProps
   & Pick<UiStateProps, "inlineForm" | "onOpenInlineForm" | "onCloseInlineForm">
@@ -878,17 +883,43 @@ function BatchRow({
   const alreadyDelivered = b.closedAt != null && b.closureReason === "delivered";
   const cancelled        = b.closedAt != null && b.closureReason === "cancelled";
   const closed = alreadyDelivered || cancelled;
-  const canDeliver = !!delivery && !closed && waveReady;
+  const isListed = b.appListedAt != null;
+
+  // Multi-gate Mark-as-delivered:
+  //   1. Delivery action must exist on the batch
+  //   2. Batch isn't already closed
+  //   3. Wave-scope actions are all done/skipped (waveReady)
+  //   4. Internal Phase complete on the parent PO
+  //   5. Batch has been app-listed
+  // Each gate gives a distinct tooltip so ops sees WHY a button is
+  // locked without trial-and-error.
+  const deliveryGate: { ok: boolean; reason: string } = (() => {
+    if (!delivery)             return { ok: false, reason: "No Delivery action on this batch." };
+    if (closed)                return { ok: false, reason: "Batch already closed." };
+    if (!internalPhaseDone)    return { ok: false, reason: "Internal-phase actions still pending on the PO." };
+    if (!waveReady)            return { ok: false, reason: `${wavePending} wave action${wavePending === 1 ? "" : "s"} still pending.` };
+    if (!isListed)             return { ok: false, reason: "Batch not yet app-listed." };
+    return { ok: true, reason: "Marks the Delivery action done and auto-closes the batch." };
+  })();
+  const canDeliver = deliveryGate.ok;
   const deliveryBusy = !!delivery && busyActionId === delivery.id;
   const batchBusy    = busyBatchId === b.id;
-  const isListed = b.appListedAt != null;
+
+  // Mark-as-listed gate: Internal Phase must be done on the PO. Stops
+  // ops from listing a batch in the app before pricing/specs/SKU are
+  // confirmed — that's a customer-visible commitment.
+  const canList = internalPhaseDone || isListed;
+  const listGate = isListed
+    ? "Un-list the batch (clears the App Listing timestamp)."
+    : internalPhaseDone
+      ? "Marks the batch as live in the app."
+      : "Complete Internal-phase actions before listing.";
+
   const showShiftForm  = inlineForm?.batchId === b.id && inlineForm.kind === "shift";
   const showCancelForm = inlineForm?.batchId === b.id && inlineForm.kind === "cancel";
 
   function handleMarkListed() {
-    // Toggle the app-listed flag. No confirmation for the un-list path
-    // either — the action is reversible, so a one-click toggle is
-    // appropriate for daily use.
+    if (!canList) return;
     onBatchOp(b.id, "/api/batch-app-listing", {
       batchId: b.id,
       appListedAt: isListed ? null : new Date().toISOString(),
@@ -920,12 +951,29 @@ function BatchRow({
       {/* Action buttons — hide once the batch is closed. */}
       {!closed && !showShiftForm && !showCancelForm && (
         <div className="flex flex-wrap gap-1.5 mt-1.5">
-          <BatchOpBtn
-            label={isListed ? "📱 Un-list" : "📱 Mark as listed"}
-            tone={isListed ? "ink" : "brand"}
-            busy={batchBusy}
+          <button
+            type="button"
+            disabled={!canList || batchBusy}
             onClick={handleMarkListed}
-          />
+            title={listGate}
+            className={cn(
+              "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+              canList
+                ? (isListed
+                    ? "border-ink-300 text-ink-600 hover:bg-ink-50"
+                    : "border-brand text-brand-dark hover:bg-brand-pastel")
+                : "border-ink-200 text-ink-400 cursor-not-allowed",
+              batchBusy && "opacity-50 cursor-wait",
+            )}
+          >
+            {batchBusy
+              ? "…"
+              : isListed
+                ? "📱 Un-list"
+                : canList
+                  ? "📱 Mark as listed"
+                  : "🔒 Mark as listed"}
+          </button>
           <BatchOpBtn
             label="📅 Shift date"
             tone="gold"
@@ -950,17 +998,13 @@ function BatchRow({
                   : "border-ink-200 text-ink-400 cursor-not-allowed",
                 deliveryBusy && "opacity-50 cursor-wait",
               )}
-              title={
-                !waveReady
-                  ? `${wavePending} wave action${wavePending === 1 ? "" : "s"} still pending`
-                  : "Marks the batch's Delivery action done and auto-closes the batch."
-              }
+              title={deliveryGate.reason}
             >
               {deliveryBusy
                 ? "…"
-                : waveReady
+                : canDeliver
                   ? "✓ Mark as delivered"
-                  : `🔒 Mark as delivered · ${wavePending} pending`}
+                  : "🔒 Mark as delivered"}
             </button>
           )}
         </div>
@@ -1294,7 +1338,22 @@ function ActionCard({
             label="⏭ Skip"
             tone="ink"
             busy={busy}
-            onClick={() => onChangeStatus(action.id, "skipped")}
+            onClick={() => {
+              // Skip silently satisfies the cascade (children promote
+              // from blocked → waiting), which can mask "we never
+              // actually did this work" mistakes. When there are
+              // pending dependents on the same scope, confirm with
+              // ops first so they see the downstream impact.
+              if (action.pendingDependentNames.length > 0) {
+                const confirmed = window.confirm(
+                  `Skipping "${action.doneLabel || action.actionTypeName}" will unblock these dependent actions:\n\n` +
+                  action.pendingDependentNames.map((n) => `  • ${n}`).join("\n") +
+                  `\n\nProceed?`,
+                );
+                if (!confirmed) return;
+              }
+              onChangeStatus(action.id, "skipped");
+            }}
           />
         )}
         {action.status === "blocked" && (
