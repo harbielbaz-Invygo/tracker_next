@@ -13,10 +13,13 @@
  * Read-only in phase 3a; mutations (mark done / skip) land in phase 3b.
  */
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import type {
   ActionCenterTree, PoNode, WaveNode, BatchNode, ScopedActionDetail,
 } from "@/lib/action-center-tree-data";
 import { cn } from "@/lib/utils";
+
+type Status = ScopedActionDetail["status"];
 
 type DrawerView = "internal" | "vin";
 const DRAWER_VIEW_KEY = "action-center-v2-drawer-view";
@@ -26,9 +29,34 @@ interface Props {
 }
 
 export default function ActionCenterTreeShell({ tree }: Props) {
+  const router = useRouter();
+
   // Selection: the PO id. Null until the first PO is clicked.
   const [selectedPoId, setSelectedPoId] = useState<number | null>(null);
   const [view, setView] = useState<DrawerView>("internal");
+
+  // Track which row is busy / errored so the buttons can show pending
+  // state. Single-shot is fine for a list of dozens.
+  const [busyActionId,  setBusyActionId]  = useState<number | null>(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+
+  async function setActionStatus(actionId: number, status: Status) {
+    setBusyActionId(actionId);
+    setMutationError(null);
+    try {
+      const res = await fetch("/api/scope-action", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actionId, status }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setMutationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyActionId(null);
+    }
+  }
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(DRAWER_VIEW_KEY);
@@ -78,6 +106,9 @@ export default function ActionCenterTreeShell({ tree }: Props) {
             dealerName={dealerOfSelected.name}
             view={view}
             onChangeView={setView}
+            busyActionId={busyActionId}
+            onChangeStatus={setActionStatus}
+            mutationError={mutationError}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-ink-500 text-center px-8">
@@ -89,6 +120,12 @@ export default function ActionCenterTreeShell({ tree }: Props) {
       </div>
     </div>
   );
+}
+
+interface MutationProps {
+  busyActionId:   number | null;
+  onChangeStatus: (actionId: number, status: Status) => void;
+  mutationError:  string | null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -182,12 +219,13 @@ function DealerTree({
 
 function PoDrawer({
   po, dealerName, view, onChangeView,
+  busyActionId, onChangeStatus, mutationError,
 }: {
   po: PoNode;
   dealerName: string;
   view: DrawerView;
   onChangeView: (v: DrawerView) => void;
-}) {
+} & MutationProps) {
   return (
     <>
       {/* Header */}
@@ -223,10 +261,15 @@ function PoDrawer({
 
       {/* Body */}
       <div className="flex-1 overflow-auto p-4 space-y-4">
+        {mutationError && (
+          <p role="alert" className="text-xs text-flame-dark bg-flame-pale border border-flame px-3 py-2 rounded-md">
+            Could not update: {mutationError}
+          </p>
+        )}
         {view === "internal" ? (
-          <InternalPhaseView po={po} />
+          <InternalPhaseView po={po} busyActionId={busyActionId} onChangeStatus={onChangeStatus} />
         ) : (
-          <VinChaseView po={po} />
+          <VinChaseView po={po} busyActionId={busyActionId} onChangeStatus={onChangeStatus} />
         )}
       </div>
     </>
@@ -256,7 +299,9 @@ function ToggleBtn({ active, onClick, label }: { active: boolean; onClick: () =>
 // Internal Phase — PO-scope actions
 // ─────────────────────────────────────────────────────────────
 
-function InternalPhaseView({ po }: { po: PoNode }) {
+function InternalPhaseView({
+  po, busyActionId, onChangeStatus,
+}: { po: PoNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
   if (po.actions.length === 0) {
     return (
       <p className="text-sm text-ink-500 italic px-2">
@@ -274,7 +319,12 @@ function InternalPhaseView({ po }: { po: PoNode }) {
           .slice()
           .sort((a, b) => a.sortOrder - b.sortOrder)
           .map((a) => (
-            <ActionRow key={a.id} action={a} />
+            <ActionRow
+              key={a.id}
+              action={a}
+              busy={busyActionId === a.id}
+              onChangeStatus={onChangeStatus}
+            />
           ))}
       </ul>
     </section>
@@ -285,7 +335,9 @@ function InternalPhaseView({ po }: { po: PoNode }) {
 // VIN Chase — per-wave sections with wave-scope actions + batches
 // ─────────────────────────────────────────────────────────────
 
-function VinChaseView({ po }: { po: PoNode }) {
+function VinChaseView({
+  po, busyActionId, onChangeStatus,
+}: { po: PoNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
   if (po.waves.length === 0) {
     return (
       <p className="text-sm text-ink-500 italic px-2">
@@ -296,13 +348,15 @@ function VinChaseView({ po }: { po: PoNode }) {
   return (
     <div className="space-y-4">
       {po.waves.map((w) => (
-        <WaveSection key={w.id} wave={w} />
+        <WaveSection key={w.id} wave={w} busyActionId={busyActionId} onChangeStatus={onChangeStatus} />
       ))}
     </div>
   );
 }
 
-function WaveSection({ wave }: { wave: WaveNode }) {
+function WaveSection({
+  wave, busyActionId, onChangeStatus,
+}: { wave: WaveNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
   const totalCars = wave.batches.reduce((s, b) => s + b.requestedQuantity, 0);
   return (
     <section className="border border-ink-200 rounded-md bg-ink-50/30 overflow-hidden">
@@ -330,7 +384,12 @@ function WaveSection({ wave }: { wave: WaveNode }) {
               .slice()
               .sort((a, b) => a.sortOrder - b.sortOrder)
               .map((a) => (
-                <ActionRow key={a.id} action={a} compact />
+                <ActionRow
+                  key={a.id}
+                  action={a}
+                  busy={busyActionId === a.id}
+                  onChangeStatus={onChangeStatus}
+                />
               ))}
           </ul>
         )}
@@ -368,37 +427,108 @@ function WaveSection({ wave }: { wave: WaveNode }) {
 // Shared row — used by both Internal Phase and Wave actions
 // ─────────────────────────────────────────────────────────────
 
-function ActionRow({ action, compact = false }: { action: ScopedActionDetail; compact?: boolean }) {
+function ActionRow({
+  action, busy, onChangeStatus,
+}: {
+  action: ScopedActionDetail;
+  busy: boolean;
+  onChangeStatus: (actionId: number, status: Status) => void;
+}) {
   const icon = action.status === "done"    ? "✅"
              : action.status === "skipped" ? "⏭"
              : action.status === "blocked" ? "⛔"
              :                                "⏳";
   const label = action.status === "done" ? action.doneLabel : action.waitingLabel;
+
   return (
-    <li className={cn(
-      "flex flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-md",
-      compact ? "px-1 py-0.5" : "px-3 py-2 border border-ink-200 bg-white",
-    )}>
-      <span className="shrink-0" aria-hidden>{icon}</span>
-      <span className="text-sm font-medium text-midnight">{label}</span>
-      {action.stakeholderName && (
-        <span className="text-[0.7rem] text-ink-500">@{action.stakeholderName}</span>
-      )}
-      {action.departmentName && (
-        <span className="text-[0.65rem] text-ink-500 uppercase tracking-wide">
-          ({action.departmentName})
-        </span>
-      )}
-      {action.status === "done" && action.completedAt && (
-        <span className="text-[0.65rem] text-green-dark tabular-nums ml-auto">
-          ✓ {action.completedAt.slice(0, 10)}
-        </span>
-      )}
-      {action.status !== "done" && action.expectedDate && (
-        <span className="text-[0.65rem] text-ink-500 tabular-nums ml-auto">
-          due {action.expectedDate}
-        </span>
-      )}
+    <li className="rounded-md border border-ink-200 bg-white px-3 py-2">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="shrink-0" aria-hidden>{icon}</span>
+        <span className="text-sm font-medium text-midnight">{label}</span>
+        {action.stakeholderName && (
+          <span className="text-[0.7rem] text-ink-500">@{action.stakeholderName}</span>
+        )}
+        {action.departmentName && (
+          <span className="text-[0.65rem] text-ink-500 uppercase tracking-wide">
+            ({action.departmentName})
+          </span>
+        )}
+        {action.status === "done" && action.completedAt && (
+          <span className="text-[0.65rem] text-green-dark tabular-nums ml-auto">
+            ✓ {action.completedAt.slice(0, 10)}
+          </span>
+        )}
+        {action.status !== "done" && action.expectedDate && (
+          <span className="text-[0.65rem] text-ink-500 tabular-nums ml-auto">
+            due {action.expectedDate}
+          </span>
+        )}
+      </div>
+
+      {/* Status controls — change based on current status. */}
+      <div className="flex flex-wrap gap-1.5 mt-1.5">
+        {action.status !== "done" && (
+          <StatusBtn
+            label="✓ Mark done"
+            tone="green"
+            busy={busy}
+            onClick={() => onChangeStatus(action.id, "done")}
+          />
+        )}
+        {action.status !== "skipped" && action.status !== "done" && (
+          <StatusBtn
+            label="⏭ Skip"
+            tone="ink"
+            busy={busy}
+            onClick={() => onChangeStatus(action.id, "skipped")}
+          />
+        )}
+        {action.status === "blocked" && (
+          <StatusBtn
+            label="↶ Unblock"
+            tone="brand"
+            busy={busy}
+            onClick={() => onChangeStatus(action.id, "waiting")}
+          />
+        )}
+        {(action.status === "done" || action.status === "skipped") && (
+          <StatusBtn
+            label="↶ Re-open"
+            tone="ink"
+            busy={busy}
+            onClick={() => onChangeStatus(action.id, "waiting")}
+          />
+        )}
+      </div>
     </li>
+  );
+}
+
+function StatusBtn({
+  label, tone, busy, onClick,
+}: {
+  label: string;
+  tone: "green" | "brand" | "ink";
+  busy: boolean;
+  onClick: () => void;
+}) {
+  const toneCls = tone === "green"
+    ? "border-green text-green-dark hover:bg-green-pale"
+    : tone === "brand"
+    ? "border-brand text-brand-dark hover:bg-brand-pastel"
+    : "border-ink-300 text-ink-600 hover:bg-ink-50";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className={cn(
+        "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+        toneCls,
+        busy && "opacity-50 cursor-wait",
+      )}
+    >
+      {busy ? "…" : label}
+    </button>
   );
 }
