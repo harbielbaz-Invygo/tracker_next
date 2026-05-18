@@ -123,6 +123,10 @@ export async function getIntakeOptions(): Promise<IntakeOptions> {
   //     attached by /api/intake/create on every new batch.
   //   - Pre-PO App Listing: only meaningful on Forecast batches;
   //     attached by /api/forecast/create or copied during a split.
+  //   - ANY wave-scope action_type (VIN chase): mandatory on every
+  //     wave; auto-attached by /api/intake/create. Hiding them from
+  //     the picker means ops can't accidentally skip a VIN-chase
+  //     step.
   // Hidden from the Intake action picker so ops doesn't have to
   // remember to tick them.
   const AUTO_ATTACHED_ACTION_NAMES = new Set(["Delivery", "Pre-PO App Listing"]);
@@ -134,7 +138,12 @@ export async function getIntakeOptions(): Promise<IntakeOptions> {
       stakeholders: stakeholdersByDept.get(d.id) ?? [],
     })),
     actionTypes: typesRaw
-      .filter((t) => !AUTO_ATTACHED_ACTION_NAMES.has(t.name))
+      .filter((t) =>
+        !AUTO_ATTACHED_ACTION_NAMES.has(t.name)
+        // Wave-scope VIN-chase actions are mandatory on every wave,
+        // auto-attached by the create endpoint — never pickable.
+        && t.scope !== "wave"
+      )
       .map((t) => ({
         id: t.id,
         name: t.name,
