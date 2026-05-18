@@ -8,11 +8,16 @@
  * Aggregation happens in JS since the dataset is small (dozens of batches × 9
  * actions). For larger volumes, switch to GROUP BY in SQL.
  */
-import { eq, asc, inArray, and, sql } from "drizzle-orm";
+import { eq, asc, inArray, and, sql, or } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, alerts, batchColorMatrix, batchDeliveryLegs,
   vinChaseStages, batchVinStages,
+  // Phase 4c — scope-aware reads for the PO Slack message so PO/wave
+  // actions completed in /action-center-v2 also surface in the message.
+  // Aliased to avoid shadowing the local `waves` variable used further
+  // down for the delivery-wave roll-up.
+  pos, waves as wavesTable, actions as actionsTable,
 } from "@/lib/db/schema";
 import type { ActiveAlert } from "@/lib/alert-engine";
 import { highestSeverity } from "@/lib/alert-engine";
@@ -791,6 +796,68 @@ export async function getPoStatusCheckData(batchCode: string): Promise<PoStatusC
     .where(inArray(batchActions.batchId, siblingIds))
     .orderBy(asc(actionTypes.sortOrder));
 
+  // Phase 4c — also pull po-scope + wave-scope actions from the new
+  // `actions` table. These don't tie to a single batch the way
+  // batch_actions do; they cover the whole PO (or one wave). The
+  // formatter renders them with a "(PO-wide)" or "(Wave: <date>)"
+  // batchRef so ops sees they're shared work, not batch-specific.
+  //
+  // Batch-scope rows in the new table are intentionally skipped —
+  // Phase 2 double-writes them into batch_actions already; reading
+  // both would produce duplicate Slack lines for the same action.
+  const scopedActionRows = await (async () => {
+    try {
+      const [poRow] = await db
+        .select({ id: pos.id })
+        .from(pos).where(eq(pos.poNumber, src.poNumber!)).limit(1);
+      if (!poRow) return [];
+      const waveRows = await db
+        .select({ id: wavesTable.id, availabilityDate: wavesTable.availabilityDate })
+        .from(wavesTable).where(eq(wavesTable.poId, poRow.id));
+      const waveIds = waveRows.map((w) => w.id);
+      const waveDateById = new Map(waveRows.map((w) => [w.id, w.availabilityDate]));
+
+      const rows = await db
+        .select({
+          scope:           actionsTable.scope,
+          scopeId:         actionsTable.scopeId,
+          status:          actionsTable.status,
+          expectedDate:    actionsTable.expectedDate,
+          completedAt:     actionsTable.completedAt,
+          sortOrder:       actionTypes.sortOrder,
+          actionTypeName:  actionTypes.name,
+          waitingLabel:    actionTypes.waitingLabel,
+          doneLabel:       actionTypes.doneLabel,
+          departmentName:  departments.name,
+          stakeholderName: stakeholders.name,
+        })
+        .from(actionsTable)
+        .innerJoin(actionTypes,  eq(actionsTable.actionTypeId, actionTypes.id))
+        .leftJoin(departments,   eq(actionsTable.departmentId, departments.id))
+        .leftJoin(stakeholders,  eq(actionsTable.assignedStakeholderId, stakeholders.id))
+        .where(or(
+          and(eq(actionsTable.scope, "po"),   eq(actionsTable.scopeId, poRow.id)),
+          waveIds.length > 0
+            ? and(eq(actionsTable.scope, "wave"), inArray(actionsTable.scopeId, waveIds))
+            : undefined,
+        ))
+        .orderBy(asc(actionTypes.sortOrder));
+
+      // Tag each row with the synthetic batchRef the formatter will
+      // render — PO-wide for po-scope, wave-date for wave-scope.
+      return rows.map((r) => ({
+        ...r,
+        synthRef: r.scope === "po"
+          ? "(PO-wide)"
+          : `(Wave: ${waveDateById.get(r.scopeId) ?? "—"})`,
+      }));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table|no such column/i.test(msg)) return [];
+      throw err;
+    }
+  })();
+
   // Group legs by batch for fast lookup.
   const legsByBatch = new Map<number, { city: string; quantity: number }[]>();
   for (const l of legs) {
@@ -851,21 +918,30 @@ export async function getPoStatusCheckData(batchCode: string): Promise<PoStatusC
   for (const s of siblings) {
     batchRefById.set(s.id, `${s.batchCode}`);
   }
-  const actions: PoActionLine[] = actionRows.map((a) => {
-    const tag = a.stakeholderName
-      ? `@${a.stakeholderName}${a.departmentName ? ` (${a.departmentName})` : ""}`
-      : a.departmentName
-        ? `(unassigned — ${a.departmentName})`
+  const tagFor = (stakeholderName: string | null, departmentName: string | null): string =>
+    stakeholderName
+      ? `@${stakeholderName}${departmentName ? ` (${departmentName})` : ""}`
+      : departmentName
+        ? `(unassigned — ${departmentName})`
         : "(unassigned)";
-    return {
-      tag,
-      status:  a.status as ActionDetail["status"],
-      label:   a.status === "done" ? a.doneLabel : a.waitingLabel,
-      batchRef: batchRefById.get(a.batchId) ?? `batch ${a.batchId}`,
-      date:     (a.status === "done" ? a.completedAt : a.expectedDate) ?? null,
-      blockedBy: [], // Computing blockedBy across N batches is heavy; omit for the PO summary.
-    };
-  }).sort((a, b) => a.tag.localeCompare(b.tag));
+  const fromLegacy: PoActionLine[] = actionRows.map((a) => ({
+    tag:      tagFor(a.stakeholderName ?? null, a.departmentName ?? null),
+    status:   a.status as ActionDetail["status"],
+    label:    a.status === "done" ? a.doneLabel : a.waitingLabel,
+    batchRef: batchRefById.get(a.batchId) ?? `batch ${a.batchId}`,
+    date:     (a.status === "done" ? a.completedAt : a.expectedDate) ?? null,
+    blockedBy: [], // Computing blockedBy across N batches is heavy; omit for the PO summary.
+  }));
+  const fromScoped: PoActionLine[] = scopedActionRows.map((a) => ({
+    tag:      tagFor(a.stakeholderName ?? null, a.departmentName ?? null),
+    status:   a.status as ActionDetail["status"],
+    label:    a.status === "done" ? a.doneLabel : a.waitingLabel,
+    batchRef: a.synthRef,
+    date:     (a.status === "done" ? a.completedAt : a.expectedDate) ?? null,
+    blockedBy: [],
+  }));
+  const actions: PoActionLine[] = [...fromLegacy, ...fromScoped]
+    .sort((a, b) => a.tag.localeCompare(b.tag));
 
   return {
     poNumber:    src.poNumber,
