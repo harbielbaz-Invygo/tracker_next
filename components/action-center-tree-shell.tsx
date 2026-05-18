@@ -12,11 +12,28 @@
  *
  * Read-only in phase 3a; mutations (mark done / skip) land in phase 3b.
  */
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
   ActionCenterTree, PoNode, WaveNode, BatchNode, ScopedActionDetail,
+  DepartmentCatalog,
 } from "@/lib/action-center-tree-data";
+
+/**
+ * Shell context — gives every nested card access to the reassign
+ * mutation + dept/stakeholder catalog without drilling props through
+ * 5 levels of components.
+ */
+interface ShellCtx {
+  onReassign: (actionId: number, stakeholderId: number | null) => Promise<void>;
+  departments: DepartmentCatalog[];
+}
+const ShellContext = createContext<ShellCtx | null>(null);
+function useShell(): ShellCtx {
+  const ctx = useContext(ShellContext);
+  if (!ctx) throw new Error("useShell must be used inside ShellContext.Provider");
+  return ctx;
+}
 import { cn } from "@/lib/utils";
 
 type Status = ScopedActionDetail["status"];
@@ -174,6 +191,29 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   }
 
   /**
+   * Reassign an action's stakeholder. Hits /api/scope-action/assign
+   * (sibling of the status flip route). Surfaces the same busy /
+   * error state so the picker can show a spinner inline.
+   */
+  async function reassignStakeholder(actionId: number, stakeholderId: number | null): Promise<void> {
+    setBusyActionId(actionId);
+    setMutationError(null);
+    try {
+      const res = await fetch("/api/scope-action/assign", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actionId, assignedStakeholderId: stakeholderId }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setMutationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyActionId(null);
+    }
+  }
+
+  /**
    * Bulk apply a status to a list of action ids. Hits /api/scope-action
    * sequentially (small N, transactional cost per call) and refreshes
    * once at the end. Used by the wave-header "Mark all done" / "Skip
@@ -293,6 +333,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   }, [tree, selection]);
 
   return (
+    <ShellContext.Provider value={{ onReassign: reassignStakeholder, departments: tree.departments }}>
     <div className="relative grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]">
       {/* Floating help button — bottom-right of the grid container. */}
       <button
@@ -405,14 +446,15 @@ export default function ActionCenterTreeShell({ tree }: Props) {
         )}
       </div>
     </div>
+    </ShellContext.Provider>
   );
 }
 
 interface MutationProps {
-  busyActionId:   number | null;
-  onChangeStatus: (actionId: number, status: Status) => void;
+  busyActionId:    number | null;
+  onChangeStatus:  (actionId: number, status: Status) => void;
   onBulkSetStatus: (actionIds: number[], status: Status) => Promise<void>;
-  mutationError:  string | null;
+  mutationError:   string | null;
 }
 
 interface BatchOpProps {
@@ -1957,19 +1999,12 @@ function ActionCard({
           )}
         </div>
 
-        {/* Stakeholder · Department */}
-        {(action.stakeholderName || action.departmentName) && !isSynthetic && (
-          <p className="text-[0.7rem] text-ink-600">
-            {action.stakeholderName && (
-              <span className="text-brand-dark">@{action.stakeholderName}</span>
-            )}
-            {action.stakeholderName && action.departmentName && (
-              <span className="text-ink-400"> · </span>
-            )}
-            {action.departmentName && (
-              <span className="text-ink-500">{action.departmentName}</span>
-            )}
-          </p>
+        {/* Stakeholder · Department — synthetic rows skip this whole line.
+            Real action rows surface the same inline-edit picker used in
+            the legacy drawer: click the @name to reassign within the
+            same department. */}
+        {!isSynthetic && (action.stakeholderName || action.departmentName) && (
+          <ReassignInline action={action} busy={busy} />
         )}
 
         {/* Date — completed (✓) or due (⏰). Differentiating prefixes
@@ -2050,6 +2085,103 @@ function ActionCard({
       </div>
       )}
     </li>
+  );
+}
+
+/**
+ * Inline stakeholder reassign for an action card. Renders the
+ * "@Name · Dept" line normally; clicking the chip swaps in a small
+ * <select> bound to the action's current department's stakeholders.
+ * Picking a new option fires onReassign immediately; Esc / blur
+ * cancels without saving.
+ */
+function ReassignInline({
+  action, busy,
+}: { action: ScopedActionDetail; busy: boolean }) {
+  const { onReassign, departments } = useShell();
+  const [editing, setEditing] = useState<boolean>(false);
+
+  // Resolve the action's department → its stakeholder list. If the
+  // action has no department, fall back to ALL stakeholders so ops
+  // can still pick someone. Departments with zero stakeholders show
+  // a "no options" hint instead of an empty dropdown.
+  const dept = action.departmentName
+    ? departments.find((d) => d.name === action.departmentName)
+    : null;
+  const choices = dept?.stakeholders ?? departments.flatMap((d) => d.stakeholders);
+
+  if (!editing) {
+    return (
+      <p className="text-[0.7rem] text-ink-600 flex items-baseline gap-1">
+        {action.stakeholderName ? (
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className="text-brand-dark underline underline-offset-2 decoration-dotted hover:decoration-solid"
+            title="Click to reassign"
+          >
+            @{action.stakeholderName}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className="text-ink-500 italic underline underline-offset-2 decoration-dotted hover:decoration-solid"
+            title="Click to assign a stakeholder"
+          >
+            unassigned
+          </button>
+        )}
+        {action.departmentName && (
+          <>
+            <span className="text-ink-400">·</span>
+            <span className="text-ink-500">{action.departmentName}</span>
+          </>
+        )}
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1.5 mt-0.5">
+      <select
+        autoFocus
+        disabled={busy}
+        defaultValue={action.stakeholderName
+          ? (choices.find((s) => s.name === action.stakeholderName)?.id ?? "")
+          : ""}
+        onChange={async (e) => {
+          const v = e.target.value;
+          const newId = v === "" ? null : parseInt(v, 10);
+          // No-op when the operator picked the same stakeholder.
+          const current = action.stakeholderName
+            ? choices.find((s) => s.name === action.stakeholderName)?.id ?? null
+            : null;
+          setEditing(false);
+          if (newId === current) return;
+          await onReassign(action.id, newId);
+        }}
+        onBlur={() => setEditing(false)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            setEditing(false);
+          }
+        }}
+        className="text-[0.7rem] px-1.5 py-0.5 border border-ink-300 rounded"
+      >
+        <option value="">— unassigned —</option>
+        {choices.length === 0 && (
+          <option value="" disabled>(no stakeholders in this dept)</option>
+        )}
+        {choices.map((s) => (
+          <option key={s.id} value={s.id}>{s.name}</option>
+        ))}
+      </select>
+      {action.departmentName && (
+        <span className="text-[0.7rem] text-ink-500">· {action.departmentName}</span>
+      )}
+    </div>
   );
 }
 
