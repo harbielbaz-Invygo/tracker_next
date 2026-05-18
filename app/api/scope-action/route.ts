@@ -16,10 +16,11 @@
  *   - If the action is a batch-scope Delivery action being marked
  *     done, also stamp batches.closed_at + closure_reason='delivered'
  *     so the closure UI / metrics stay in sync.
- *
- * No dependency cascade yet (phase 3c). Operator can mark a
- * "blocked" row → "waiting" manually if they've hand-resolved the
- * blocker.
+ *   - Phase 3c: dependency cascade. When a parent action flips to
+ *     done/skipped, every blocked child on the same (scope, scope_id)
+ *     whose parents are all satisfied auto-promotes to `waiting`.
+ *     When a parent leaves the done state, transitive descendants
+ *     drop back to `blocked` (skipped ones left alone).
  */
 import { eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
@@ -30,6 +31,7 @@ import {
   batches,
 } from "@/lib/db/schema";
 import { requireAuth, apiError } from "@/lib/api-auth";
+import { unblockDependents, cascadeRevertDependents } from "@/lib/scope-cascade";
 
 export const runtime = "nodejs";
 
@@ -53,6 +55,7 @@ export async function PATCH(req: NextRequest) {
     return apiError(`status must be one of ${ALLOWED.join(", ")}`, 400);
 
   // Pull the current row + its action_type's name to detect Delivery.
+  // `status` is read so the cascade can detect the leaving-done case.
   const [current] = await db
     .select({
       id:             actionsTable.id,
@@ -60,6 +63,7 @@ export async function PATCH(req: NextRequest) {
       scopeId:        actionsTable.scopeId,
       actionTypeId:   actionsTable.actionTypeId,
       actionTypeName: actionTypes.name,
+      status:         actionsTable.status,
     })
     .from(actionsTable)
     .innerJoin(actionTypes, eq(actionsTable.actionTypeId, actionTypes.id))
@@ -73,7 +77,7 @@ export async function PATCH(req: NextRequest) {
     ? (completedAtRaw ?? nowIso)
     : null;
 
-  await db.transaction(async (tx) => {
+  const cascadeResult = await db.transaction(async (tx) => {
     await tx.update(actionsTable).set({
       status,
       completedAt,
@@ -100,7 +104,37 @@ export async function PATCH(req: NextRequest) {
         }).where(eq(batches.id, current.scopeId));
       }
     }
+
+    // Phase 3c: dependency cascade. Both branches share the same tx
+    // as the status flip so concurrent clicks can never observe a
+    // half-promoted dependent.
+    const becameDone     = status === "done";
+    const becameSkipped  = status === "skipped";
+    const leftDoneState  = current.status === "done" && status !== "done";
+
+    let autoUnblockedIds: number[]   = [];
+    let cascadeRevertedIds: number[] = [];
+
+    if (becameDone || becameSkipped) {
+      autoUnblockedIds = await unblockDependents(
+        tx, current.scope, current.scopeId, current.actionTypeId, nowIso,
+      );
+    }
+    if (leftDoneState) {
+      cascadeRevertedIds = await cascadeRevertDependents(
+        tx, current.scope, current.scopeId, current.actionTypeId, nowIso,
+      );
+    }
+
+    return { autoUnblockedIds, cascadeRevertedIds };
   });
 
-  return NextResponse.json({ ok: true, actionId, status, completedAt });
+  return NextResponse.json({
+    ok: true,
+    actionId,
+    status,
+    completedAt,
+    autoUnblockedIds:   cascadeResult.autoUnblockedIds,
+    cascadeRevertedIds: cascadeResult.cascadeRevertedIds,
+  });
 }
