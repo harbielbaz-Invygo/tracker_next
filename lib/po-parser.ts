@@ -159,10 +159,14 @@ function extractDeliveryInstructions(text: string): string | null {
 // ─── Items ───────────────────────────────────────────────
 // The item heading is "<Make> <Model …> <Year>". Most POs put pricing
 // (qty, unit price, tax %, line amount) on the line BELOW the heading,
-// but some templates put it INLINE on the same line. We anchor on the
-// year via \b (not \s*$) so both variants match: the parseItemChunk
-// regex then peels the pricing back off when needed.
-const ITEM_HEAD_RE = /^([A-Z][A-Za-z\-]+(?:\s+[A-Za-z\-]+){1,4})\s+(20[2-3][0-9])\b/gm;
+// but some templates put it INLINE on the same line — and pdf-parse
+// frequently strips the spaces between the right-aligned pricing
+// columns, yielding e.g. "Hyundai Sonata Smart 202630.002,956.5217...".
+// We deliberately do NOT constrain what follows the year (no `\b`, no
+// `\s*$`): year alone is a strong enough discriminator within the
+// items section, and any trailing pricing digits are peeled off later
+// by parseItemChunk's pricing regex.
+const ITEM_HEAD_RE = /^([A-Z][A-Za-z\-]+(?:\s+[A-Za-z\-]+){1,4})\s+(20[2-3][0-9])/gm;
 
 /**
  * Drop table-header garbage that some PDFs concatenate into a row, e.g.
@@ -239,11 +243,15 @@ function parseItemChunk(chunk: string, model: string, year: number): ParsedItem 
 
   // Colors often wrap across multiple lines in the PDF render, e.g.
   //   "Car Colors: 40 Titan Gray.  30\nAmazon Gray. 10 Atlas White."
-  // Capture every subsequent line until we hit either the pricing line
-  // (a digits.decimal-followed-by-decimal pattern) or end of chunk.
+  // Capture every subsequent line until we hit the pricing line, which
+  // ALWAYS contains a `%` (tax + discount columns). Colors never do.
+  // The earlier "digits + space + digits" anchor failed because
+  // pdf-parse can strip spaces between pricing columns, yielding e.g.
+  // "80.001,782.60870.00%15%142,608.70" with no whitespace between
+  // qty and unit price. Anchoring on `%` is format-independent.
   // Whitespace within the capture gets collapsed to single spaces so
   // the resulting colorsRaw reads naturally on a single line.
-  const colors = chunk.match(/Car Colors?:\s*([\s\S]+?)(?=\n\s*\d+\.\d+\s+[\d,]+\.\d+|$)/i);
+  const colors = chunk.match(/Car Colors?:\s*([\s\S]+?)(?=\n[^\n]*%|$)/i);
   if (colors) {
     out.colorsRaw = colors[1]
       .replace(/\s+/g, " ")
@@ -275,8 +283,23 @@ function parseColors(s: string): { qty: number; color: string }[] {
 }
 
 function extractPricing(chunk: string): Partial<ParsedItem> {
+  // The pricing column appears in two flavours from pdf-parse:
+  //   spaces preserved: "30.00 2,956.5217 0.00% 15%   88,695.65"
+  //   spaces stripped:  "30.002,956.52170.00%15%88,695.65"
+  // (right-aligned table cells get glued together when pdf-parse loses
+  // the inter-column whitespace.) `\s*` between fields handles both.
+  //
+  // Qty is constrained two ways:
+  //   1) 1-5 digits followed by EXACTLY ".00" — qty always renders as
+  //      `<int>.00` in the PO templates we've seen.
+  //   2) Positive lookbehind: qty MUST be preceded by whitespace OR by
+  //      a 4-digit year. The lookbehind matters when the heading itself
+  //      is inline ("Hyundai Sonata Smart 202630.00…"): without it the
+  //      engine would otherwise pick a fake qty like "02630" or "2630"
+  //      out of the year digits. With the lookbehind, the first valid
+  //      position is right after the year, where the real qty lives.
   // With discount column: "25.00 1,782.6087 0.00% 15% 44,565.22"
-  let m = chunk.match(/(\d+\.\d+)\s+([\d,]+\.\d+)\s+([\d.]+)%\s+(\d+)%\s+([\d,.]+)/);
+  let m = chunk.match(/(?<=\s|20[2-3][0-9])(\d{1,5}\.\d{2})\s*([\d,]+\.\d+)\s*([\d.]+)%\s*(\d+)%\s*([\d,.]+)/);
   if (m) {
     return {
       quantity:        Math.trunc(parseFloat(m[1])),
@@ -287,7 +310,7 @@ function extractPricing(chunk: string): Partial<ParsedItem> {
     };
   }
   // Without discount: "10.00 2,304.3478 15% 23,043.48"
-  m = chunk.match(/(\d+\.\d+)\s+([\d,]+\.\d+)\s+(\d+)%\s+([\d,.]+)/);
+  m = chunk.match(/(?<=\s|20[2-3][0-9])(\d{1,5}\.\d{2})\s*([\d,]+\.\d+)\s*(\d+)%\s*([\d,.]+)/);
   if (m) {
     return {
       quantity:        Math.trunc(parseFloat(m[1])),
