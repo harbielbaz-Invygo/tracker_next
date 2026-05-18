@@ -22,7 +22,7 @@
  *     When a parent leaves the done state, transitive descendants
  *     drop back to `blocked` (skipped ones left alone).
  */
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
@@ -126,7 +126,45 @@ export async function PATCH(req: NextRequest) {
       );
     }
 
-    return { autoUnblockedIds, cascadeRevertedIds };
+    // Cross-scope wave → batch propagation: when a wave-scope action
+    // flips to done or skipped, also flip every batch-scope copy of
+    // the same action_type for batches under this wave. Symmetric on
+    // re-open (any non-done status). The intake flow attaches one
+    // batch-scope row per wave-scope action_type per batch, so this
+    // cascade keeps the two layers consistent.
+    let waveToBatchPropagatedIds: number[] = [];
+    if (current.scope === "wave") {
+      const childBatches = await tx
+        .select({ id: batches.id })
+        .from(batches)
+        .where(eq(batches.waveId, current.scopeId));
+      const childBatchIds = childBatches.map((b) => b.id);
+      if (childBatchIds.length > 0) {
+        const batchCopies = await tx
+          .select({ id: actionsTable.id, status: actionsTable.status })
+          .from(actionsTable)
+          .where(and(
+            eq(actionsTable.scope, "batch"),
+            eq(actionsTable.actionTypeId, current.actionTypeId),
+            inArray(actionsTable.scopeId, childBatchIds),
+          ));
+        // Skip rows already in the target state — keeps the cascade
+        // idempotent (no spurious updatedAt churn).
+        const idsToFlip = batchCopies
+          .filter((r) => r.status !== status)
+          .map((r) => r.id);
+        if (idsToFlip.length > 0) {
+          await tx.update(actionsTable).set({
+            status,
+            completedAt,
+            updatedAt: nowIso,
+          }).where(inArray(actionsTable.id, idsToFlip));
+          waveToBatchPropagatedIds = idsToFlip;
+        }
+      }
+    }
+
+    return { autoUnblockedIds, cascadeRevertedIds, waveToBatchPropagatedIds };
   });
 
   return NextResponse.json({
@@ -134,7 +172,8 @@ export async function PATCH(req: NextRequest) {
     actionId,
     status,
     completedAt,
-    autoUnblockedIds:   cascadeResult.autoUnblockedIds,
-    cascadeRevertedIds: cascadeResult.cascadeRevertedIds,
+    autoUnblockedIds:        cascadeResult.autoUnblockedIds,
+    cascadeRevertedIds:      cascadeResult.cascadeRevertedIds,
+    waveToBatchPropagatedIds: cascadeResult.waveToBatchPropagatedIds,
   });
 }
