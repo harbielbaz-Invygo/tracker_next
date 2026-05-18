@@ -26,7 +26,8 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { batches, batchDateRevisions, waves, actions as actionsTable } from "@/lib/db/schema";
+import { batches, batchDateRevisions, waves, actions as actionsTable, actionTypes } from "@/lib/db/schema";
+import { computeExpectedDate } from "@/lib/expected-date";
 import { requireAuth, apiError } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
@@ -71,9 +72,10 @@ export async function POST(req: NextRequest) {
     : 0;
   const reason = body.reason?.trim() || null;
 
-  // Fetch current state to compute the delta. `waveId` is pulled so
-  // we can propagate the shift to the wave + wave-scope action
-  // expectedDates after the projection write.
+  // Fetch current state to compute the delta + drive wave moves.
+  // The previous wave's id + its availabilityDate together decide
+  // whether this shift just changes the projection (same window) or
+  // moves the batch to a different delivery window (new date).
   const [current] = await db
     .select({
       previous:        batches.currentProjectedDeliveryDate,
@@ -81,6 +83,7 @@ export async function POST(req: NextRequest) {
       revisionCount:   batches.deliveryDateRevisionCount,
       closedAt:        batches.closedAt,
       waveId:          batches.waveId,
+      poNumber:        batches.poNumber,
     })
     .from(batches)
     .where(eq(batches.id, body.batchId))
@@ -123,64 +126,156 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 2. Apply the projection update + bump the counter.
+    // 2. Apply the projection + promise updates + bump the counter.
+    // We move the canonical "what date is this batch tracking" by
+    // updating BOTH projection and promise — the wave's date IS the
+    // batch's commitment date in the new model.
     await tx.update(batches).set({
       currentProjectedDeliveryDate: body.newProjectedDate,
+      dealerPromisedDeliveryDate:   body.newProjectedDate,
       deliveryDateRevisionCount: sql`${batches.deliveryDateRevisionCount} + 1`,
       updatedAt: new Date().toISOString(),
     }).where(eq(batches.id, body.batchId));
 
-    // 3. Propagate to the wave + wave-scope actions.
+    // 3. Wave move semantics.
     //
-    // The wave's ops projection is the slowest batch's projection
-    // under it; recompute after this shift and, if the wave-level
-    // value moved, slide every non-settled wave action's expectedDate
-    // by the same delta. Skipped/done rows keep their historical
-    // expectedDate (audit value).
+    // Each delivery window (= wave row) is keyed by (po, date). When
+    // the batch's shifted date no longer matches its current wave's
+    // date, the batch moves OUT of that wave into a wave with the
+    // new date — creating a new wave under the same PO when one
+    // doesn't already exist.
+    //
+    // The OLD wave's wave-scope actions stay where they are (history
+    // is preserved). The batch carries its batch-scope copies with
+    // it via the foreign-key on actions.scope_id.
     if (current.waveId != null) {
-      const waveId = current.waveId;
-      // Pull the wave's previous ops projection + every batch's NEW
-      // current projection (the batch row we just updated is included
-      // because the SELECT runs after the UPDATE in the same tx).
-      const [waveRow] = await tx
-        .select({ opsExpectedDate: waves.opsExpectedDate, availabilityDate: waves.availabilityDate })
-        .from(waves).where(eq(waves.id, waveId)).limit(1);
-      if (waveRow) {
+      const oldWaveId = current.waveId;
+      const [oldWaveRow] = await tx
+        .select({ id: waves.id, poId: waves.poId, availabilityDate: waves.availabilityDate })
+        .from(waves).where(eq(waves.id, oldWaveId)).limit(1);
+
+      if (oldWaveRow && oldWaveRow.availabilityDate !== body.newProjectedDate) {
+        // Window-move path: find or create the target window.
+        const [existingTarget] = await tx
+          .select({ id: waves.id })
+          .from(waves)
+          .where(and(
+            eq(waves.poId, oldWaveRow.poId),
+            eq(waves.availabilityDate, body.newProjectedDate),
+          ))
+          .limit(1);
+
+        let targetWaveId: number;
+        if (existingTarget) {
+          targetWaveId = existingTarget.id;
+        } else {
+          const [created] = await tx.insert(waves).values({
+            poId:             oldWaveRow.poId,
+            availabilityDate: body.newProjectedDate,
+            opsExpectedDate:  body.newProjectedDate,
+            vinReceivedAtIntake: false,
+          }).returning({ id: waves.id });
+          targetWaveId = created.id;
+
+          // Auto-attach a wave-scope row for every wave-scope
+          // action_type so the new window has its full External-Phase
+          // action set from creation. Mirrors the intake flow.
+          const waveActionTypes = await tx
+            .select({
+              id:                  actionTypes.id,
+              offsetDays:          actionTypes.offsetDays,
+              offsetAnchor:        actionTypes.offsetAnchor,
+              defaultDepartmentId: actionTypes.defaultDepartmentId,
+            })
+            .from(actionTypes)
+            .where(eq(actionTypes.scope, "wave"));
+          for (const at of waveActionTypes) {
+            const expected = computeExpectedDate({
+              anchor:     at.offsetAnchor,
+              offsetDays: at.offsetDays,
+              submission: new Date().toISOString().slice(0, 10),
+              vin:        null,
+              promised:   body.newProjectedDate,
+            });
+            try {
+              await tx.insert(actionsTable).values({
+                scope:        "wave",
+                scopeId:      targetWaveId,
+                actionTypeId: at.id,
+                departmentId: at.defaultDepartmentId ?? undefined,
+                status:       "waiting",
+                expectedDate: expected ?? undefined,
+              });
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
+            }
+          }
+        }
+
+        // Move the batch.
+        await tx.update(batches).set({
+          waveId:    targetWaveId,
+          updatedAt: new Date().toISOString(),
+        }).where(eq(batches.id, body.batchId));
+
+        // Recompute the OLD wave's opsExpectedDate based on whatever
+        // batches still remain under it (it might be empty now).
+        const remaining = await tx
+          .select({
+            projection: batches.currentProjectedDeliveryDate,
+            promised:   batches.dealerPromisedDeliveryDate,
+          })
+          .from(batches)
+          .where(eq(batches.waveId, oldWaveId));
+        const remainingDates = remaining
+          .map((r) => r.projection ?? r.promised)
+          .filter(Boolean) as string[];
+        const oldOps = remainingDates.length > 0
+          ? remainingDates.sort().at(-1)!
+          : oldWaveRow.availabilityDate;
+        await tx.update(waves).set({
+          opsExpectedDate: oldOps,
+          updatedAt:       new Date().toISOString(),
+        }).where(eq(waves.id, oldWaveId));
+      } else if (oldWaveRow) {
+        // Same-window path: only the batch's own projection moved.
+        // Bring the wave's opsExpectedDate in line with the slowest
+        // batch under it (existing recompute), AND slide every non-
+        // settled wave-scope action's expectedDate by the delta —
+        // preserves the historic propagation behaviour for the
+        // common "same date, just bumping projection" case.
         const allBatchesProjections = await tx
           .select({
             projection: batches.currentProjectedDeliveryDate,
             promised:   batches.dealerPromisedDeliveryDate,
           })
           .from(batches)
-          .where(eq(batches.waveId, waveId));
-        // Use each batch's projection (fallback to promised when
-        // projection is null — that's the wave-creation default).
+          .where(eq(batches.waveId, oldWaveId));
         const effectiveDates = allBatchesProjections
           .map((b) => b.projection ?? b.promised)
           .filter(Boolean) as string[];
         const newWaveOps = effectiveDates.length > 0
           ? effectiveDates.sort().at(-1)!
-          : waveRow.availabilityDate;
-        const prevWaveOps = waveRow.opsExpectedDate ?? waveRow.availabilityDate;
+          : oldWaveRow.availabilityDate;
+        const [{ opsExpectedDate: prevOpsRaw }] = await tx
+          .select({ opsExpectedDate: waves.opsExpectedDate })
+          .from(waves).where(eq(waves.id, oldWaveId)).limit(1);
+        const prevWaveOps = prevOpsRaw ?? oldWaveRow.availabilityDate;
         if (newWaveOps !== prevWaveOps) {
           const waveDelta = daysBetween(newWaveOps, prevWaveOps);
           await tx.update(waves).set({
             opsExpectedDate: newWaveOps,
             updatedAt:       new Date().toISOString(),
-          }).where(eq(waves.id, waveId));
+          }).where(eq(waves.id, oldWaveId));
 
           if (waveDelta !== 0) {
-            // Find every non-settled wave action and slide its
-            // expectedDate by the same delta. We do this in JS rather
-            // than a SQL date-add because libSQL doesn't have a
-            // portable DATE_ADD; row count is small (≤ wave action
-            // count, typically < 10).
             const waveActions = await tx
               .select({ id: actionsTable.id, expectedDate: actionsTable.expectedDate })
               .from(actionsTable)
               .where(and(
                 eq(actionsTable.scope, "wave"),
-                eq(actionsTable.scopeId, waveId),
+                eq(actionsTable.scopeId, oldWaveId),
                 inArray(actionsTable.status, ["waiting", "blocked"]),
               ));
             for (const a of waveActions) {
@@ -197,6 +292,8 @@ export async function POST(req: NextRequest) {
       }
     }
   });
+  // Silence unused-import lint until the next time we wire this.
+  void current.poNumber;
 
   return NextResponse.json({
     ok: true,
