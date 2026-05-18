@@ -798,6 +798,52 @@ function PoDrawer({
             </button>
           </div>
         )}
+        {/* Closed-PO summary — replaces the per-section content when
+            every batch under the PO has been delivered. Celebrates the
+            finish + surfaces a single "days end-to-end" metric ops can
+            use as retrospective input. */}
+        {po.closedAt && (() => {
+          const delivered = po.waves.flatMap((w) => w.batches)
+            .filter((b) => b.closureReason === "delivered");
+          const cancelled = po.waves.flatMap((w) => w.batches)
+            .filter((b) => b.closureReason === "cancelled");
+          if (delivered.length === 0 && cancelled.length === 0) return null;
+          // End-to-end days = closedAt − poDate (when both known).
+          const daysE2E = po.poDate && po.closedAt
+            ? Math.round(
+                (new Date(po.closedAt).getTime() - new Date(po.poDate).getTime())
+                / (24 * 60 * 60 * 1000),
+              )
+            : null;
+          return (
+            <div className="border border-green-pale rounded-md bg-green-pale/40 p-4 text-center space-y-1">
+              <p className="text-sm font-semibold text-green-dark">
+                ✅ PO closed
+              </p>
+              <p className="text-xs text-ink-700">
+                {delivered.length > 0 && (
+                  <>
+                    {delivered.length} batch{delivered.length === 1 ? "" : "es"} delivered
+                  </>
+                )}
+                {delivered.length > 0 && cancelled.length > 0 && " · "}
+                {cancelled.length > 0 && (
+                  <span className="text-flame-dark">
+                    {cancelled.length} cancelled
+                  </span>
+                )}
+                {daysE2E != null && (
+                  <>
+                    <span className="text-ink-300 mx-1.5">·</span>
+                    <span className="tabular-nums">
+                      {daysE2E} day{daysE2E === 1 ? "" : "s"} end-to-end
+                    </span>
+                  </>
+                )}
+              </p>
+            </div>
+          );
+        })()}
         {view === "internal" ? (
           <InternalPhaseView po={po} busyActionId={busyActionId} onChangeStatus={onChangeStatus} />
         ) : (
