@@ -725,15 +725,41 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Wave-scope actions — one row per wave per picked wave-action.
+    // Wave-scope actions — auto-attach ALL wave-scope action_types
+    // to every wave (not just user-picked). VIN chase is mandatory
+    // per the new model; the form filters wave-scope rows out of the
+    // picker entirely so ops can't accidentally skip one.
+    const allWaveActionTypes = await tx
+      .select({
+        id:                  actionTypes.id,
+        offsetDays:          actionTypes.offsetDays,
+        offsetAnchor:        actionTypes.offsetAnchor,
+        defaultDepartmentId: actionTypes.defaultDepartmentId,
+      })
+      .from(actionTypes)
+      .where(eq(actionTypes.scope, "wave"));
     for (const [waveDate, waveId] of waveIdByDate) {
-      for (const a of body.actions) {
-        const type = typeById.get(a.actionTypeId);
-        if (!type || type.scope !== "wave") continue;
-        await insertAction(a, {
-          scope: "wave", scopeId: waveId,
-          anchorSubmission: requestedAt, anchorPromised: waveDate,
+      for (const at of allWaveActionTypes) {
+        const expected = computeExpectedDate({
+          anchor:     at.offsetAnchor,
+          offsetDays: at.offsetDays,
+          submission: requestedAt,
+          vin:        null,
+          promised:   waveDate,
         });
+        try {
+          await tx.insert(actionsTable).values({
+            scope:        "wave",
+            scopeId:      waveId,
+            actionTypeId: at.id,
+            departmentId: at.defaultDepartmentId ?? undefined,
+            status:       "waiting",
+            expectedDate: expected ?? undefined,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
+        }
       }
     }
 
