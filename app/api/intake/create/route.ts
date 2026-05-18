@@ -149,16 +149,55 @@ export async function POST(req: NextRequest) {
   const dealerName = dealerRow.name;
 
   // ── Resolve or reject existing PO (phase 2 new model) ─────────
-  // `pos.po_number` is UNIQUE — if a row already exists for this PO,
-  // we bail rather than silently overwriting. For now this means each
-  // PO can be submitted via Intake once; a future PR can handle
-  // resubmission / merging.
+  // `pos.po_number` is UNIQUE — if a row already exists we either:
+  //   (a) Reject when batches still reference one of its waves —
+  //       a real duplicate submission attempt.
+  //   (b) Auto-clean and proceed when no batches remain under any
+  //       wave of this PO — the previous submission's batches were
+  //       deleted (e.g. via Settings → Delete), leaving orphaned
+  //       pos / waves / actions rows that block re-upload otherwise.
   const existingPo = await db.select({ id: pos.id })
     .from(pos).where(eq(pos.poNumber, body.po.number)).limit(1);
   if (existingPo.length > 0) {
-    return NextResponse.json(
-      { error: `PO ${body.po.number} already exists in the new pos table. Delete the existing entry to re-submit, or contact admin to merge.` },
-      { status: 409 },
+    const existingPoId = existingPo[0].id;
+    // Find the waves under this PO and any batches still pointing at them.
+    const wavesForPo = await db.select({ id: waves.id })
+      .from(waves).where(eq(waves.poId, existingPoId));
+    const waveIds = wavesForPo.map((w) => w.id);
+    const liveBatches = waveIds.length === 0 ? [] : await db
+      .select({ id: batches.id })
+      .from(batches).where(inArray(batches.waveId, waveIds));
+
+    if (liveBatches.length > 0) {
+      // Real duplicate — refuse.
+      return NextResponse.json(
+        { error: `PO ${body.po.number} already exists with ${liveBatches.length} batch${liveBatches.length === 1 ? "" : "es"}. Delete those first to re-submit.` },
+        { status: 409 },
+      );
+    }
+
+    // Orphaned PO row (batches were deleted but pos/waves/actions
+    // weren't cascaded). Clean up so the fresh submission proceeds.
+    await db.transaction(async (tx) => {
+      // Delete actions referencing the orphan pos/waves directly.
+      // (Actions don't have FK cascade pointing back to pos/waves.)
+      if (waveIds.length > 0) {
+        await tx.delete(actionsTable).where(and(
+          eq(actionsTable.scope, "wave"),
+          inArray(actionsTable.scopeId, waveIds),
+        ));
+      }
+      await tx.delete(actionsTable).where(and(
+        eq(actionsTable.scope, "po"),
+        eq(actionsTable.scopeId, existingPoId),
+      ));
+      // waves.po_id is FK with cascade → deleting pos cascades waves.
+      await tx.delete(pos).where(eq(pos.id, existingPoId));
+    });
+    // eslint-disable-next-line no-console
+    console.info(
+      `[intake] PO ${body.po.number} had an orphaned pos row ` +
+      `(no batches under any wave) — cleaned up before re-submission.`,
     );
   }
 
