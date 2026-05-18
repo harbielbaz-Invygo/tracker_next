@@ -21,11 +21,13 @@ import type {
 
 /**
  * Shell context — gives every nested card access to the reassign
- * mutation + dept/stakeholder catalog without drilling props through
- * 5 levels of components.
+ * mutation + dept/stakeholder catalog + bulk app-listing toggle
+ * without drilling props through 5 levels of components.
  */
 interface ShellCtx {
   onReassign: (actionId: number, stakeholderId: number | null) => Promise<void>;
+  onBulkSetAppListed: (batchIds: number[], setListed: boolean) => Promise<void>;
+  busyBatchId: number | null;
   departments: DepartmentCatalog[];
 }
 const ShellContext = createContext<ShellCtx | null>(null);
@@ -191,6 +193,40 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   }
 
   /**
+   * Bulk-set the app-listing state across a list of batches. Used by
+   * the synthetic "App listed" step in Internal Phase — app-listing is
+   * a PO-wide commitment, not per-batch, so the operator flips the
+   * whole set in one click (or un-lists all the same way).
+   */
+  async function bulkSetAppListed(batchIds: number[], setListed: boolean): Promise<void> {
+    if (batchIds.length === 0) return;
+    setMutationError(null);
+    setCascadeFlash(null);
+    const stamp = setListed ? new Date().toISOString() : null;
+    try {
+      for (const bid of batchIds) {
+        setBusyBatchId(bid);
+        const res = await fetch("/api/batch-app-listing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ batchId: bid, appListedAt: stamp }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+      }
+      setCascadeFlash(
+        setListed
+          ? `${batchIds.length} batch${batchIds.length === 1 ? "" : "es"} marked as listed`
+          : `${batchIds.length} batch${batchIds.length === 1 ? "" : "es"} un-listed`,
+      );
+      router.refresh();
+    } catch (e) {
+      setMutationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyBatchId(null);
+    }
+  }
+
+  /**
    * Reassign an action's stakeholder. Hits /api/scope-action/assign
    * (sibling of the status flip route). Surfaces the same busy /
    * error state so the picker can show a spinner inline.
@@ -333,7 +369,12 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   }, [tree, selection]);
 
   return (
-    <ShellContext.Provider value={{ onReassign: reassignStakeholder, departments: tree.departments }}>
+    <ShellContext.Provider value={{
+      onReassign: reassignStakeholder,
+      onBulkSetAppListed: bulkSetAppListed,
+      busyBatchId,
+      departments: tree.departments,
+    }}>
     <div className="relative grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]">
       {/* Floating help button — bottom-right of the grid container. */}
       <button
@@ -1281,6 +1322,7 @@ function InternalPhaseView({
       actions={allActions}
       busyActionId={busyActionId}
       onChangeStatus={onChangeStatus}
+      poForAppListing={po}
     />
   );
 }
@@ -1290,11 +1332,14 @@ function InternalPhaseView({
 // ─────────────────────────────────────────────────────────────
 
 function ThreeColumnActionBoard({
-  title, subtitle, actions, busyActionId, onChangeStatus,
+  title, subtitle, actions, busyActionId, onChangeStatus, poForAppListing,
 }: {
   title: string;
   subtitle?: string;
   actions: ScopedActionDetail[];
+  /** When passed (Internal Phase view), enables the bulk app-listing
+   *  control on the synthetic "App listed" row. */
+  poForAppListing?: PoNode;
 } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
   const waiting = actions.filter((a) => a.status === "waiting");
   const blocked = actions.filter((a) => a.status === "blocked");
@@ -1329,6 +1374,7 @@ function ThreeColumnActionBoard({
           rows={waiting}
           busyActionId={busyActionId}
           onChangeStatus={onChangeStatus}
+          poForAppListing={poForAppListing}
         />
         <Column
           title="Blocked"
@@ -1337,6 +1383,7 @@ function ThreeColumnActionBoard({
           rows={blocked}
           busyActionId={busyActionId}
           onChangeStatus={onChangeStatus}
+          poForAppListing={poForAppListing}
         />
         <Column
           title="Done"
@@ -1345,6 +1392,7 @@ function ThreeColumnActionBoard({
           rows={done}
           busyActionId={busyActionId}
           onChangeStatus={onChangeStatus}
+          poForAppListing={poForAppListing}
         />
       </div>
     </section>
@@ -1352,12 +1400,13 @@ function ThreeColumnActionBoard({
 }
 
 function Column({
-  title, count, tone, rows, busyActionId, onChangeStatus,
+  title, count, tone, rows, busyActionId, onChangeStatus, poForAppListing,
 }: {
   title: string;
   count: number;
   tone: "brand" | "flame" | "green";
   rows: ScopedActionDetail[];
+  poForAppListing?: PoNode;
 } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
   const headTone =
     tone === "brand" ? "text-brand-dark" :
@@ -1381,6 +1430,7 @@ function Column({
                 action={a}
                 busy={busyActionId === a.id}
                 onChangeStatus={onChangeStatus}
+                poForAppListing={a.actionTypeName === "App listed" ? poForAppListing : undefined}
               />
             ))}
         </ul>
@@ -1661,33 +1711,15 @@ function BatchRow({
     if (closed)                return { ok: false, reason: "Batch already closed." };
     if (!internalPhaseDone)    return { ok: false, reason: "Internal-phase actions still pending on the PO." };
     if (!waveReady)            return { ok: false, reason: `${wavePending} wave action${wavePending === 1 ? "" : "s"} still pending.` };
-    if (!isListed)             return { ok: false, reason: "Batch not yet app-listed." };
+    if (!isListed)             return { ok: false, reason: "Batch not yet app-listed (do it via Internal Phase → App listed)." };
     return { ok: true, reason: "Marks the Delivery action done and auto-closes the batch." };
   })();
   const canDeliver = deliveryGate.ok;
   const deliveryBusy = !!delivery && busyActionId === delivery.id;
   const batchBusy    = busyBatchId === b.id;
 
-  // Mark-as-listed gate: Internal Phase must be done on the PO. Stops
-  // ops from listing a batch in the app before pricing/specs/SKU are
-  // confirmed — that's a customer-visible commitment.
-  const canList = internalPhaseDone || isListed;
-  const listGate = isListed
-    ? "Un-list the batch (clears the App Listing timestamp)."
-    : internalPhaseDone
-      ? "Marks the batch as live in the app."
-      : "Complete Internal-phase actions before listing.";
-
   const showShiftForm  = inlineForm?.batchId === b.id && inlineForm.kind === "shift";
   const showCancelForm = inlineForm?.batchId === b.id && inlineForm.kind === "cancel";
-
-  function handleMarkListed() {
-    if (!canList) return;
-    onBatchOp(b.id, "/api/batch-app-listing", {
-      batchId: b.id,
-      appListedAt: isListed ? null : new Date().toISOString(),
-    });
-  }
 
   return (
     <li className="border border-ink-200 rounded-md bg-white px-2 py-1.5">
@@ -1711,32 +1743,12 @@ function BatchRow({
         )}
       </div>
 
-      {/* Action buttons — hide once the batch is closed. */}
+      {/* Action buttons — hide once the batch is closed.
+          Note: Mark-as-listed lives in Internal Phase now as a single
+          PO-wide step (it's a commercial commitment that crosses
+          every batch under the PO, not a per-batch toggle). */}
       {!closed && !showShiftForm && !showCancelForm && (
         <div className="flex flex-wrap gap-1.5 mt-1.5">
-          <button
-            type="button"
-            disabled={!canList || batchBusy}
-            onClick={handleMarkListed}
-            title={listGate}
-            className={cn(
-              "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
-              canList
-                ? (isListed
-                    ? "border-ink-300 text-ink-600 hover:bg-ink-50"
-                    : "border-brand text-brand-dark hover:bg-brand-pastel")
-                : "border-ink-200 text-ink-400 cursor-not-allowed",
-              batchBusy && "opacity-50 cursor-wait",
-            )}
-          >
-            {batchBusy
-              ? "…"
-              : isListed
-                ? "📱 Un-list"
-                : canList
-                  ? "📱 Mark as listed"
-                  : "🔒 Mark as listed"}
-          </button>
           <BatchOpBtn
             label="📅 Shift date"
             tone="gold"
@@ -2001,16 +2013,22 @@ function BatchOpBtn({
 // ─────────────────────────────────────────────────────────────
 
 function ActionCard({
-  action, busy, onChangeStatus,
+  action, busy, onChangeStatus, poForAppListing,
 }: {
   action: ScopedActionDetail;
   busy: boolean;
   onChangeStatus: (actionId: number, status: Status) => void;
+  /** When this card is the synthetic "App listed" row in Internal
+   *  Phase, the parent passes the PO so the row can offer a real
+   *  bulk-listing CTA instead of being read-only. */
+  poForAppListing?: PoNode;
 }) {
   // Synthetic rows (id < 0) like the derived "App listed" row are
-  // read-only; clicking buttons on them would attempt to update a
-  // non-existent actions table row.
+  // read-only by default. The exception: when the parent passes
+  // `poForAppListing`, the App-listed row gets a bulk-listing CTA
+  // that flips every batch's appListedAt in one transaction.
   const isSynthetic = action.id < 0;
+  const isAppListedRow = action.actionTypeName === "App listed";
   // Always show the doneLabel base form. The card's column placement
   // (Waiting / Blocked / Done) carries the status — repeating the
   // word "Waiting" in front of every label was redundant.
@@ -2078,6 +2096,15 @@ function ActionCard({
         )}
       </div>
 
+      {/* App-listing CTA — only fires on the synthetic App-listed row
+          when the parent (Internal Phase view) opted in by passing
+          poForAppListing. The control toggles every batch's
+          appListedAt at once. Gated on the PO's internalPhaseDone so
+          ops can't list before pricing/specs/SKU are settled. */}
+      {isAppListedRow && poForAppListing && (
+        <AppListedBulkCta po={poForAppListing} />
+      )}
+
       {/* Status controls — suppressed entirely for synthetic rows. */}
       {!isSynthetic && (
       <div className="flex flex-wrap gap-1.5 mt-2">
@@ -2131,6 +2158,75 @@ function ActionCard({
       </div>
       )}
     </li>
+  );
+}
+
+/**
+ * Bulk app-listing control rendered on the synthetic "App listed" row
+ * inside Internal Phase. Three button states based on the PO's roll-up:
+ *   • 0/N listed   → "📱 Mark all as listed" (primary)
+ *   • k/N listed   → "📱 Mark remaining (N−k) as listed" (primary)
+ *   • N/N listed   → "📱 Un-list all" (secondary)
+ * Disabled with a 🔒 prefix when Internal Phase isn't done yet.
+ */
+function AppListedBulkCta({ po }: { po: PoNode }) {
+  const { onBulkSetAppListed, busyBatchId } = useShell();
+  const allBatches = po.waves.flatMap((w) => w.batches);
+  const unlistedIds = allBatches.filter((b) => b.appListedAt == null).map((b) => b.id);
+  const listedIds   = allBatches.filter((b) => b.appListedAt != null).map((b) => b.id);
+  const total    = allBatches.length;
+  const listed   = listedIds.length;
+  const fullyListed = total > 0 && listed === total;
+  const gateOk = po.internalPhaseDone || fullyListed; // un-listing always allowed
+  const busy = busyBatchId != null && allBatches.some((b) => b.id === busyBatchId);
+
+  function handleClick() {
+    if (!gateOk) return;
+    if (fullyListed) {
+      const ok = window.confirm(`Un-list all ${total} batch${total === 1 ? "" : "es"}? Clears every appListedAt timestamp.`);
+      if (!ok) return;
+      onBulkSetAppListed(listedIds, false);
+    } else {
+      onBulkSetAppListed(unlistedIds, true);
+    }
+  }
+
+  const remaining = total - listed;
+  const label =
+    fullyListed   ? "📱 Un-list all"
+    : !gateOk     ? `🔒 Mark all listed (${remaining} pending)`
+    : listed === 0
+                  ? `📱 Mark all batches as listed (${total})`
+                  : `📱 Mark remaining as listed (${remaining})`;
+
+  const tone = fullyListed
+    ? "border-ink-300 text-ink-600 hover:bg-ink-50"
+    : gateOk
+      ? "border-brand text-brand-dark hover:bg-brand-pastel"
+      : "border-ink-200 text-ink-400 cursor-not-allowed";
+
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-2">
+      <button
+        type="button"
+        disabled={!gateOk || busy || total === 0}
+        onClick={handleClick}
+        title={
+          !gateOk
+            ? "Complete Internal-phase actions before listing batches."
+            : fullyListed
+              ? "Clears every batch's app-listing timestamp."
+              : "Marks every batch as live in the app right now."
+        }
+        className={cn(
+          "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+          tone,
+          busy && "opacity-50 cursor-wait",
+        )}
+      >
+        {busy ? "…" : label}
+      </button>
+    </div>
   );
 }
 
