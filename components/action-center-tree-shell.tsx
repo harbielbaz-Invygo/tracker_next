@@ -385,10 +385,53 @@ function ToggleBtn({ active, onClick, label }: { active: boolean; onClick: () =>
 // Internal Phase — PO-scope actions
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * Synthesise the "App listed" row from the PO's batch app-listing
+ * roll-up. Reads as a final step in the Internal Phase column — done
+ * once every batch under the PO has its `appListedAt` stamped, pending
+ * otherwise. Read-only: actual listing happens through the app-listing
+ * flow on each batch.
+ */
+function appListedSyntheticAction(po: PoNode): ScopedActionDetail | null {
+  if (po.appListingSummary.total === 0) return null;
+  const isDone = po.appListingSummary.completedAt != null;
+  const partial = po.appListingSummary.listed > 0
+                 && po.appListingSummary.listed < po.appListingSummary.total;
+  const label = isDone
+    ? "App listed"
+    : partial
+      ? `App listing in progress (${po.appListingSummary.listed}/${po.appListingSummary.total})`
+      : "Waiting App listing";
+  return {
+    // negative id flags it as synthetic — the ActionRow's status buttons
+    // are suppressed for these rows so ops can't try to flip them.
+    id:               -1,
+    actionTypeId:     -1,
+    actionTypeName:   "App listed",
+    waitingLabel:     label,
+    doneLabel:        label,
+    status:           isDone ? "done" : "waiting",
+    departmentName:   null,
+    stakeholderName:  null,
+    expectedDate:     null,
+    completedAt:      po.appListingSummary.completedAt,
+    notes:            null,
+    // Sort after every real action by giving it a very large sortOrder.
+    sortOrder:        999_999,
+    blockedByNames:   [],
+  };
+}
+
 function InternalPhaseView({
   po, busyActionId, onChangeStatus,
 }: { po: PoNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
-  if (po.actions.length === 0) {
+  const appListed = appListedSyntheticAction(po);
+  const allActions = [
+    ...po.actions,
+    ...(appListed ? [appListed] : []),
+  ].sort((a, b) => a.sortOrder - b.sortOrder);
+
+  if (allActions.length === 0) {
     return (
       <div className="text-sm text-ink-500 px-2 space-y-2">
         <p className="italic">
@@ -402,25 +445,119 @@ function InternalPhaseView({
       </div>
     );
   }
+
   return (
-    <section>
-      <p className="text-[0.7rem] text-ink-500 mb-2">
-        These actions apply to the entire PO — marking one done propagates across every batch beneath.
-      </p>
-      <ul className="space-y-2">
-        {po.actions
-          .slice()
-          .sort((a, b) => a.sortOrder - b.sortOrder)
-          .map((a) => (
-            <ActionRow
-              key={a.id}
-              action={a}
-              busy={busyActionId === a.id}
-              onChangeStatus={onChangeStatus}
-            />
-          ))}
-      </ul>
+    <ThreeColumnActionBoard
+      title="Internal phase"
+      subtitle="Specs · Pricing · SKU — runs in parallel"
+      actions={allActions}
+      busyActionId={busyActionId}
+      onChangeStatus={onChangeStatus}
+    />
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Shared 3-column Waiting / Blocked / Done board
+// ─────────────────────────────────────────────────────────────
+
+function ThreeColumnActionBoard({
+  title, subtitle, actions, busyActionId, onChangeStatus,
+}: {
+  title: string;
+  subtitle?: string;
+  actions: ScopedActionDetail[];
+} & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
+  const waiting = actions.filter((a) => a.status === "waiting");
+  const blocked = actions.filter((a) => a.status === "blocked");
+  const done    = actions.filter((a) => a.status === "done" || a.status === "skipped");
+  const total   = actions.length;
+  const pending = waiting.length + blocked.length;
+  const doneCount = done.length;
+
+  return (
+    <section className="border border-ink-200 rounded-md overflow-hidden bg-white">
+      <header className="px-3 py-2 border-b border-ink-200 bg-brand-pastel/30 flex flex-wrap items-baseline justify-between gap-x-3">
+        <div className="flex items-baseline gap-2">
+          <span aria-hidden className="text-brand">▸</span>
+          <h3 className="text-sm font-semibold text-brand-dark">{title}</h3>
+          {subtitle && (
+            <span className="text-[0.7rem] text-ink-500">{subtitle}</span>
+          )}
+        </div>
+        <p className="text-[0.7rem] text-ink-600 tabular-nums">
+          <span className={cn(doneCount === total ? "text-green-dark font-medium" : "")}>
+            {doneCount}/{total} done
+          </span>
+          <span className="text-ink-300 mx-1.5">·</span>
+          <span className="text-brand-dark">{pending} pending</span>
+        </p>
+      </header>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-3 bg-ink-50/40">
+        <Column
+          title="Waiting"
+          count={waiting.length}
+          tone="brand"
+          rows={waiting}
+          busyActionId={busyActionId}
+          onChangeStatus={onChangeStatus}
+        />
+        <Column
+          title="Blocked"
+          count={blocked.length}
+          tone="flame"
+          rows={blocked}
+          busyActionId={busyActionId}
+          onChangeStatus={onChangeStatus}
+        />
+        <Column
+          title="Done"
+          count={done.length}
+          tone="green"
+          rows={done}
+          busyActionId={busyActionId}
+          onChangeStatus={onChangeStatus}
+        />
+      </div>
     </section>
+  );
+}
+
+function Column({
+  title, count, tone, rows, busyActionId, onChangeStatus,
+}: {
+  title: string;
+  count: number;
+  tone: "brand" | "flame" | "green";
+  rows: ScopedActionDetail[];
+} & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
+  const headTone =
+    tone === "brand" ? "text-brand-dark" :
+    tone === "flame" ? "text-flame-dark" :
+    "text-green-dark";
+  return (
+    <div className="flex flex-col">
+      <h4 className={cn("text-[0.7rem] font-bold uppercase tracking-wide mb-2", headTone)}>
+        {title} <span className="font-normal text-ink-500 tabular-nums">({count})</span>
+      </h4>
+      {rows.length === 0 ? (
+        <p className="text-xs text-ink-400 italic px-2">none</p>
+      ) : (
+        <ul className="space-y-2">
+          {rows
+            .slice()
+            .sort((a, b) => a.sortOrder - b.sortOrder)
+            .map((a) => (
+              <ActionCard
+                key={a.id}
+                action={a}
+                busy={busyActionId === a.id}
+                onChangeStatus={onChangeStatus}
+              />
+            ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -491,30 +628,24 @@ function WaveSection({
       </button>
 
       {expanded && (
-        <>
-          {/* Wave-scope actions */}
-          <div className="px-3 py-2">
-            {wave.actions.length === 0 ? (
-              <p className="text-xs text-ink-500 italic">No VIN-chase actions on this wave.</p>
-            ) : (
-              <ul className="space-y-1.5">
-                {wave.actions
-                  .slice()
-                  .sort((a, b) => a.sortOrder - b.sortOrder)
-                  .map((a) => (
-                    <ActionRow
-                      key={a.id}
-                      action={a}
-                      busy={busyActionId === a.id}
-                      onChangeStatus={onChangeStatus}
-                    />
-                  ))}
-              </ul>
-            )}
-          </div>
+        <div className="p-2 space-y-2">
+          {/* Wave-scope actions in the same 3-column board */}
+          {wave.actions.length === 0 ? (
+            <p className="text-xs text-ink-500 italic px-2 py-1">
+              No VIN-chase actions on this wave.
+            </p>
+          ) : (
+            <ThreeColumnActionBoard
+              title="VIN chase"
+              subtitle="Tracks every step from dealer-confirmation to ready-for-delivery"
+              actions={wave.actions}
+              busyActionId={busyActionId}
+              onChangeStatus={onChangeStatus}
+            />
+          )}
 
-          {/* Batches in this wave */}
-          <div className="px-3 py-2 border-t border-ink-200/60 bg-white">
+          {/* Batches in this wave — compact summary list. */}
+          <div className="px-2 py-1.5 border border-ink-200 rounded-md bg-white">
             <p className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 mb-1.5">
               Batches in this wave
             </p>
@@ -525,6 +656,11 @@ function WaveSection({
                   <span className="text-ink-600">{b.modelYear}</span>
                   <span className="text-ink-300">·</span>
                   <span className="tabular-nums">{b.requestedQuantity}× {b.city}</span>
+                  {b.appListedAt && (
+                    <span className="text-[0.6rem] text-green-dark tabular-nums">
+                      📱 listed {b.appListedAt.slice(0, 10)}
+                    </span>
+                  )}
                   {b.closedAt && (
                     <span className={cn(
                       "ml-auto text-[0.65rem] tabular-nums",
@@ -537,71 +673,99 @@ function WaveSection({
               ))}
             </ul>
           </div>
-        </>
+        </div>
       )}
     </section>
   );
 }
 
 // ─────────────────────────────────────────────────────────────
-// Shared row — used by both Internal Phase and Wave actions
+// Action card — rich tile used inside Waiting / Blocked / Done columns
 // ─────────────────────────────────────────────────────────────
 
-function ActionRow({
+function ActionCard({
   action, busy, onChangeStatus,
 }: {
   action: ScopedActionDetail;
   busy: boolean;
   onChangeStatus: (actionId: number, status: Status) => void;
 }) {
-  const icon = action.status === "done"    ? "✅"
-             : action.status === "skipped" ? "⏭"
-             : action.status === "blocked" ? "⛔"
-             :                                "⏳";
+  // Synthetic rows (id < 0) like the derived "App listed" row are
+  // read-only; clicking buttons on them would attempt to update a
+  // non-existent actions table row.
+  const isSynthetic = action.id < 0;
   const label = action.status === "done" ? action.doneLabel : action.waitingLabel;
-  // Recompute today each render — cheap, and re-renders are driven by
-  // status flips anyway. The check is date-only, no time math needed.
   const today = todayIso();
   const overdue = isOverdue(action, today);
 
+  // Tone for the card border + accent.
+  const tone =
+    action.status === "blocked" ? "blocked" :
+    action.status === "done"    ? "done"    :
+    action.status === "skipped" ? "skipped" :
+    overdue                     ? "overdue" :
+    "waiting";
+  const toneCls = {
+    waiting: "border-ink-200",
+    blocked: "border-flame-pale bg-flame-pale/20",
+    overdue: "border-flame bg-flame-pale/30",
+    done:    "border-green-pale bg-green-pale/30",
+    skipped: "border-ink-200 bg-ink-50/40 opacity-80",
+  }[tone];
+
   return (
-    <li className={cn(
-      "rounded-md border bg-white px-3 py-2",
-      overdue ? "border-flame bg-flame-pale/30" : "border-ink-200",
-    )}>
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className="shrink-0" aria-hidden>{icon}</span>
-        <span className="text-sm font-medium text-midnight">{label}</span>
-        {overdue && (
-          <span className="text-[0.6rem] font-bold tabular-nums text-flame-dark uppercase tracking-wide">
-            ⚠ Overdue
-          </span>
+    <li className={cn("rounded-md border bg-white px-3 py-2", toneCls)}>
+      <div className="space-y-0.5">
+        <div className="flex flex-wrap items-baseline gap-x-1.5">
+          <span className="text-sm font-semibold text-midnight">{label}</span>
+          {overdue && action.status !== "done" && action.status !== "skipped" && (
+            <span className="text-[0.6rem] font-bold tabular-nums text-flame-dark uppercase tracking-wide">
+              ⚠ Overdue
+            </span>
+          )}
+        </div>
+
+        {/* Stakeholder · Department */}
+        {(action.stakeholderName || action.departmentName) && !isSynthetic && (
+          <p className="text-[0.7rem] text-ink-600">
+            {action.stakeholderName && (
+              <span className="text-brand-dark">@{action.stakeholderName}</span>
+            )}
+            {action.stakeholderName && action.departmentName && (
+              <span className="text-ink-400"> · </span>
+            )}
+            {action.departmentName && (
+              <span className="text-ink-500">{action.departmentName}</span>
+            )}
+          </p>
         )}
-        {action.stakeholderName && (
-          <span className="text-[0.7rem] text-ink-500">@{action.stakeholderName}</span>
-        )}
-        {action.departmentName && (
-          <span className="text-[0.65rem] text-ink-500 uppercase tracking-wide">
-            ({action.departmentName})
-          </span>
-        )}
+
+        {/* Date — completed or due */}
         {action.status === "done" && action.completedAt && (
-          <span className="text-[0.65rem] text-green-dark tabular-nums ml-auto">
-            ✓ {action.completedAt.slice(0, 10)}
-          </span>
+          <p className="text-[0.7rem] text-green-dark tabular-nums">
+            📅 {action.completedAt.slice(0, 10)}
+          </p>
         )}
-        {action.status !== "done" && action.expectedDate && (
-          <span className={cn(
-            "text-[0.65rem] tabular-nums ml-auto",
+        {action.status !== "done" && action.status !== "skipped" && action.expectedDate && (
+          <p className={cn(
+            "text-[0.7rem] tabular-nums",
             overdue ? "text-flame-dark font-medium" : "text-ink-500",
           )}>
-            due {action.expectedDate}
-          </span>
+            📅 {action.expectedDate}
+          </p>
+        )}
+
+        {/* Blocked reason */}
+        {action.status === "blocked" && action.blockedByNames.length > 0 && (
+          <p className="text-[0.7rem] text-flame-dark mt-0.5">
+            waiting on {action.blockedByNames.join(", ")}
+          </p>
         )}
       </div>
 
-      {/* Status controls — change based on current status. */}
-      <div className="flex flex-wrap gap-1.5 mt-1.5">
+      {/* Status controls — suppressed entirely for synthetic rows. */}
+      {!isSynthetic && (
+      <div className="flex flex-wrap gap-1.5 mt-2">
         {action.status !== "done" && (
           <StatusBtn
             label="✓ Mark done"
@@ -635,6 +799,7 @@ function ActionRow({
           />
         )}
       </div>
+      )}
     </li>
   );
 }

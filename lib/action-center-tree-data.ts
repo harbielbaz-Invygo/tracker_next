@@ -11,11 +11,11 @@
  * Pure server-side; types are imported below by client components via
  * `import type` so the DB client never leaks into the bundle.
  */
-import { eq, asc, inArray, and } from "drizzle-orm";
+import { eq, asc } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   pos, waves, batches, dealers,
-  actions as actionsTable, actionTypes, departments, stakeholders,
+  actions as actionsTable, actionTypes, actionDependencies, departments, stakeholders,
 } from "@/lib/db/schema";
 
 export type ScopedActionStatus = "waiting" | "blocked" | "done" | "skipped";
@@ -33,6 +33,12 @@ export interface ScopedActionDetail {
   completedAt:    string | null;
   notes:          string | null;
   sortOrder:      number;
+  /**
+   * Names of every action_type this one depends on. Surfaced in the
+   * "waiting on X, Y" hint on blocked-status rows. Populated from
+   * action_dependencies; order matches sortOrder ascending.
+   */
+  blockedByNames: string[];
 }
 
 export interface BatchNode {
@@ -71,6 +77,17 @@ export interface PoNode {
   actions:            ScopedActionDetail[]; // scope='po' for this PO
   /** Waves under this PO, sorted by availability date. */
   waves:              WaveNode[];
+  /**
+   * App-listing roll-up across the PO's batches. Drives the synthetic
+   * "App listed" row at the end of Internal Phase: done when every
+   * batch has `appListedAt` set, pending otherwise.
+   */
+  appListingSummary: {
+    listed:        number;
+    total:         number;
+    /** Latest appListedAt across the PO's batches, when ALL are listed. */
+    completedAt:   string | null;
+  };
 }
 
 export interface DealerNode {
@@ -96,7 +113,7 @@ export interface ActionCenterTree {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, actionRows, dealersRows] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, actionRows, depRows, allTypesForDeps, dealersRows] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     db.select().from(batches),
@@ -122,8 +139,34 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       .leftJoin(departments,  eq(actionsTable.departmentId, departments.id))
       .leftJoin(stakeholders, eq(actionsTable.assignedStakeholderId, stakeholders.id))
       .orderBy(asc(actionTypes.sortOrder)),
+    // action_dependencies + a small types lookup so we can resolve
+    // parent names for the "waiting on …" hint on blocked rows.
+    db.select().from(actionDependencies),
+    db.select({ id: actionTypes.id, name: actionTypes.name, sortOrder: actionTypes.sortOrder })
+      .from(actionTypes),
     db.select({ id: dealers.id, name: dealers.name, homeCity: dealers.homeCity }).from(dealers),
   ]);
+
+  // Resolve "this action_type depends on these parent action_type names"
+  // once for the whole tree. Stable order (parent sortOrder ASC) so the
+  // rendered hint reads naturally.
+  const typeInfoById = new Map(allTypesForDeps.map((t) => [t.id, t]));
+  const parentsByChild = new Map<number, string[]>();
+  for (const d of depRows) {
+    const parent = typeInfoById.get(d.dependsOnActionTypeId);
+    if (!parent) continue;
+    const arr = parentsByChild.get(d.actionTypeId) ?? [];
+    arr.push(parent.name);
+    parentsByChild.set(d.actionTypeId, arr);
+  }
+  // (Sort each parent list by the parent's sortOrder for stable rendering.)
+  for (const [childId, names] of parentsByChild) {
+    const ranked = names
+      .map((n) => ({ n, so: allTypesForDeps.find((t) => t.name === n)?.sortOrder ?? 0 }))
+      .sort((a, b) => a.so - b.so)
+      .map((x) => x.n);
+    parentsByChild.set(childId, ranked);
+  }
 
   // Index actions by (scope, scope_id).
   const actionsByKey = new Map<string, ScopedActionDetail[]>();
@@ -143,6 +186,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       completedAt:      a.completedAt ?? null,
       notes:            a.notes ?? null,
       sortOrder:        a.sortOrder,
+      blockedByNames:   parentsByChild.get(a.actionTypeId) ?? [],
     });
     actionsByKey.set(key, arr);
   }
@@ -210,6 +254,18 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       0,
     );
 
+    // App-listing roll-up: count batches with `appListedAt` set vs.
+    // total. When every batch is listed, expose the latest timestamp
+    // so the synthetic row can render its completion date.
+    const allBatchesUnderPo = wavesForPo.flatMap((w) => w.batches);
+    const listedBatches = allBatchesUnderPo.filter((b) => b.appListedAt != null);
+    const allListed = listedBatches.length > 0
+      && listedBatches.length === allBatchesUnderPo.length;
+    const latestListedAt = listedBatches
+      .map((b) => b.appListedAt!)
+      .sort()
+      .at(-1) ?? null;
+
     const node: PoNode = {
       id:                   p.id,
       poNumber:             p.poNumber,
@@ -221,6 +277,11 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       totalCars,
       actions:              actionsByKey.get(`po:${p.id}`) ?? [],
       waves:                wavesForPo,
+      appListingSummary: {
+        listed:      listedBatches.length,
+        total:       allBatchesUnderPo.length,
+        completedAt: allListed ? latestListedAt : null,
+      },
     };
 
     const arr = posByDealer.get(p.dealerId) ?? [];
