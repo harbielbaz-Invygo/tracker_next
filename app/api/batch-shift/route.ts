@@ -23,10 +23,10 @@
  * migration not yet applied to this DB), still applies the projection
  * update and returns ok with a `warning` field so the UI can surface it.
  */
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { batches, batchDateRevisions } from "@/lib/db/schema";
+import { batches, batchDateRevisions, waves, actions as actionsTable } from "@/lib/db/schema";
 import { requireAuth, apiError } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
@@ -71,13 +71,16 @@ export async function POST(req: NextRequest) {
     : 0;
   const reason = body.reason?.trim() || null;
 
-  // Fetch current state to compute the delta.
+  // Fetch current state to compute the delta. `waveId` is pulled so
+  // we can propagate the shift to the wave + wave-scope action
+  // expectedDates after the projection write.
   const [current] = await db
     .select({
       previous:        batches.currentProjectedDeliveryDate,
       promised:        batches.dealerPromisedDeliveryDate,
       revisionCount:   batches.deliveryDateRevisionCount,
       closedAt:        batches.closedAt,
+      waveId:          batches.waveId,
     })
     .from(batches)
     .where(eq(batches.id, body.batchId))
@@ -126,6 +129,73 @@ export async function POST(req: NextRequest) {
       deliveryDateRevisionCount: sql`${batches.deliveryDateRevisionCount} + 1`,
       updatedAt: new Date().toISOString(),
     }).where(eq(batches.id, body.batchId));
+
+    // 3. Propagate to the wave + wave-scope actions.
+    //
+    // The wave's ops projection is the slowest batch's projection
+    // under it; recompute after this shift and, if the wave-level
+    // value moved, slide every non-settled wave action's expectedDate
+    // by the same delta. Skipped/done rows keep their historical
+    // expectedDate (audit value).
+    if (current.waveId != null) {
+      const waveId = current.waveId;
+      // Pull the wave's previous ops projection + every batch's NEW
+      // current projection (the batch row we just updated is included
+      // because the SELECT runs after the UPDATE in the same tx).
+      const [waveRow] = await tx
+        .select({ opsExpectedDate: waves.opsExpectedDate, availabilityDate: waves.availabilityDate })
+        .from(waves).where(eq(waves.id, waveId)).limit(1);
+      if (waveRow) {
+        const allBatchesProjections = await tx
+          .select({
+            projection: batches.currentProjectedDeliveryDate,
+            promised:   batches.dealerPromisedDeliveryDate,
+          })
+          .from(batches)
+          .where(eq(batches.waveId, waveId));
+        // Use each batch's projection (fallback to promised when
+        // projection is null — that's the wave-creation default).
+        const effectiveDates = allBatchesProjections
+          .map((b) => b.projection ?? b.promised)
+          .filter(Boolean) as string[];
+        const newWaveOps = effectiveDates.length > 0
+          ? effectiveDates.sort().at(-1)!
+          : waveRow.availabilityDate;
+        const prevWaveOps = waveRow.opsExpectedDate ?? waveRow.availabilityDate;
+        if (newWaveOps !== prevWaveOps) {
+          const waveDelta = daysBetween(newWaveOps, prevWaveOps);
+          await tx.update(waves).set({
+            opsExpectedDate: newWaveOps,
+            updatedAt:       new Date().toISOString(),
+          }).where(eq(waves.id, waveId));
+
+          if (waveDelta !== 0) {
+            // Find every non-settled wave action and slide its
+            // expectedDate by the same delta. We do this in JS rather
+            // than a SQL date-add because libSQL doesn't have a
+            // portable DATE_ADD; row count is small (≤ wave action
+            // count, typically < 10).
+            const waveActions = await tx
+              .select({ id: actionsTable.id, expectedDate: actionsTable.expectedDate })
+              .from(actionsTable)
+              .where(and(
+                eq(actionsTable.scope, "wave"),
+                eq(actionsTable.scopeId, waveId),
+                inArray(actionsTable.status, ["waiting", "blocked"]),
+              ));
+            for (const a of waveActions) {
+              if (!a.expectedDate) continue;
+              const shifted = new Date(new Date(a.expectedDate).getTime() + waveDelta * DAY_MS)
+                .toISOString().slice(0, 10);
+              await tx.update(actionsTable).set({
+                expectedDate: shifted,
+                updatedAt:    new Date().toISOString(),
+              }).where(eq(actionsTable.id, a.id));
+            }
+          }
+        }
+      }
+    }
   });
 
   return NextResponse.json({

@@ -539,20 +539,57 @@ function PoDrawer({
 } & MutationProps & BatchOpProps & UiStateProps) {
   return (
     <>
-      {/* Header */}
+      {/* Header — denser meta line so ops glances value, urgency, and
+          at-risk count without scrolling. Inbox-grade summary. */}
       <header className="px-4 py-3 border-b border-ink-200 shrink-0 bg-ink-50/50">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-xl font-mono font-bold text-midnight">{po.poNumber}</h2>
           {po.poDate && (
             <span className="text-xs text-ink-500 tabular-nums">{po.poDate}</span>
           )}
+          {po.closedAt && (
+            <span className="text-[0.65rem] font-medium tabular-nums text-green-dark uppercase tracking-wide">
+              ✓ Closed {po.closedAt}
+            </span>
+          )}
         </div>
         <p className="text-xs text-ink-600 mt-1">
           <span className="font-medium text-midnight">🏢 {dealerName}</span>
           <span className="text-ink-300 mx-1.5">·</span>
           <span className="tabular-nums">{po.totalCars} cars</span>
+          {po.totalValueSar != null && (
+            <>
+              <span className="text-ink-300 mx-1.5">·</span>
+              <span className="tabular-nums" title="Estimated PO value (cars × unit price, SAR)">
+                💰 {po.totalValueSar.toLocaleString()} SAR
+              </span>
+            </>
+          )}
           <span className="text-ink-300 mx-1.5">·</span>
           <span className="tabular-nums">{po.waves.length} wave{po.waves.length === 1 ? "" : "s"}</span>
+          {po.nextAvailability && (() => {
+            const today = todayIso();
+            const days = Math.round(
+              (new Date(po.nextAvailability).getTime() - new Date(today).getTime())
+              / (24 * 60 * 60 * 1000),
+            );
+            const txt = days < 0
+              ? `${-days}d past first wave`
+              : days === 0
+                ? "first wave today"
+                : `in ${days}d`;
+            return (
+              <>
+                <span className="text-ink-300 mx-1.5">·</span>
+                <span className={cn(
+                  "tabular-nums",
+                  days < 0 ? "text-flame-dark font-medium" : "text-ink-600",
+                )}>
+                  📅 {txt}
+                </span>
+              </>
+            );
+          })()}
           {po.contractLengthMonths && (
             <>
               <span className="text-ink-300 mx-1.5">·</span>
