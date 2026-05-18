@@ -13,10 +13,13 @@
  * This module computes BOTH so the UI can show them side-by-side. The
  * table headers explain what each column means.
  */
-import { eq, asc, gte, or, isNull } from "drizzle-orm";
+import { eq, asc, gte, or, isNull, inArray } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   batchActions, actionTypes, departments, stakeholders, batches, dealers, batchColorMatrix, batchDateRevisions, batchDeliveryLegs,
+  // Phase 4b — scope-aware reads so PO + wave actions completed in
+  // /action-center-v2 also flow into the performance report.
+  waves, actions as actionsTable,
 } from "@/lib/db/schema";
 import { daysBetween } from "@/lib/expected-date";
 
@@ -454,6 +457,127 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     if (r.stakeholderId != null) {
       const acc = stakeholderAcc.get(r.stakeholderId) ?? emptyAcc();
       bump(acc);
+      stakeholderAcc.set(r.stakeholderId, acc);
+      if (bucketIdx !== null && delayDays !== null) {
+        const wk = stakeholderWeekly.get(r.stakeholderId) ?? newWeekly();
+        if (delayDays <= 0) wk[bucketIdx].onTime++; else wk[bucketIdx].late++;
+        stakeholderWeekly.set(r.stakeholderId, wk);
+      }
+    }
+  }
+
+  // Phase 4b — second pass: pull po-scope and wave-scope action rows
+  // from the scope-aware `actions` table. Batch-scope is intentionally
+  // skipped because Phase 2 double-writes those into batch_actions
+  // already (the legacy pass above covers them). For PO/wave actions
+  // we attribute "delayed batches owned" to every batch under the PO
+  // (or wave) — a late Pricing decision delays every batch beneath.
+  const scopedRows = await (async () => {
+    try {
+      const q = db
+        .select({
+          scope:           actionsTable.scope,
+          scopeId:         actionsTable.scopeId,
+          status:          actionsTable.status,
+          completedAt:     actionsTable.completedAt,
+          expectedDate:    actionsTable.expectedDate,
+          deptId:          departments.id,
+          stakeholderId:   stakeholders.id,
+        })
+        .from(actionsTable)
+        .leftJoin(departments,  eq(actionsTable.departmentId, departments.id))
+        .leftJoin(stakeholders, eq(actionsTable.assignedStakeholderId, stakeholders.id))
+        .where(inArray(actionsTable.scope, ["po", "wave"]))
+        .$dynamic();
+      // Same period semantics as the legacy pass: include completed-in-window
+      // OR not-yet-completed. Active actions count toward "active" metric.
+      return await (fromIso
+        ? q.where(or(isNull(actionsTable.completedAt), gte(actionsTable.completedAt, fromIso)))
+        : q);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table|no such column/i.test(msg)) return [];
+      throw err;
+    }
+  })();
+
+  // Build wave→batches and po→batches lookups once. Used to fan out a
+  // late wave/PO action's "delayed batches owned" attribution to every
+  // batch beneath that level — matches operator intuition that a slow
+  // Specs decision impacts ALL batches in the PO, not "one".
+  const waveToBatches = new Map<number, number[]>();
+  const poToBatches   = new Map<number, number[]>();
+  if (scopedRows.length > 0) {
+    const allWaves = await db.select({ id: waves.id, poId: waves.poId }).from(waves);
+    const allBatchIds = await db
+      .select({ id: batches.id, waveId: batches.waveId })
+      .from(batches);
+    for (const b of allBatchIds) {
+      if (b.waveId == null) continue;
+      const arr = waveToBatches.get(b.waveId) ?? [];
+      arr.push(b.id);
+      waveToBatches.set(b.waveId, arr);
+    }
+    for (const w of allWaves) {
+      const arr = poToBatches.get(w.poId) ?? [];
+      arr.push(...(waveToBatches.get(w.id) ?? []));
+      poToBatches.set(w.poId, arr);
+    }
+  }
+
+  for (const r of scopedRows) {
+    const isDone     = r.status === "done";
+    const isSkipped  = r.status === "skipped";
+    const isActive   = r.status === "waiting" || r.status === "blocked";
+
+    let delayDays: number | null = null;
+    let isLate = false;
+    if (isDone && r.expectedDate && r.completedAt) {
+      delayDays = daysBetween(r.completedAt.slice(0, 10), r.expectedDate);
+      isLate = delayDays > 0;
+    } else if (isActive && r.expectedDate && todayIso > r.expectedDate) {
+      isLate = true;
+    }
+
+    let bucketIdx: number | null = null;
+    if (isDone && r.completedAt && delayDays !== null) {
+      const ts = new Date(r.completedAt).getTime();
+      if (ts >= bucketEdges[0] && ts < thisWeekStartMs + WEEK_MS) {
+        bucketIdx = Math.min(11, Math.floor((ts - bucketEdges[0]) / WEEK_MS));
+      }
+    }
+
+    // Fan out: which batches does this PO/wave action "cover"?
+    const coveredBatchIds = r.scope === "po"
+      ? (poToBatches.get(r.scopeId)   ?? [])
+      : (waveToBatches.get(r.scopeId) ?? []);
+
+    function bumpScoped(acc: AggregateAccumulator) {
+      acc.totalActions++;
+      if (isDone)    acc.doneActions++;
+      if (isSkipped) acc.skippedActions++;
+      if (isActive)  acc.activeActions++;
+      if (isDone && delayDays !== null) {
+        acc.delayDays.push(delayDays);
+        acc.measurableDoneCount++;
+        if (delayDays <= 0) acc.onTimeDoneCount++;
+      }
+      if (isLate) for (const bid of coveredBatchIds) acc.delayedBatchIds.add(bid);
+    }
+
+    if (r.deptId != null) {
+      const acc = departmentAcc.get(r.deptId) ?? emptyAcc();
+      bumpScoped(acc);
+      departmentAcc.set(r.deptId, acc);
+      if (bucketIdx !== null && delayDays !== null) {
+        const wk = departmentWeekly.get(r.deptId) ?? newWeekly();
+        if (delayDays <= 0) wk[bucketIdx].onTime++; else wk[bucketIdx].late++;
+        departmentWeekly.set(r.deptId, wk);
+      }
+    }
+    if (r.stakeholderId != null) {
+      const acc = stakeholderAcc.get(r.stakeholderId) ?? emptyAcc();
+      bumpScoped(acc);
       stakeholderAcc.set(r.stakeholderId, acc);
       if (bucketIdx !== null && delayDays !== null) {
         const wk = stakeholderWeekly.get(r.stakeholderId) ?? newWeekly();
