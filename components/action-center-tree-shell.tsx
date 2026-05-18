@@ -75,6 +75,13 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   const [selection, setSelection] = useState<Selection>({ kind: "mine" });
   const [view, setView] = useState<DrawerView>("internal");
 
+  /**
+   * Help overlay visibility — toggled by `?` or the small ⌨ button
+   * in the header. Persists across renders so ops can open + close
+   * without losing place.
+   */
+  const [helpOpen, setHelpOpen] = useState<boolean>(false);
+
   // Track which row is busy / errored so the buttons can show pending
   // state. Single-shot is fine for a list of dozens.
   const [busyActionId,  setBusyActionId]  = useState<number | null>(null);
@@ -211,6 +218,64 @@ export default function ActionCenterTreeShell({ tree }: Props) {
     try { window.localStorage.setItem(DRAWER_VIEW_KEY, view); } catch { /* ignore */ }
   }, [view]);
 
+  // Global keyboard shortcuts. Listens once on the document; ignores
+  // events that originate inside a text input / textarea / contentEditable
+  // so the operator can still type freely in forms and the tree search.
+  // - i / v: switch drawer view (Internal Phase / VIN Chase)
+  // - m:     jump to Mine inbox
+  // - /:     focus the tree search box
+  // - Esc:   close inline form / dismiss flash / close help
+  // - ?:     toggle help overlay
+  useEffect(() => {
+    function isTypingTarget(el: EventTarget | null): boolean {
+      if (!(el instanceof HTMLElement)) return false;
+      if (el.isContentEditable) return true;
+      const t = el.tagName;
+      return t === "INPUT" || t === "TEXTAREA" || t === "SELECT";
+    }
+    function onKey(e: KeyboardEvent) {
+      // Don't hijack keys while ops is typing in a form field.
+      if (isTypingTarget(e.target)) {
+        if (e.key === "Escape") {
+          (e.target as HTMLElement).blur();
+        }
+        return;
+      }
+      // Cmd/Ctrl modifiers belong to the browser.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      if (e.key === "?") { e.preventDefault(); setHelpOpen((v) => !v); return; }
+      if (e.key === "Escape") {
+        if (helpOpen)         { setHelpOpen(false); return; }
+        if (inlineForm)       { closeInlineForm(); return; }
+        if (cascadeFlash)     { setCascadeFlash(null); return; }
+        return;
+      }
+      if (e.key === "m" || e.key === "M") {
+        setSelection({ kind: "mine" });
+        return;
+      }
+      if (e.key === "i" || e.key === "I") {
+        if (selection.kind === "po") setView("internal");
+        return;
+      }
+      if (e.key === "v" || e.key === "V") {
+        if (selection.kind === "po") setView("vin");
+        return;
+      }
+      if (e.key === "/") {
+        e.preventDefault();
+        const input = document.querySelector<HTMLInputElement>(
+          "aside input[type='search']",
+        );
+        input?.focus();
+        return;
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [helpOpen, inlineForm, cascadeFlash, selection]);
+
   // Flatten to find the selected PO node — small dataset, cheap.
   const selectedPo = useMemo<PoNode | null>(() => {
     if (selection.kind !== "po") return null;
@@ -228,7 +293,68 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   }, [tree, selection]);
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]">
+    <div className="relative grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]">
+      {/* Floating help button — bottom-right of the grid container. */}
+      <button
+        type="button"
+        onClick={() => setHelpOpen((v) => !v)}
+        aria-label="Keyboard shortcuts"
+        title="Keyboard shortcuts (?)"
+        className="absolute bottom-2 right-2 z-10 text-xs px-2 py-1 rounded-full border border-ink-300 bg-white/90 hover:bg-ink-50 text-ink-600 shadow-sm"
+      >
+        ⌨ ?
+      </button>
+
+      {helpOpen && (
+        <div
+          role="dialog"
+          aria-modal
+          className="absolute inset-0 z-20 bg-midnight/40 flex items-center justify-center p-4"
+          onClick={() => setHelpOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-lg border border-ink-200 shadow-lg max-w-md w-full p-4 space-y-3"
+          >
+            <div className="flex items-baseline justify-between">
+              <h3 className="text-sm font-bold text-midnight">Keyboard shortcuts</h3>
+              <button
+                type="button"
+                onClick={() => setHelpOpen(false)}
+                aria-label="Close"
+                className="text-ink-500 hover:text-midnight"
+              >
+                ✕
+              </button>
+            </div>
+            <table className="w-full text-xs">
+              <tbody>
+                {[
+                  ["m",        "Jump to Inbox (all pending actions)"],
+                  ["i",        "Switch drawer to Internal Phase"],
+                  ["v",        "Switch drawer to VIN Chase"],
+                  ["/",        "Focus the tree search box"],
+                  ["Esc",      "Close inline form / dismiss flash / close this overlay"],
+                  ["?",        "Toggle this overlay"],
+                ].map(([k, desc]) => (
+                  <tr key={k} className="border-b border-ink-100 last:border-b-0">
+                    <td className="py-1.5 pr-3">
+                      <kbd className="font-mono px-1.5 py-0.5 rounded border border-ink-300 bg-ink-50 text-ink-700">
+                        {k}
+                      </kbd>
+                    </td>
+                    <td className="py-1.5 text-ink-600">{desc}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[0.65rem] text-ink-500">
+              Shortcuts pause automatically while you&apos;re typing in any input.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* ─────────── Left: Mine entry + Dealer → PO tree ─────────── */}
       <DealerTree
         tree={tree}
