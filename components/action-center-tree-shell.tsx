@@ -61,11 +61,18 @@ interface Props {
   tree: ActionCenterTree;
 }
 
+/** Drawer selection mode — a single PO, or the "Mine" cross-PO view. */
+type Selection =
+  | { kind: "po"; poId: number }
+  | { kind: "mine" };
+
 export default function ActionCenterTreeShell({ tree }: Props) {
   const router = useRouter();
 
-  // Selection: the PO id. Null until the first PO is clicked.
-  const [selectedPoId, setSelectedPoId] = useState<number | null>(null);
+  // Selection: a PO, or the "Mine" cross-PO inbox. Defaults to Mine
+  // so ops lands on their own pending work first instead of an
+  // arbitrary first PO.
+  const [selection, setSelection] = useState<Selection>({ kind: "mine" });
   const [view, setView] = useState<DrawerView>("internal");
 
   // Track which row is busy / errored so the buttons can show pending
@@ -174,38 +181,43 @@ export default function ActionCenterTreeShell({ tree }: Props) {
 
   // Flatten to find the selected PO node — small dataset, cheap.
   const selectedPo = useMemo<PoNode | null>(() => {
-    if (selectedPoId == null) return null;
+    if (selection.kind !== "po") return null;
     for (const d of tree.dealers) {
-      const hit = d.pos.find((p) => p.id === selectedPoId);
+      const hit = d.pos.find((p) => p.id === selection.poId);
       if (hit) return hit;
     }
     return null;
-  }, [tree, selectedPoId]);
+  }, [tree, selection]);
 
   const dealerOfSelected = useMemo(() => {
-    if (selectedPoId == null) return null;
-    return tree.dealers.find((d) => d.pos.some((p) => p.id === selectedPoId)) ?? null;
-  }, [tree, selectedPoId]);
-
-  // Default to the first PO once data loads.
-  useEffect(() => {
-    if (selectedPoId == null && tree.dealers[0]?.pos[0]) {
-      setSelectedPoId(tree.dealers[0].pos[0].id);
-    }
-  }, [tree, selectedPoId]);
+    if (selection.kind !== "po") return null;
+    const poId = selection.poId;
+    return tree.dealers.find((d) => d.pos.some((p) => p.id === poId)) ?? null;
+  }, [tree, selection]);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]">
-      {/* ─────────── Left: Dealer → PO tree ─────────── */}
+      {/* ─────────── Left: Mine entry + Dealer → PO tree ─────────── */}
       <DealerTree
         tree={tree}
-        selectedPoId={selectedPoId}
-        onSelect={setSelectedPoId}
+        selection={selection}
+        onSelectPo={(poId) => setSelection({ kind: "po", poId })}
+        onSelectMine={() => setSelection({ kind: "mine" })}
       />
 
-      {/* ─────────── Right: PO detail drawer ─────────── */}
+      {/* ─────────── Right: drawer (PO detail OR Mine inbox) ─────────── */}
       <div className="border border-ink-200 rounded-lg bg-white overflow-hidden flex flex-col">
-        {selectedPo && dealerOfSelected ? (
+        {selection.kind === "mine" ? (
+          <MineView
+            tree={tree}
+            busyActionId={busyActionId}
+            onChangeStatus={setActionStatus}
+            mutationError={mutationError}
+            cascadeFlash={cascadeFlash}
+            onDismissFlash={() => setCascadeFlash(null)}
+            onJumpToPo={(poId) => setSelection({ kind: "po", poId })}
+          />
+        ) : selectedPo && dealerOfSelected ? (
           <PoDrawer
             po={selectedPo}
             dealerName={dealerOfSelected.name}
@@ -262,11 +274,12 @@ interface UiStateProps {
 // ─────────────────────────────────────────────────────────────
 
 function DealerTree({
-  tree, selectedPoId, onSelect,
+  tree, selection, onSelectPo, onSelectMine,
 }: {
   tree: ActionCenterTree;
-  selectedPoId: number | null;
-  onSelect: (id: number) => void;
+  selection: Selection;
+  onSelectPo: (id: number) => void;
+  onSelectMine: () => void;
 }) {
   const [expandedDealers, setExpandedDealers] = useState<Set<number>>(
     () => new Set(tree.dealers.map((d) => d.id)),
@@ -274,6 +287,22 @@ function DealerTree({
   // Memoised so we don't recompute on every render — same value for
   // the whole session view (overdue is a date-only comparison).
   const today = useMemo(() => todayIso(), []);
+  const selectedPoId = selection.kind === "po" ? selection.poId : null;
+  // Count of pending (non-settled) actions across the entire tree —
+  // shown next to the Mine entry as the operator's inbox badge.
+  const minePending = useMemo(() => {
+    let n = 0;
+    for (const d of tree.dealers) for (const p of d.pos) {
+      for (const a of p.actions) if (a.status === "waiting" || a.status === "blocked") n++;
+      for (const w of p.waves) {
+        for (const a of w.actions) if (a.status === "waiting" || a.status === "blocked") n++;
+        for (const b of w.batches) for (const a of b.actions) {
+          if (a.status === "waiting" || a.status === "blocked") n++;
+        }
+      }
+    }
+    return n;
+  }, [tree]);
 
   function toggleDealer(id: number) {
     setExpandedDealers((curr) => {
@@ -291,6 +320,32 @@ function DealerTree({
           {tree.dealers.length} {tree.dealers.length === 1 ? "dealer" : "dealers"}
         </span>
       </header>
+
+      {/* "Mine" cross-PO inbox — lives at the top of the tree as a
+          single sticky entry so ops's first scroll position is their
+          own pending work, not an arbitrary dealer. */}
+      <button
+        type="button"
+        onClick={onSelectMine}
+        className={cn(
+          "px-3 py-2 text-left border-b border-ink-200 flex items-center gap-2",
+          selection.kind === "mine"
+            ? "bg-brand-pastel border-l-2 border-l-brand"
+            : "hover:bg-ink-50",
+        )}
+      >
+        <span aria-hidden>📋</span>
+        <span className={cn(
+          "text-sm font-medium",
+          selection.kind === "mine" ? "text-brand-dark" : "text-midnight",
+        )}>
+          Inbox · All pending
+        </span>
+        <span className="ml-auto text-[0.65rem] tabular-nums text-ink-500">
+          {minePending}
+        </span>
+      </button>
+
       <ul className="flex-1 overflow-auto">
         {tree.dealers.map((d) => {
           const expanded = expandedDealers.has(d.id);
@@ -317,7 +372,7 @@ function DealerTree({
                       <li key={p.id}>
                         <button
                           type="button"
-                          onClick={() => onSelect(p.id)}
+                          onClick={() => onSelectPo(p.id)}
                           className={cn(
                             "w-full text-left px-3 py-2 pl-8 text-xs",
                             "border-l-2",
@@ -457,6 +512,305 @@ function PoDrawer({
         )}
       </div>
     </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// "Mine" / Inbox — flat list of every pending action across the
+// tree. Operators land here first and triage by due-date order,
+// crossing PO boundaries without needing to drill in.
+// ─────────────────────────────────────────────────────────────
+
+interface MineRow {
+  action:        ScopedActionDetail;
+  poId:          number;
+  poNumber:      string;
+  dealerName:    string;
+  /** "PO-wide" / "Wave 2026-06-15" / "PO-0117-Wallan-3" */
+  contextLabel:  string;
+}
+
+function MineView({
+  tree, busyActionId, onChangeStatus,
+  mutationError, cascadeFlash, onDismissFlash,
+  onJumpToPo,
+}: {
+  tree: ActionCenterTree;
+  cascadeFlash: string | null;
+  onDismissFlash: () => void;
+  onJumpToPo: (poId: number) => void;
+} & Pick<MutationProps, "busyActionId" | "onChangeStatus" | "mutationError">) {
+  const today = todayIso();
+
+  // Department filter — operators in Pricing should see Pricing first.
+  const [deptFilter, setDeptFilter] = useState<string>("");
+  const [stakeholderFilter, setStakeholderFilter] = useState<string>("");
+
+  // Flatten every pending action across the tree into a MineRow.
+  const rows = useMemo<MineRow[]>(() => {
+    const acc: MineRow[] = [];
+    for (const d of tree.dealers) {
+      for (const p of d.pos) {
+        const dealerName = d.name;
+        const poNumber = p.poNumber;
+        const poId = p.id;
+        // PO-scope
+        for (const a of p.actions) {
+          if (a.status !== "waiting" && a.status !== "blocked") continue;
+          acc.push({ action: a, poId, poNumber, dealerName, contextLabel: "PO-wide" });
+        }
+        // Wave-scope
+        for (const w of p.waves) {
+          for (const a of w.actions) {
+            if (a.status !== "waiting" && a.status !== "blocked") continue;
+            acc.push({ action: a, poId, poNumber, dealerName,
+              contextLabel: `Wave · ${w.availabilityDate}` });
+          }
+          // Batch-scope (skip Delivery; surfaced via Mark-as-delivered UI)
+          for (const b of w.batches) {
+            for (const a of b.actions) {
+              if (a.status !== "waiting" && a.status !== "blocked") continue;
+              if (a.actionTypeName === "Delivery") continue;
+              acc.push({ action: a, poId, poNumber, dealerName, contextLabel: b.batchCode });
+            }
+          }
+        }
+      }
+    }
+    return acc;
+  }, [tree]);
+
+  // Distinct dept + stakeholder lists for the filter chips.
+  const departments = useMemo(() =>
+    Array.from(new Set(rows.map((r) => r.action.departmentName).filter(Boolean))) as string[]
+  , [rows]);
+  const stakeholders = useMemo(() =>
+    Array.from(new Set(rows.map((r) => r.action.stakeholderName).filter(Boolean))) as string[]
+  , [rows]);
+
+  const filtered = useMemo(() => rows.filter((r) => {
+    if (deptFilter && r.action.departmentName !== deptFilter) return false;
+    if (stakeholderFilter && r.action.stakeholderName !== stakeholderFilter) return false;
+    return true;
+  }), [rows, deptFilter, stakeholderFilter]);
+
+  // Sort: overdue first (oldest expectedDate ASC), then non-overdue
+  // by expectedDate ASC (nulls last), with blocked rows after waiting
+  // within the same date so ops sees what they can actually act on.
+  const sorted = useMemo(() => filtered.slice().sort((a, b) => {
+    const ao = isOverdue(a.action, today) ? 0 : 1;
+    const bo = isOverdue(b.action, today) ? 0 : 1;
+    if (ao !== bo) return ao - bo;
+    const ad = a.action.expectedDate ?? "9999-12-31";
+    const bd = b.action.expectedDate ?? "9999-12-31";
+    if (ad !== bd) return ad.localeCompare(bd);
+    const as = a.action.status === "blocked" ? 1 : 0;
+    const bs = b.action.status === "blocked" ? 1 : 0;
+    return as - bs;
+  }), [filtered, today]);
+
+  const overdueCount = sorted.filter((r) => isOverdue(r.action, today)).length;
+  const blockedCount = sorted.filter((r) => r.action.status === "blocked").length;
+
+  return (
+    <>
+      <header className="px-4 py-3 border-b border-ink-200 shrink-0 bg-ink-50/50">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h2 className="text-xl font-bold text-midnight">📋 Inbox</h2>
+          <span className="text-xs text-ink-500">
+            All pending actions across every PO, sorted by due date.
+          </span>
+        </div>
+        <p className="text-xs text-ink-600 mt-1">
+          <span className="font-medium">{sorted.length} pending</span>
+          {overdueCount > 0 && (
+            <>
+              <span className="text-ink-300 mx-1.5">·</span>
+              <span className="text-flame-dark font-medium">{overdueCount} overdue</span>
+            </>
+          )}
+          {blockedCount > 0 && (
+            <>
+              <span className="text-ink-300 mx-1.5">·</span>
+              <span className="text-flame-dark">{blockedCount} blocked</span>
+            </>
+          )}
+        </p>
+      </header>
+
+      {/* Filters */}
+      <div className="px-4 py-2 border-b border-ink-200 shrink-0 bg-white flex flex-wrap gap-2 items-center text-xs">
+        <span className="text-ink-500">Filter:</span>
+        <select
+          value={deptFilter}
+          onChange={(e) => setDeptFilter(e.target.value)}
+          className="text-xs px-2 py-1 border border-ink-300 rounded"
+        >
+          <option value="">All departments</option>
+          {departments.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+        <select
+          value={stakeholderFilter}
+          onChange={(e) => setStakeholderFilter(e.target.value)}
+          className="text-xs px-2 py-1 border border-ink-300 rounded"
+        >
+          <option value="">All stakeholders</option>
+          {stakeholders.map((s) => <option key={s} value={s}>@{s}</option>)}
+        </select>
+        {(deptFilter || stakeholderFilter) && (
+          <button
+            type="button"
+            onClick={() => { setDeptFilter(""); setStakeholderFilter(""); }}
+            className="text-[0.7rem] text-brand-dark underline ml-1"
+          >
+            clear
+          </button>
+        )}
+      </div>
+
+      <div className="flex-1 overflow-auto p-4 space-y-3">
+        {mutationError && (
+          <p role="alert" className="text-xs text-flame-dark bg-flame-pale border border-flame px-3 py-2 rounded-md">
+            Could not update: {mutationError}
+          </p>
+        )}
+        {cascadeFlash && (
+          <div role="status" className="flex items-center justify-between text-xs text-green-dark bg-green-pale border border-green px-3 py-2 rounded-md">
+            <span>✓ {cascadeFlash}</span>
+            <button type="button" onClick={onDismissFlash} className="px-1">✕</button>
+          </div>
+        )}
+        {sorted.length === 0 ? (
+          <p className="text-sm text-ink-500 italic px-2">
+            {rows.length === 0
+              ? "🎉 Inbox zero — no pending actions anywhere in the system."
+              : "No pending actions match these filters."}
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {sorted.map((r) => (
+              <MineRowCard
+                key={`${r.poId}:${r.action.id}`}
+                row={r}
+                today={today}
+                busy={busyActionId === r.action.id}
+                onChangeStatus={onChangeStatus}
+                onJumpToPo={onJumpToPo}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+}
+
+function MineRowCard({
+  row, today, busy, onChangeStatus, onJumpToPo,
+}: {
+  row: MineRow;
+  today: string;
+  busy: boolean;
+  onChangeStatus: (actionId: number, status: Status) => void;
+  onJumpToPo: (poId: number) => void;
+}) {
+  const a = row.action;
+  const overdue = isOverdue(a, today);
+  const label = a.doneLabel || a.waitingLabel;
+
+  const toneCls = a.status === "blocked"
+    ? "border-flame-pale bg-flame-pale/20"
+    : overdue
+      ? "border-flame bg-flame-pale/30"
+      : "border-ink-200";
+
+  return (
+    <li className={cn("rounded-md border bg-white px-3 py-2", toneCls)}>
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="text-sm font-semibold text-midnight">{label}</span>
+        {overdue && (
+          <span className="text-[0.6rem] font-bold tabular-nums text-flame-dark uppercase tracking-wide">
+            ⚠ Overdue
+          </span>
+        )}
+        {a.status === "blocked" && (
+          <span className="text-[0.6rem] font-bold tabular-nums text-flame-dark uppercase tracking-wide">
+            ⛔ Blocked
+          </span>
+        )}
+        {a.expectedDate && (
+          <span className={cn(
+            "text-[0.7rem] tabular-nums ml-auto",
+            overdue ? "text-flame-dark font-medium" : "text-ink-500",
+          )}>
+            ⏰ {a.expectedDate}
+          </span>
+        )}
+      </div>
+
+      <p className="text-[0.7rem] text-ink-600 mt-0.5">
+        {a.stakeholderName && (
+          <span className="text-brand-dark">@{a.stakeholderName}</span>
+        )}
+        {a.stakeholderName && a.departmentName && <span className="text-ink-400"> · </span>}
+        {a.departmentName && (
+          <span className="text-ink-500">{a.departmentName}</span>
+        )}
+      </p>
+
+      <p className="text-[0.65rem] text-ink-500 mt-0.5">
+        <button
+          type="button"
+          onClick={() => onJumpToPo(row.poId)}
+          className="font-mono text-midnight underline-offset-2 hover:underline"
+        >
+          {row.poNumber}
+        </button>
+        <span className="text-ink-300 mx-1">·</span>
+        <span>{row.dealerName}</span>
+        <span className="text-ink-300 mx-1">·</span>
+        <span>{row.contextLabel}</span>
+      </p>
+
+      {a.status === "blocked" && a.blockedByNames.length > 0 && (
+        <p className="text-[0.65rem] text-flame-dark mt-1">
+          waiting on {a.blockedByNames.join(", ")}
+        </p>
+      )}
+
+      <div className="flex flex-wrap gap-1.5 mt-1.5">
+        <StatusBtn
+          label="✓ Mark done"
+          tone="green"
+          busy={busy}
+          onClick={() => onChangeStatus(a.id, "done")}
+        />
+        <StatusBtn
+          label="⏭ Skip"
+          tone="ink"
+          busy={busy}
+          onClick={() => {
+            if (a.pendingDependentNames.length > 0) {
+              const ok = window.confirm(
+                `Skipping "${label}" will unblock:\n\n` +
+                a.pendingDependentNames.map((n) => `  • ${n}`).join("\n") +
+                `\n\nProceed?`,
+              );
+              if (!ok) return;
+            }
+            onChangeStatus(a.id, "skipped");
+          }}
+        />
+        {a.status === "blocked" && (
+          <StatusBtn
+            label="↶ Unblock"
+            tone="brand"
+            busy={busy}
+            onClick={() => onChangeStatus(a.id, "waiting")}
+          />
+        )}
+      </div>
+    </li>
   );
 }
 
