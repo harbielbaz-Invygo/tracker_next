@@ -1,55 +1,36 @@
 /**
  * Action Center — Operations' daily work surface.
  *
- * Server component:
- *   1. Pulls all batches + per-batch action counts via getActionCenterRows().
- *   2. Computes top-line totals.
- *   3. Hands rows to <ActionCenterShell> (client) which owns filter state,
- *      selection, and drawer fetching.
+ * Scope-aware: renders Dealer → PO → Wave hierarchy with three action
+ * scopes (PO-wide / per-wave VIN chase / per-batch closure). Internal
+ * Phase ↔ VIN Chase toggle in the drawer.
  *
- * Mutations on the drawer (mark done / skip / save Ops confidence) call
- * the server APIs and then router.refresh() — which re-runs this server
- * component so the table reflects the new state.
+ * Replaces the per-batch legacy view as of phase 3d. The legacy
+ * batch_actions / batch_vin_stages tables still receive writes from
+ * Intake (Phase 2 double-write) so older readers (Dashboard, Reports,
+ * Slack) keep working — Phase 5 will drop the legacy tables once every
+ * reader is migrated.
  *
  * Access: Ops + Admin (enforced by middleware).
  */
 import AccessGate from "@/components/access-gate";
-import ActionCenterShell from "@/components/action-center-shell";
 import PageHeader from "@/components/page-header";
-import { getActionCenterRows, summarizeActionCenter } from "@/lib/action-center-data";
-import { runAlertEngine } from "@/lib/alert-engine";
+import ActionCenterTreeShell from "@/components/action-center-tree-shell";
+import { getActionCenterTree } from "@/lib/action-center-tree-data";
 
 export const dynamic = "force-dynamic";
 
 export default async function ActionCenterPage() {
-  // Run the alert engine first — creates/resolves alerts in DB so the table
-  // rows below reflect the current alert state.
-  const alertsByBatch = await runAlertEngine();
-  const rows   = await getActionCenterRows(alertsByBatch);
-  const totals = summarizeActionCenter(rows);
-
-  if (rows.length === 0) {
-    return (
-      <AccessGate view="Action Center">
-        <div>
-          <PageHeader
-            view="Action Center"
-            subtitle="Every batch in flight, sortable by action required and by department."
-          />
-          <div className="card text-center py-10">
-            <p className="text-base font-medium text-midnight mb-1">No batches yet</p>
-            <p className="text-sm text-ink-500">
-              Submit a batch from <span className="font-medium">Intake</span> to start tracking actions here.
-            </p>
-          </div>
-        </div>
-      </AccessGate>
-    );
-  }
-
+  const tree = await getActionCenterTree();
   return (
     <AccessGate view="Action Center">
-      <ActionCenterShell rows={rows} totals={totals} />
+      <div>
+        <PageHeader
+          view="Action Center"
+          subtitle={<>Dealer ▸ PO ▸ Wave hierarchy. Internal-phase actions apply to the whole PO; VIN-chase actions apply per delivery wave.</>}
+        />
+        <ActionCenterTreeShell tree={tree} />
+      </div>
     </AccessGate>
   );
 }
