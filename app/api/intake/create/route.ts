@@ -16,6 +16,10 @@ import { db } from "@/lib/db";
 import {
   batches, dealers, batchActions, actionDependencies, actionTypes, batchDeliveryLegs,
   vinChaseStages, batchVinStages, batchForecasts,
+  // Phase 2 — scope-aware tables. Written alongside the legacy tables
+  // for now so the existing Action Center keeps rendering; phase 3
+  // switches the UI to read from these. Phase 5 drops the legacy.
+  pos, waves, actions as actionsTable,
 } from "@/lib/db/schema";
 import { makeBatchCode } from "@/lib/utils";
 import { getLeadTimeDays } from "@/lib/rules";
@@ -143,6 +147,20 @@ export async function POST(req: NextRequest) {
     .from(dealers).where(eq(dealers.id, dealerId)).limit(1);
   const dealerName = dealerRow.name;
 
+  // ── Resolve or reject existing PO (phase 2 new model) ─────────
+  // `pos.po_number` is UNIQUE — if a row already exists for this PO,
+  // we bail rather than silently overwriting. For now this means each
+  // PO can be submitted via Intake once; a future PR can handle
+  // resubmission / merging.
+  const existingPo = await db.select({ id: pos.id })
+    .from(pos).where(eq(pos.poNumber, body.po.number)).limit(1);
+  if (existingPo.length > 0) {
+    return NextResponse.json(
+      { error: `PO ${body.po.number} already exists in the new pos table. Delete the existing entry to re-submit, or contact admin to merge.` },
+      { status: 409 },
+    );
+  }
+
   // ── Lookup dependency map + offsets for picked actions only ────
   // A child is initially "blocked" only when it has an UNSATISFIED
   // parent on this specific batch — i.e. a parent action_type that is
@@ -167,11 +185,14 @@ export async function POST(req: NextRequest) {
 
   // Fetch full action_type metadata so we can both validate and use the
   // offset/anchor when computing each batch_action's expected date.
+  // `scope` is pulled in for the new attach-by-scope routing.
   const typeRows = pickedActionIds.length
     ? await db.select({
         id: actionTypes.id,
         offsetDays: actionTypes.offsetDays,
         offsetAnchor: actionTypes.offsetAnchor,
+        scope: actionTypes.scope,
+        defaultDepartmentId: actionTypes.defaultDepartmentId,
       }).from(actionTypes)
         .where(inArray(actionTypes.id, pickedActionIds))
     : [];
@@ -374,6 +395,46 @@ export async function POST(req: NextRequest) {
   const created: CreatedBatch[] = await db.transaction(async (tx) => {
     const out: CreatedBatch[] = [];
 
+    // ── Phase 2: create the canonical PO row ─────────────────────
+    // First batch's commercial-term fields seed the PO record.
+    // (All groups under one PO share these per the model.)
+    const firstItem = body.items[0];
+    const [poRow] = await tx.insert(pos).values({
+      poNumber:             body.po.number,
+      dealerId,
+      poDate:               body.po.date,
+      poReference:          body.po.reference ?? undefined,
+      buyBackRate:          firstItem?.buyBackRate ?? undefined,
+      contractLengthMonths: firstItem?.contractLengthMonths ?? undefined,
+      unitPriceSar:         firstItem?.unitPriceSar ?? undefined,
+      taxPct:               firstItem?.taxPct ?? undefined,
+      notes:                body.notes ?? undefined,
+    }).returning({ id: pos.id });
+    const poId = poRow.id;
+
+    // ── Phase 2: create one wave per distinct availability date ──
+    // VIN-chase actions attach to waves; batches join via wave_id.
+    const distinctDates = new Set<string>();
+    for (const g of groups) distinctDates.add(g.availabilityDate);
+    const waveIdByDate = new Map<string, number>();
+    for (const availabilityDate of distinctDates) {
+      // Ops-expected for the wave = latest ops-expected across all
+      // legs landing on this date (slowest leg paces the wave).
+      const opsExpected = groups
+        .filter((g) => g.availabilityDate === availabilityDate)
+        .flatMap((g) => g.legs.map((l) => l.opsExpectedDate))
+        .filter(Boolean)
+        .sort()
+        .at(-1) ?? availabilityDate;
+      const [waveRow] = await tx.insert(waves).values({
+        poId,
+        availabilityDate,
+        opsExpectedDate: opsExpected,
+        vinReceivedAtIntake: body.vinReceivedAtIntake ?? false,
+      }).returning({ id: waves.id });
+      waveIdByDate.set(availabilityDate, waveRow.id);
+    }
+
     // Split case: mark the parent superseded right at the start of
     // the transaction. Children created below get parentForecastBatchId.
     if (isSplitFulfilment && forecastParent) {
@@ -458,16 +519,24 @@ export async function POST(req: NextRequest) {
       //   Split child    → INSERT new batch with parentForecastBatchId
       //                    set; later copy Pre-PO App Listing from parent.
       //   Standard       → INSERT new batch, no Forecast linkage.
+      // Phase 2: every batch belongs to a wave keyed by its
+      // availability date. Map lookup is exact since we created the
+      // wave above using the same dates from the groups list.
+      const waveIdForBatch = waveIdByDate.get(availabilityDate) ?? null;
+
       let batchRow: { id: number };
       if (isOneToOneFulfilment && forecastParent) {
-        await tx.update(batches).set(intakeFields)
-          .where(eq(batches.id, forecastParent.id));
+        await tx.update(batches).set({
+          ...intakeFields,
+          waveId: waveIdForBatch ?? undefined,
+        }).where(eq(batches.id, forecastParent.id));
         batchRow = { id: forecastParent.id };
         // Wipe the Forecast-era legs — Intake legs replace them.
         await tx.delete(batchDeliveryLegs).where(eq(batchDeliveryLegs.batchId, forecastParent.id));
       } else {
         const [inserted] = await tx.insert(batches).values({
           ...intakeFields,
+          waveId: waveIdForBatch ?? undefined,
           parentForecastBatchId: isSplitFulfilment && forecastParent ? forecastParent.id : undefined,
         }).returning({ id: batches.id });
         batchRow = inserted;
@@ -602,6 +671,123 @@ export async function POST(req: NextRequest) {
         legCount: legs.length,
       });
     }
+
+    // ──────────────────────────────────────────────────────────
+    // Phase 2 — write the scope-aware action rows on the new
+    // `actions` table. Runs in addition to the legacy batch_actions
+    // inserts above so phase 3 can read the new shape without
+    // breaking the existing UI which still reads batch_actions.
+    //
+    // Routing: each picked action_type lands at its declared scope.
+    //   po    → ONE row per picked action, attached to the PO
+    //   wave  → ONE row per (wave, picked action), attached to wave
+    //   batch → ONE row per (batch, picked action), attached to batch
+    // Delivery (always batch) is also auto-attached.
+    // ──────────────────────────────────────────────────────────
+    type AttachPlan = { scope: "po" | "wave" | "batch"; scopeId: number; anchorSubmission: string; anchorPromised: string };
+    const insertAction = async (a: typeof body.actions[number], plan: AttachPlan) => {
+      const type = typeById.get(a.actionTypeId);
+      if (!type) return;
+      const expected = computeExpectedDate({
+        anchor:     type.offsetAnchor,
+        offsetDays: type.offsetDays,
+        submission: plan.anchorSubmission,
+        vin:        null,
+        promised:   plan.anchorPromised,
+      });
+      const status: "waiting" | "blocked" = hasParentDep.has(a.actionTypeId) ? "blocked" : "waiting";
+      try {
+        await tx.insert(actionsTable).values({
+          scope:                 plan.scope,
+          scopeId:               plan.scopeId,
+          actionTypeId:          a.actionTypeId,
+          departmentId:          a.departmentId ?? type.defaultDepartmentId ?? undefined,
+          assignedStakeholderId: a.assignedStakeholderId ?? undefined,
+          status,
+          expectedDate:          expected ?? undefined,
+        });
+      } catch (err) {
+        // Unique constraint (scope, scope_id, action_type_id) — already
+        // attached. Safe to ignore in this idempotent context.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
+      }
+    };
+
+    // PO-scope actions — one row each, regardless of how many batches.
+    const poAnchorPromised = groups[0]?.availabilityDate ?? today;
+    for (const a of body.actions) {
+      const type = typeById.get(a.actionTypeId);
+      if (!type || type.scope !== "po") continue;
+      await insertAction(a, {
+        scope: "po", scopeId: poId,
+        anchorSubmission: requestedAt, anchorPromised: poAnchorPromised,
+      });
+    }
+
+    // Wave-scope actions — one row per wave per picked wave-action.
+    for (const [waveDate, waveId] of waveIdByDate) {
+      for (const a of body.actions) {
+        const type = typeById.get(a.actionTypeId);
+        if (!type || type.scope !== "wave") continue;
+        await insertAction(a, {
+          scope: "wave", scopeId: waveId,
+          anchorSubmission: requestedAt, anchorPromised: waveDate,
+        });
+      }
+    }
+
+    // Batch-scope actions — one row per batch per picked batch-action.
+    // Delivery is included here as an auto-attachment regardless of
+    // whether ops picked it (mirroring the existing legacy behaviour).
+    const deliveryRow = await tx.select({
+      id: actionTypes.id,
+      offsetDays: actionTypes.offsetDays,
+      offsetAnchor: actionTypes.offsetAnchor,
+      defaultDepartmentId: actionTypes.defaultDepartmentId,
+    })
+      .from(actionTypes)
+      .where(eq(actionTypes.name, "Delivery"))
+      .limit(1);
+    for (const b of out) {
+      const groupForBatch = groups.find((g) => `${g.item.model} ${g.item.year}` === b.modelYear)
+                          ?? groups[0];
+      const batchPromised = groupForBatch?.availabilityDate ?? today;
+      // User-picked batch-scope actions.
+      for (const a of body.actions) {
+        const type = typeById.get(a.actionTypeId);
+        if (!type || type.scope !== "batch") continue;
+        await insertAction(a, {
+          scope: "batch", scopeId: b.id,
+          anchorSubmission: requestedAt, anchorPromised: batchPromised,
+        });
+      }
+      // Auto-Delivery (always batch, always present, idempotent).
+      if (deliveryRow.length > 0) {
+        const d = deliveryRow[0];
+        const expected = computeExpectedDate({
+          anchor:     d.offsetAnchor,
+          offsetDays: d.offsetDays,
+          submission: requestedAt,
+          vin:        null,
+          promised:   batchPromised,
+        });
+        try {
+          await tx.insert(actionsTable).values({
+            scope:        "batch",
+            scopeId:      b.id,
+            actionTypeId: d.id,
+            departmentId: d.defaultDepartmentId ?? undefined,
+            status:       "waiting",
+            expectedDate: expected ?? undefined,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
+        }
+      }
+    }
+
     return out;
   });
 
