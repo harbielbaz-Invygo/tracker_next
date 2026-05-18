@@ -1707,61 +1707,70 @@ function WindowActionBar({
   }
 
   return (
-    <div className="border border-ink-200 rounded-md bg-white px-2 py-1.5">
-      <p className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 mb-1.5">
-        Window controls
+    <div className="border-2 border-brand rounded-md bg-brand-pastel/40 shadow-sm">
+      {/* Distinguishing label — colored pill at the top-left so ops
+          immediately knows this row is WINDOW-LEVEL (applies to all
+          batches below) and not a single-batch row. */}
+      <div className="flex items-baseline gap-2 px-3 pt-2">
+        <span className="inline-block text-[0.6rem] font-bold uppercase tracking-wide bg-brand text-white rounded-full px-2 py-0.5">
+          Window
+        </span>
+        <span className="text-[0.7rem] text-brand-dark font-medium">
+          Applies to every batch in this delivery window
+        </span>
         {deliveredCount > 0 && (
-          <span className="ml-1.5 text-green-dark normal-case font-normal">
-            · {deliveredCount}/{wave.batches.length} delivered
+          <span className="text-[0.7rem] text-green-dark tabular-nums ml-auto">
+            ✓ {deliveredCount}/{wave.batches.length} delivered
           </span>
         )}
-      </p>
-      <div className="flex flex-wrap items-stretch gap-2">
-        {/* LEFT: closure cluster */}
-        <div className="flex flex-wrap gap-1.5">
-          <BulkBtn
-            label="📅 Shift all"
-            tone="gold"
-            disabled={openBatches.length === 0}
-            onClick={handleShiftWindow}
-          />
-          <BulkBtn
-            label="🚫 Cancel all"
-            tone="flame"
-            disabled={openBatches.length === 0}
-            onClick={handleCancelWindow}
-          />
-          <BulkBtn
-            label={canMarkAllDelivered
-              ? `✓ Mark all delivered (${openBatches.length})`
-              : `🔒 Mark all delivered`}
-            tone="green"
-            disabled={!canMarkAllDelivered}
-            title={markAllDeliveredTooltip}
-            onClick={handleMarkAllDelivered}
-          />
-        </div>
-        <span className="text-ink-300 mx-1 hidden md:inline">|</span>
-        {/* RIGHT: External-Phase chips, wave-scope source.
-            Clicking flips the wave row + cascades to every batch's
-            copy via /api/scope-action. */}
-        <div className="flex flex-wrap gap-1.5 md:ml-auto">
-          {wave.actions.length === 0 ? (
-            <span className="text-[0.7rem] text-ink-500 italic px-2 py-0.5">
-              No External-Phase actions configured.
-            </span>
-          ) : wave.actions
-              .slice()
-              .sort((a, b) => a.sortOrder - b.sortOrder)
-              .map((a) => (
-                <ActionChip
-                  key={a.id}
-                  action={a}
-                  busy={busyActionId === a.id}
-                  onChangeStatus={onChangeStatus}
-                />
-              ))}
-        </div>
+      </div>
+
+      {/* Row 1: bulk closure cluster — single horizontal line, three
+          equally-weighted controls. */}
+      <div className="flex flex-wrap gap-1.5 px-3 py-2 border-b border-brand/30">
+        <BulkBtn
+          label="📅 Shift all"
+          tone="gold"
+          disabled={openBatches.length === 0}
+          onClick={handleShiftWindow}
+        />
+        <BulkBtn
+          label="🚫 Cancel all"
+          tone="flame"
+          disabled={openBatches.length === 0}
+          onClick={handleCancelWindow}
+        />
+        <BulkBtn
+          label={canMarkAllDelivered
+            ? `✓ Mark all delivered (${openBatches.length})`
+            : `🔒 Mark all delivered`}
+          tone="green"
+          disabled={!canMarkAllDelivered}
+          title={markAllDeliveredTooltip}
+          onClick={handleMarkAllDelivered}
+        />
+      </div>
+
+      {/* Row 2: External-Phase chips. Grid layout keeps chip columns
+          predictable across the window AND every batch row below, so
+          the eye scans vertically by action_type. Auto-fit + min
+          width handles narrow screens by wrapping rows. */}
+      <div className="px-3 py-2 grid gap-1.5 grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">
+        {wave.actions.length === 0 ? (
+          <span className="text-[0.7rem] text-ink-500 italic">
+            No External-Phase actions configured.
+          </span>
+        ) : wave.actions
+            .slice()
+            .sort((a, b) => a.sortOrder - b.sortOrder)
+            .map((a) => (
+              <ActionChip
+                key={a.id}
+                action={a}
+                busy={busyActionId === a.id}
+                onChangeStatus={onChangeStatus}
+              />
+            ))}
       </div>
       {/* Silence unused-prop lint until per-bar busy state is shown. */}
       <span className="hidden" data-busy={busyBatchId} />
@@ -1957,36 +1966,87 @@ function BatchRow({
   const showShiftForm  = inlineForm?.batchId === b.id && inlineForm.kind === "shift";
   const showCancelForm = inlineForm?.batchId === b.id && inlineForm.kind === "cancel";
 
+  // Delay vs. dealer promise — positive means we're projecting later
+  // than promised; negative means we're tracking ahead. Used for the
+  // colored chip in the meta line so ops sees the at-risk batches.
+  const projectedDate = b.currentProjectedDeliveryDate ?? b.promisedDate;
+  const delayDays = (() => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    return Math.round(
+      (new Date(projectedDate).getTime() - new Date(b.promisedDate).getTime()) / DAY_MS,
+    );
+  })();
+
   return (
-    <li className="border border-ink-200 rounded-md bg-white px-2 py-1.5">
+    <li className={cn(
+      "border border-ink-200 rounded-md overflow-hidden",
+      closed
+        ? (b.closureReason === "delivered" ? "bg-green-pale/30" : "bg-flame-pale/20")
+        : "bg-white",
+    )}>
       {/* Identity strip — code, model, qty, city, listed/closure chips. */}
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
-        <code className="text-[0.7rem] text-midnight font-mono">{b.batchCode}</code>
-        <span className="text-ink-600">{b.modelYear}</span>
+      <div className="px-3 pt-2 pb-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
+        <code className="text-[0.75rem] text-midnight font-mono font-semibold">{b.batchCode}</code>
+        <span className="text-midnight font-medium">{b.modelYear}</span>
         <span className="text-ink-300">·</span>
         <span className="tabular-nums">{b.requestedQuantity}× {b.city}</span>
-        {isListed && (
-          <span className="text-[0.6rem] text-green-dark tabular-nums">
-            📱 listed {b.appListedAt!.slice(0, 10)}
-          </span>
-        )}
         {b.closedAt && (
           <span className={cn(
-            "text-[0.65rem] tabular-nums",
-            b.closureReason === "delivered" ? "text-green-dark" : "text-flame-dark",
+            "ml-auto text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
+            b.closureReason === "delivered"
+              ? "text-green-dark bg-green-pale"
+              : "text-flame-dark bg-flame-pale",
           )}>
             {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
           </span>
         )}
       </div>
 
-      {/* PER-BATCH ACTION BAR — left cluster: closure controls (Shift /
-          Cancel / Mark delivered) applied to THIS batch only. Right
-          cluster: External-Phase chips driven by THIS batch's batch-
-          scope copies (independent state from the wave's bulk row). */}
+      {/* Meta line — operationally important context: promised vs.
+          projected, delay, listing, value, colors. Renders as small
+          chips with consistent spacing. */}
+      <div className="px-3 pb-2 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[0.7rem] text-ink-600">
+        <span className="tabular-nums">
+          📅 Promised <span className="text-midnight">{b.promisedDate}</span>
+        </span>
+        {b.currentProjectedDeliveryDate && b.currentProjectedDeliveryDate !== b.promisedDate && (
+          <span className="tabular-nums">
+            ⏰ Ops <span className="text-midnight">{b.currentProjectedDeliveryDate}</span>
+          </span>
+        )}
+        {delayDays !== 0 && !closed && (
+          <span className={cn(
+            "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
+            delayDays > 0
+              ? "text-flame-dark bg-flame-pale"
+              : "text-brand-dark bg-brand-pastel",
+          )}>
+            {delayDays > 0 ? `+${delayDays}d late` : `${-delayDays}d ahead`}
+          </span>
+        )}
+        {isListed && (
+          <span className="tabular-nums text-green-dark">
+            📱 listed {b.appListedAt!.slice(0, 10)}
+          </span>
+        )}
+        {b.totalValueSar != null && (
+          <span className="tabular-nums" title="requestedQuantity × unitPriceSar">
+            💰 <span className="text-midnight">{b.totalValueSar.toLocaleString()}</span> SAR
+          </span>
+        )}
+        {b.colorSummary && (
+          <span className="text-ink-500 truncate max-w-[24rem]" title={b.colorSummary}>
+            🎨 {b.colorSummary}
+          </span>
+        )}
+      </div>
+
+      {/* PER-BATCH ACTION BAR — closure cluster row above the
+          External-Phase chip row, both edge-to-edge so the chip
+          columns align with the WINDOW bar above. */}
       {!closed && !showShiftForm && !showCancelForm && (
-        <div className="flex flex-wrap items-stretch gap-2 mt-1.5">
-          <div className="flex flex-wrap gap-1.5">
+        <>
+          <div className="px-3 py-1.5 border-t border-ink-200 bg-ink-50/40 flex flex-wrap gap-1.5">
             <BatchOpBtn
               label="📅 Shift date"
               tone="gold"
@@ -2007,8 +2067,8 @@ function BatchRow({
                 className={cn(
                   "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
                   canDeliver
-                    ? "border-green text-green-dark hover:bg-green-pale"
-                    : "border-ink-200 text-ink-400 cursor-not-allowed",
+                    ? "border-green text-green-dark hover:bg-green-pale bg-white"
+                    : "border-ink-200 text-ink-400 cursor-not-allowed bg-white",
                   deliveryBusy && "opacity-50 cursor-wait",
                 )}
                 title={deliveryGate.reason}
@@ -2021,13 +2081,13 @@ function BatchRow({
               </button>
             )}
           </div>
-          <span className="text-ink-300 mx-1 hidden md:inline">|</span>
-          {/* RIGHT: External-Phase chips — driven by batch-scope rows
-              when present, with the wave's wave-scope row as fallback
-              for legacy batches that pre-date the per-batch rollout. */}
-          <div className="flex flex-wrap gap-1.5 md:ml-auto">
+
+          {/* External-Phase chips — same grid template as the WINDOW
+              bar's chip row, so chips align vertically across the
+              entire delivery window. */}
+          <div className="px-3 py-2 border-t border-ink-200 grid gap-1.5 grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">
             {externalActions.length === 0 ? (
-              <span className="text-[0.7rem] text-ink-500 italic px-2 py-0.5">
+              <span className="text-[0.7rem] text-ink-500 italic">
                 No External-Phase actions on this batch.
               </span>
             ) : externalActions
@@ -2042,7 +2102,7 @@ function BatchRow({
                   />
                 ))}
           </div>
-        </div>
+        </>
       )}
 
       {showShiftForm && (

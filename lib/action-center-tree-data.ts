@@ -59,6 +59,21 @@ export interface BatchNode {
   closedAt:           string | null;
   closureReason:      "delivered" | "cancelled" | null;
   appListedAt:        string | null;
+  /** Dealer-promised availability date (the original PO promise). */
+  promisedDate:       string;
+  /**
+   * Ops's current projected delivery date for THIS batch — may have
+   * shifted from the original promise via /api/batch-shift. Null until
+   * ops has set one (rare in practice; defaulted at Intake).
+   */
+  currentProjectedDeliveryDate: string | null;
+  /** Free-text colour summary captured at Intake. */
+  colorSummary:       string | null;
+  /** SAR unit price from the batch's commercial terms. Null when
+   *  Intake didn't capture one. */
+  unitPriceSar:       number | null;
+  /** Pre-computed requestedQuantity × unitPriceSar for the value chip. */
+  totalValueSar:      number | null;
   actions:            ScopedActionDetail[]; // scope='batch' for this batch
 }
 
@@ -338,18 +353,28 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     if (!hasAnyBatch) continue;
 
     const wavesForPo: WaveNode[] = (wavesByPo.get(p.id) ?? []).map((w) => {
-      const wBatches = (batchesByWave.get(w.id) ?? []).map<BatchNode>((b) => ({
-        id:                 b.id,
-        batchCode:          b.batchCode,
-        modelYear:          [b.model, b.year].filter(Boolean).join(" ") || "—",
-        city:               b.dealerReceivingCity ?? "—",
-        requestedQuantity:  b.requestedQuantity,
-        deliveredQuantity:  b.deliveredQuantity ?? 0,
-        closedAt:           b.closedAt ?? null,
-        closureReason:      (b.closureReason ?? null) as BatchNode["closureReason"],
-        appListedAt:        b.appListedAt ?? null,
-        actions:            actionsByKey.get(`batch:${b.id}`) ?? [],
-      }));
+      const wBatches = (batchesByWave.get(w.id) ?? []).map<BatchNode>((b) => {
+        const totalValueSar = b.unitPriceSar != null && b.requestedQuantity > 0
+          ? Math.round(b.unitPriceSar * b.requestedQuantity)
+          : null;
+        return {
+          id:                 b.id,
+          batchCode:          b.batchCode,
+          modelYear:          [b.model, b.year].filter(Boolean).join(" ") || "—",
+          city:               b.dealerReceivingCity ?? "—",
+          requestedQuantity:  b.requestedQuantity,
+          deliveredQuantity:  b.deliveredQuantity ?? 0,
+          closedAt:           b.closedAt ?? null,
+          closureReason:      (b.closureReason ?? null) as BatchNode["closureReason"],
+          appListedAt:        b.appListedAt ?? null,
+          promisedDate:                  b.dealerPromisedDeliveryDate,
+          currentProjectedDeliveryDate:  b.currentProjectedDeliveryDate ?? null,
+          colorSummary:                  b.colorSummary ?? null,
+          unitPriceSar:                  b.unitPriceSar ?? null,
+          totalValueSar,
+          actions:            actionsByKey.get(`batch:${b.id}`) ?? [],
+        };
+      });
       return {
         id:               w.id,
         availabilityDate: w.availabilityDate,
