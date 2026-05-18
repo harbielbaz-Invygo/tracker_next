@@ -168,8 +168,19 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
   }
 
   // Build PO nodes.
+  // Skip POs with no batches under any of their waves — these are
+  // orphans left behind when ops deleted batches via Settings (the
+  // pos/waves rows aren't children of batches and don't cascade).
+  // The intake self-heals these on re-upload and `/api/admin/cleanup-
+  // orphan-pos` purges them server-side, but filtering here means
+  // the UI stops showing them immediately without needing either step.
   const posByDealer = new Map<number, PoNode[]>();
   for (const p of posRows) {
+    const hasAnyBatch = (wavesByPo.get(p.id) ?? []).some(
+      (w) => (batchesByWave.get(w.id)?.length ?? 0) > 0,
+    );
+    if (!hasAnyBatch) continue;
+
     const wavesForPo: WaveNode[] = (wavesByPo.get(p.id) ?? []).map((w) => {
       const wBatches = (batchesByWave.get(w.id) ?? []).map<BatchNode>((b) => ({
         id:                 b.id,

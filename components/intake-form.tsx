@@ -144,8 +144,20 @@ export default function IntakeForm({ options }: Props) {
    * "department exists but no stakeholder picked yet" (action will be
    * created unassigned). Departments with no stakeholders configured
    * never appear here.
+   *
+   * Default-initialised to each department's FIRST stakeholder so ops
+   * doesn't have to manually pick one at every intake. They can still
+   * change it on a per-PO basis via the column dropdown.
    */
-  const [pickedStakeholders, setPickedStakeholders] = useState<Record<number, number | null>>({});
+  const [pickedStakeholders, setPickedStakeholders] = useState<Record<number, number | null>>(
+    () => {
+      const init: Record<number, number | null> = {};
+      for (const d of options.departments) {
+        if (d.stakeholders.length > 0) init[d.id] = d.stakeholders[0].id;
+      }
+      return init;
+    },
+  );
 
   /**
    * Group action types by their Settings-configured department, ordered
@@ -410,7 +422,13 @@ export default function IntakeForm({ options }: Props) {
     setActions(options.actionTypes.map((t) => ({
       actionTypeId: t.id, selected: false,
     })));
-    setPickedStakeholders({});
+    // Re-seed with each department's first stakeholder, matching the
+    // initial mount behaviour so the next intake doesn't lose defaults.
+    const seed: Record<number, number | null> = {};
+    for (const d of options.departments) {
+      if (d.stakeholders.length > 0) seed[d.id] = d.stakeholders[0].id;
+    }
+    setPickedStakeholders(seed);
   }
 
   /**
