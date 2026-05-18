@@ -629,53 +629,129 @@ function WaveSection({
 
       {expanded && (
         <div className="p-2 space-y-2">
-          {/* Wave-scope actions in the same 3-column board */}
+          {/* Wave-scope actions — flat list (no Blocked/Done columns
+              since VIN-chase deps are strictly linear: each step is
+              "waiting" or "done", never "blocked on a sibling"). The
+              ActionCard is reused for the rich label + status buttons. */}
           {wave.actions.length === 0 ? (
             <p className="text-xs text-ink-500 italic px-2 py-1">
               No VIN-chase actions on this wave.
             </p>
           ) : (
-            <ThreeColumnActionBoard
-              title="VIN chase"
-              subtitle="Tracks every step from dealer-confirmation to ready-for-delivery"
-              actions={wave.actions}
-              busyActionId={busyActionId}
-              onChangeStatus={onChangeStatus}
-            />
+            <ul className="space-y-2">
+              {wave.actions
+                .slice()
+                .sort((a, b) => a.sortOrder - b.sortOrder)
+                .map((a) => (
+                  <ActionCard
+                    key={a.id}
+                    action={a}
+                    busy={busyActionId === a.id}
+                    onChangeStatus={onChangeStatus}
+                  />
+                ))}
+            </ul>
           )}
 
-          {/* Batches in this wave — compact summary list. */}
-          <div className="px-2 py-1.5 border border-ink-200 rounded-md bg-white">
-            <p className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 mb-1.5">
-              Batches in this wave
-            </p>
-            <ul className="space-y-1">
-              {wave.batches.map((b) => (
-                <li key={b.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
-                  <code className="text-[0.7rem] text-midnight font-mono">{b.batchCode}</code>
-                  <span className="text-ink-600">{b.modelYear}</span>
-                  <span className="text-ink-300">·</span>
-                  <span className="tabular-nums">{b.requestedQuantity}× {b.city}</span>
-                  {b.appListedAt && (
-                    <span className="text-[0.6rem] text-green-dark tabular-nums">
-                      📱 listed {b.appListedAt.slice(0, 10)}
-                    </span>
-                  )}
-                  {b.closedAt && (
-                    <span className={cn(
-                      "ml-auto text-[0.65rem] tabular-nums",
-                      b.closureReason === "delivered" ? "text-green-dark" : "text-flame-dark",
-                    )}>
-                      {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
+          {/* Batches in this wave — compact summary + Mark-as-delivered
+              button per batch. The button is gated on the wave's actions
+              being all done/skipped so ops can't skip ahead. */}
+          <BatchListInWave
+            wave={wave}
+            busyActionId={busyActionId}
+            onChangeStatus={onChangeStatus}
+          />
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * Compact list of batches in a wave, with a per-batch "Mark as
+ * delivered" button. The button finds the batch's Delivery action
+ * (auto-attached at Intake) and flips it to done — the existing
+ * /api/scope-action handler then auto-closes the batch.
+ *
+ * Gating:
+ *   - The Delivery action must exist on the batch (always true for
+ *     new-shape batches; defensive null-check otherwise).
+ *   - The batch must not already be closed (delivered or cancelled).
+ *   - Every wave-scope action must be done or skipped, otherwise the
+ *     button shows pending count and is disabled.
+ */
+function BatchListInWave({
+  wave, busyActionId, onChangeStatus,
+}: { wave: WaveNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
+  // "Wave ready" = every wave-scope action is settled.
+  const wavePending = wave.actions.filter(
+    (a) => a.status !== "done" && a.status !== "skipped",
+  ).length;
+  const waveReady = wave.actions.length > 0 && wavePending === 0;
+
+  return (
+    <div className="px-2 py-1.5 border border-ink-200 rounded-md bg-white">
+      <p className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 mb-1.5">
+        Batches in this wave
+      </p>
+      <ul className="space-y-1.5">
+        {wave.batches.map((b) => {
+          const delivery = b.actions.find((a) => a.actionTypeName === "Delivery");
+          const alreadyDelivered = b.closedAt != null && b.closureReason === "delivered";
+          const cancelled       = b.closedAt != null && b.closureReason === "cancelled";
+          const canDeliver = !!delivery && !alreadyDelivered && !cancelled && waveReady;
+          const busy = !!delivery && busyActionId === delivery.id;
+          return (
+            <li key={b.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
+              <code className="text-[0.7rem] text-midnight font-mono">{b.batchCode}</code>
+              <span className="text-ink-600">{b.modelYear}</span>
+              <span className="text-ink-300">·</span>
+              <span className="tabular-nums">{b.requestedQuantity}× {b.city}</span>
+              {b.appListedAt && (
+                <span className="text-[0.6rem] text-green-dark tabular-nums">
+                  📱 listed {b.appListedAt.slice(0, 10)}
+                </span>
+              )}
+              {b.closedAt && (
+                <span className={cn(
+                  "text-[0.65rem] tabular-nums",
+                  b.closureReason === "delivered" ? "text-green-dark" : "text-flame-dark",
+                )}>
+                  {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
+                </span>
+              )}
+              <span className="ml-auto">
+                {delivery && !alreadyDelivered && !cancelled && (
+                  <button
+                    type="button"
+                    disabled={!canDeliver || busy}
+                    onClick={() => delivery && onChangeStatus(delivery.id, "done")}
+                    className={cn(
+                      "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+                      canDeliver
+                        ? "border-green text-green-dark hover:bg-green-pale"
+                        : "border-ink-200 text-ink-400 cursor-not-allowed",
+                      busy && "opacity-50 cursor-wait",
+                    )}
+                    title={
+                      !waveReady
+                        ? `${wavePending} wave action${wavePending === 1 ? "" : "s"} still pending`
+                        : "Marks the batch's Delivery action done and auto-closes the batch."
+                    }
+                  >
+                    {busy
+                      ? "…"
+                      : waveReady
+                        ? "✓ Mark as delivered"
+                        : `🔒 Mark as delivered · ${wavePending} pending`}
+                  </button>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
