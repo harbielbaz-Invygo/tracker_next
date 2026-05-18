@@ -9,8 +9,12 @@ import { db } from "@/lib/db";
 import {
   batches, dealers, batchActions, actionTypes, departments, stakeholders,
   vinChaseStages, batchVinStages,
+  // Phase 4a — read scope-aware actions for new batches (wave_id set).
+  // The legacy reads stay in place for old batches; the two sets are
+  // unioned, not replaced, until Phase 5 drops the legacy tables.
+  waves, actions as actionsTable,
 } from "@/lib/db/schema";
-import { eq, desc, and, asc, gte, or, isNull, sql } from "drizzle-orm";
+import { eq, desc, and, asc, gte, or, isNull, sql, inArray } from "drizzle-orm";
 import type { ReportPeriod } from "./reports-period";
 
 /**
@@ -235,9 +239,11 @@ export async function getDashboardRows(period: ReportPeriod = "all"): Promise<Da
   // stage in parallel. Delivery = batch is fully delivered; VIN done =
   // execution zone (the pivot from "uncertain" to "predictable lead time").
   //
-  // VIN moved from action_types into vin_chase_stages in PR #53, so we
-  // query batch_vin_stages here. Defensive try/catch so a pre-migration
-  // DB falls back to empty (won't 500 the dashboard).
+  // VIN moved from action_types into vin_chase_stages in PR #53, and AGAIN
+  // into the scope-aware `actions` table (wave-scope) in the phase-2
+  // restructure. Both sources are queried here and unioned — the source
+  // of truth depends on whether ops has used the legacy /action-center
+  // or /action-center-v2 to mark VIN done.
   const vinStageDone = await (async () => {
     try {
       return await db
@@ -259,6 +265,31 @@ export async function getDashboardRows(period: ReportPeriod = "all"): Promise<Da
       throw err;
     }
   })();
+  // Phase 4a — new shape: wave-scope action rows.
+  // batch_id → wave_id → wave-scope action of type matching /vin/i in
+  // status='done'. Used to flip the batch's vinPhase to post_vin once
+  // ops marks the wave's VIN action done in /action-center-v2.
+  // Returns batch ids (denormalised from wave) so the downstream
+  // `vinDoneBatches` set logic stays unchanged.
+  const vinWaveActionDone = await (async () => {
+    try {
+      return await db
+        .select({ batchId: batches.id })
+        .from(actionsTable)
+        .innerJoin(actionTypes, eq(actionsTable.actionTypeId, actionTypes.id))
+        .innerJoin(waves,       eq(actionsTable.scopeId, waves.id))
+        .innerJoin(batches,     eq(batches.waveId, waves.id))
+        .where(and(
+          eq(actionsTable.scope, "wave"),
+          eq(actionsTable.status, "done"),
+          sql`LOWER(${actionTypes.name}) LIKE '%vin%'`,
+        ));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table|no such column/i.test(msg)) return [];
+      throw err;
+    }
+  })();
   const delivered = await db
     .select({
       batchId:     batchActions.batchId,
@@ -275,11 +306,15 @@ export async function getDashboardRows(period: ReportPeriod = "all"): Promise<Da
   for (const m of delivered) {
     if (m.completedAt) deliveredByBatch.set(m.batchId, m.completedAt.slice(0, 10));
   }
-  // A batch is "vin done" if it has at least one done VIN-related stage.
-  // We're permissive (any stage matching "vin") rather than checking a
-  // specific canonical stage id — admin renames + ordering shouldn't
-  // strand this signal.
-  const vinDoneBatches = new Set<number>(vinStageDone.map((a) => a.batchId));
+  // A batch is "vin done" if it has at least one done VIN-related stage
+  // OR its wave has a done VIN-named wave-scope action (new shape). The
+  // two sources are unioned because the source of truth shifts when ops
+  // moves from legacy /action-center to /action-center-v2 — both must
+  // stay live until Phase 5 drops the legacy tables.
+  const vinDoneBatches = new Set<number>([
+    ...vinStageDone.map((a) => a.batchId),
+    ...vinWaveActionDone.map((a) => a.batchId),
+  ]);
 
   return rows.map(({ b, dealerName }) =>
     buildRow(b, dealerName, deliveredByBatch.get(b.id), vinDoneBatches.has(b.id)),
@@ -332,10 +367,13 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
     .orderBy(asc(actionTypes.sortOrder));
 
   // VIN chase stages on this batch — moved out of action_types in
-  // PR #53. Each done stage becomes a tick on the Reality track AND
-  // a row in the activity table, alongside batch_actions. Defensive
-  // try/catch for pre-migration DBs.
-  const vinStageRows = await (async () => {
+  // PR #53, and AGAIN into wave-scope rows on the `actions` table in
+  // the phase-2 restructure. For new batches (wave_id set) we skip
+  // batch_vin_stages entirely and use the wave-scope reads further
+  // down. For legacy batches (wave_id null) we keep reading
+  // batch_vin_stages so the drawer still shows their chain.
+  const isNewBatch = b.waveId != null;
+  const vinStageRows = isNewBatch ? [] : await (async () => {
     try {
       return await db
         .select({
@@ -354,6 +392,49 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (/no such table/i.test(msg)) return [];
+      throw err;
+    }
+  })();
+
+  // Phase 4a — pull scope-aware actions for new batches: the batch's
+  // wave-scope rows (VIN chase) and its PO's po-scope rows (internal
+  // phase). These didn't exist for legacy batches, so we skip the
+  // query entirely when wave_id is null. Batch-scope rows are
+  // intentionally omitted — they duplicate batch_actions for new batches
+  // (Phase 2 double-writes them) and we'd double-count if both ran.
+  const scopedActionRows = !isNewBatch ? [] : await (async () => {
+    try {
+      const waveRow = await db
+        .select({ id: waves.id, poId: waves.poId })
+        .from(waves).where(eq(waves.id, b.waveId!)).limit(1);
+      if (waveRow.length === 0) return [];
+      const { id: waveId, poId } = waveRow[0];
+      return await db
+        .select({
+          scope:           actionsTable.scope,
+          status:          actionsTable.status,
+          completedAt:     actionsTable.completedAt,
+          expectedDate:    actionsTable.expectedDate,
+          notes:           actionsTable.notes,
+          actionTypeName:  actionTypes.name,
+          waitingLabel:    actionTypes.waitingLabel,
+          doneLabel:       actionTypes.doneLabel,
+          sortOrder:       actionTypes.sortOrder,
+          departmentName:  departments.name,
+          stakeholderName: stakeholders.name,
+        })
+        .from(actionsTable)
+        .innerJoin(actionTypes,  eq(actionsTable.actionTypeId, actionTypes.id))
+        .leftJoin(departments,   eq(actionsTable.departmentId, departments.id))
+        .leftJoin(stakeholders,  eq(actionsTable.assignedStakeholderId, stakeholders.id))
+        .where(or(
+          and(eq(actionsTable.scope, "wave"), eq(actionsTable.scopeId, waveId)),
+          and(eq(actionsTable.scope, "po"),   eq(actionsTable.scopeId, poId)),
+        ))
+        .orderBy(asc(actionTypes.sortOrder));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such table|no such column/i.test(msg)) return [];
       throw err;
     }
   })();
@@ -416,6 +497,30 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
     });
   }
 
+  // Phase 4a — wave-scope + po-scope actions → activity rows. Same
+  // delay math as batch_actions (done with expected → completed minus
+  // expected; open past-due → today minus expected; else null).
+  for (const s of scopedActionRows) {
+    const completedDateOnly = s.completedAt ? s.completedAt.slice(0, 10) : null;
+    let delayDays: number | null = null;
+    if (s.status === "done" && completedDateOnly && s.expectedDate) {
+      delayDays = daysBetween(completedDateOnly, s.expectedDate);
+    } else if ((s.status === "waiting" || s.status === "blocked") && s.expectedDate && todayIso > s.expectedDate) {
+      delayDays = daysBetween(todayIso, s.expectedDate);
+    }
+    activity.push({
+      actionTypeName: s.actionTypeName,
+      actionLabel:    s.status === "done" ? s.doneLabel : s.waitingLabel,
+      status:         s.status as TimelineActivity["status"],
+      departmentName: s.departmentName ?? null,
+      stakeholderName:s.stakeholderName ?? null,
+      expectedDate:   s.expectedDate ?? null,
+      completedAt:    s.completedAt ?? null,
+      delayDays,
+      notes:          s.notes ?? null,
+    });
+  }
+
   // App Listing → activity row (when set). One synthetic row matching
   // the TimelineActivity shape so the UI doesn't need a special case.
   if (b.appListedAt) {
@@ -474,9 +579,21 @@ export async function getTimelineData(batchCode: string): Promise<TimelineData |
   const realityFromAppListing = b.appListedAt
     ? [{ date: b.appListedAt.slice(0, 10), label: "Listed in app", delayDays: 0 }]
     : [];
+  // Phase 4a — wave/po-scope completed actions become Reality ticks too.
+  // Same exclusion as batch_actions: skip Delivery (it's the end-of-track
+  // marker rendered separately) — though it's not wave/po scope anyway,
+  // the filter is cheap and future-proofs against admin reconfiguring.
+  const realityFromScoped = scopedActionRows
+    .filter((s) => s.status === "done" && s.completedAt && s.actionTypeName !== "Delivery")
+    .map((s) => {
+      const completedIso = s.completedAt!.slice(0, 10);
+      const delayDays = s.expectedDate ? daysBetween(completedIso, s.expectedDate) : 0;
+      return { date: completedIso, label: s.doneLabel, delayDays };
+    });
   const realityActions = [
     ...realityFromActions,
     ...realityFromVinStages,
+    ...realityFromScoped,
     ...realityFromAppListing,
   ].sort((a, b) => a.date.localeCompare(b.date));
 
