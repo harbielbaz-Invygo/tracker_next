@@ -16,6 +16,7 @@ import { db } from "@/lib/db";
 import {
   pos, waves, batches, dealers,
   actions as actionsTable, actionTypes, actionDependencies, departments, stakeholders,
+  batchDateRevisions,
 } from "@/lib/db/schema";
 
 export type ScopedActionStatus = "waiting" | "blocked" | "done" | "skipped";
@@ -74,6 +75,19 @@ export interface BatchNode {
   unitPriceSar:       number | null;
   /** Pre-computed requestedQuantity × unitPriceSar for the value chip. */
   totalValueSar:      number | null;
+  /**
+   * Chronological shift history sourced from batch_date_revisions.
+   * Earliest first. Each entry's `previousDate` is the date the batch
+   * was tracking BEFORE that shift; the first entry's previousDate is
+   * the original promised date (the one captured at Intake / Forecast).
+   */
+  shiftHistory:       {
+    /** ISO datetime when ops applied the shift. */
+    revisedAt:    string;
+    previousDate: string;
+    newDate:      string;
+    reason:       string | null;
+  }[];
   actions:            ScopedActionDetail[]; // scope='batch' for this batch
 }
 
@@ -162,7 +176,7 @@ export interface ActionCenterTree {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, revisionRows] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     db.select().from(batches),
@@ -200,7 +214,44 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     db.select({ id: stakeholders.id, name: stakeholders.name, departmentId: stakeholders.departmentId, sortOrder: stakeholders.sortOrder })
       .from(stakeholders)
       .orderBy(asc(stakeholders.sortOrder)),
+    (async () => {
+      // Defensive: pre-Phase-A DBs don't have batch_date_revisions yet.
+      // Wrapped so the missing-table case falls back to [] rather
+      // than 500-ing the whole Action Center page.
+      try {
+        return await db.select({
+          batchId:               batchDateRevisions.batchId,
+          revisedAt:             batchDateRevisions.revisedAt,
+          previousProjectedDate: batchDateRevisions.previousProjectedDate,
+          newProjectedDate:      batchDateRevisions.newProjectedDate,
+          reason:                batchDateRevisions.reason,
+        })
+          .from(batchDateRevisions)
+          .orderBy(asc(batchDateRevisions.revisedAt));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/no such table/i.test(msg)) return [] as {
+          batchId: number; revisedAt: string | null;
+          previousProjectedDate: string; newProjectedDate: string;
+          reason: string | null;
+        }[];
+        throw err;
+      }
+    })(),
   ]);
+
+  // Index shift history by batch — earliest first.
+  const shiftHistoryByBatch = new Map<number, BatchNode["shiftHistory"]>();
+  for (const r of revisionRows) {
+    const arr = shiftHistoryByBatch.get(r.batchId) ?? [];
+    arr.push({
+      revisedAt:    r.revisedAt ?? "",
+      previousDate: r.previousProjectedDate,
+      newDate:      r.newProjectedDate,
+      reason:       r.reason ?? null,
+    });
+    shiftHistoryByBatch.set(r.batchId, arr);
+  }
 
   // Resolve "this action_type depends on these parent action_types".
   // We keep both id and name so we can filter to UNSATISFIED parents
@@ -372,6 +423,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           colorSummary:                  b.colorSummary ?? null,
           unitPriceSar:                  b.unitPriceSar ?? null,
           totalValueSar,
+          shiftHistory:                  shiftHistoryByBatch.get(b.id) ?? [],
           actions:            actionsByKey.get(`batch:${b.id}`) ?? [],
         };
       });

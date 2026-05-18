@@ -1725,6 +1725,14 @@ function WindowActionBar({
         )}
       </div>
 
+      {/* SHIFT HISTORY — sourced from batch_date_revisions per batch.
+          Lists each shift that brought a batch into this window in
+          chronological order so ops can see the date-change audit
+          trail without leaving the page. Batches with no shifts get
+          a single "Promised <date> (no shifts)" line. */}
+      <ShiftHistoryBlock wave={wave} />
+
+
       {/* Row 1: bulk closure cluster — single horizontal line, three
           equally-weighted controls. */}
       <div className="flex flex-wrap gap-1.5 px-3 py-2 border-b border-brand/30">
@@ -1859,6 +1867,80 @@ function ActionChip({
       <span aria-hidden>{icon}</span>
       <span className="font-medium truncate max-w-[10rem]">{label}</span>
     </button>
+  );
+}
+
+/**
+ * Renders the shift history for every batch currently in a delivery
+ * window. Each batch becomes one paragraph:
+ *
+ *   PO-0117-Wallan-1 — Promised 2026-05-10
+ *      1st shift on 2026-05-15 → new date 2026-06-01  ·  reason …
+ *      2nd shift on 2026-05-20 → new date 2026-06-15
+ *
+ * Batches with no shifts render a single "(no shifts yet)" line so
+ * the section still acknowledges them. The whole block hides when
+ * the window has no batches.
+ */
+function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
+  if (wave.batches.length === 0) return null;
+
+  function ordinal(n: number): string {
+    const s = ["th", "st", "nd", "rd"];
+    const v = n % 100;
+    return n + (s[(v - 20) % 10] || s[v] || s[0]);
+  }
+
+  return (
+    <div className="px-3 py-2 border-t border-brand/30 bg-white/60 text-[0.7rem]">
+      <p className="text-[0.6rem] font-bold uppercase tracking-wide text-brand-dark mb-1">
+        Shift history
+      </p>
+      <div className="space-y-1.5">
+        {wave.batches.map((b) => {
+          // Original promise = first revision's previousDate when any
+          // shifts exist; otherwise the batch's current promisedDate.
+          const original = b.shiftHistory.length > 0
+            ? b.shiftHistory[0].previousDate
+            : b.promisedDate;
+          return (
+            <div key={b.id} className="leading-tight">
+              <p className="flex flex-wrap items-baseline gap-x-1.5">
+                <code className="text-[0.65rem] text-midnight font-mono">{b.batchCode}</code>
+                <span className="text-ink-300">·</span>
+                <span className="text-ink-600">
+                  Promised <span className="text-midnight tabular-nums">{original}</span>
+                </span>
+                {b.shiftHistory.length === 0 && (
+                  <span className="text-ink-400 italic">(no shifts yet)</span>
+                )}
+              </p>
+              {b.shiftHistory.length > 0 && (
+                <ul className="ml-4 mt-0.5 space-y-0.5">
+                  {b.shiftHistory.map((s, idx) => {
+                    const shiftedOn = s.revisedAt
+                      ? s.revisedAt.slice(0, 10)
+                      : "—";
+                    return (
+                      <li key={`${b.id}:${idx}`} className="text-ink-600">
+                        <span className="text-gold-dark font-medium">{ordinal(idx + 1)} shift</span>
+                        {" on "}
+                        <span className="tabular-nums text-midnight">{shiftedOn}</span>
+                        {" → new date "}
+                        <span className="tabular-nums text-midnight">{s.newDate}</span>
+                        {s.reason && (
+                          <span className="text-ink-500 italic ml-1">· {s.reason}</span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
