@@ -165,6 +165,38 @@ export default function ActionCenterTreeShell({ tree }: Props) {
       setBusyActionId(null);
     }
   }
+
+  /**
+   * Bulk apply a status to a list of action ids. Hits /api/scope-action
+   * sequentially (small N, transactional cost per call) and refreshes
+   * once at the end. Used by the wave-header "Mark all done" / "Skip
+   * remaining" buttons and the per-wave "Deliver all ready batches"
+   * bulk action.
+   */
+  async function bulkSetStatus(actionIds: number[], status: Status): Promise<void> {
+    if (actionIds.length === 0) return;
+    setMutationError(null);
+    setCascadeFlash(null);
+    let touched = 0;
+    try {
+      for (const id of actionIds) {
+        setBusyActionId(id);
+        const res = await fetch("/api/scope-action", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ actionId: id, status }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        touched++;
+      }
+      setCascadeFlash(`${touched} action${touched === 1 ? "" : "s"} → ${status}`);
+      router.refresh();
+    } catch (e) {
+      setMutationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyActionId(null);
+    }
+  }
   // Cascade flash intentionally sticks — it clears on the next action
   // mutation (see setActionStatus / runBatchOp) or on dismiss-click in
   // the banner. The earlier 4 s timer cleared the message before slow
@@ -212,6 +244,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
             tree={tree}
             busyActionId={busyActionId}
             onChangeStatus={setActionStatus}
+            onBulkSetStatus={bulkSetStatus}
             mutationError={mutationError}
             cascadeFlash={cascadeFlash}
             onDismissFlash={() => setCascadeFlash(null)}
@@ -226,6 +259,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
             busyActionId={busyActionId}
             busyBatchId={busyBatchId}
             onChangeStatus={setActionStatus}
+            onBulkSetStatus={bulkSetStatus}
             onBatchOp={runBatchOp}
             mutationError={mutationError}
             cascadeFlash={cascadeFlash}
@@ -251,6 +285,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
 interface MutationProps {
   busyActionId:   number | null;
   onChangeStatus: (actionId: number, status: Status) => void;
+  onBulkSetStatus: (actionIds: number[], status: Status) => Promise<void>;
   mutationError:  string | null;
 }
 
@@ -284,6 +319,11 @@ function DealerTree({
   const [expandedDealers, setExpandedDealers] = useState<Set<number>>(
     () => new Set(tree.dealers.map((d) => d.id)),
   );
+  // Free-text filter (PO #, dealer, batch code substring) + sort
+  // toggle. Both are local UI state — no need to persist for now.
+  const [query, setQuery] = useState<string>("");
+  const [sortMode, setSortMode] = useState<"alpha" | "overdue">("alpha");
+
   // Memoised so we don't recompute on every render — same value for
   // the whole session view (overdue is a date-only comparison).
   const today = useMemo(() => todayIso(), []);
@@ -312,13 +352,70 @@ function DealerTree({
     });
   }
 
+  // Filter + sort applied to the dealer/PO list. The query matches
+  // against PO number, dealer name, or any batch code under the PO.
+  // sortMode='overdue' surfaces the dealers/POs with the most stale
+  // work first — useful when the tree gets long.
+  const q = query.trim().toLowerCase();
+  const filteredDealers = useMemo(() => {
+    const matchPo = (p: PoNode, dealerName: string) => {
+      if (!q) return true;
+      if (p.poNumber.toLowerCase().includes(q)) return true;
+      if (dealerName.toLowerCase().includes(q)) return true;
+      for (const w of p.waves) for (const b of w.batches) {
+        if (b.batchCode.toLowerCase().includes(q)) return true;
+      }
+      return false;
+    };
+    return tree.dealers
+      .map((d) => ({ ...d, pos: d.pos.filter((p) => matchPo(p, d.name)) }))
+      .filter((d) => d.pos.length > 0)
+      .map((d) => {
+        if (sortMode === "overdue") {
+          const sorted = d.pos.slice().sort((a, b) => {
+            const ao = rollupPoCounts(a, today).overdue;
+            const bo = rollupPoCounts(b, today).overdue;
+            return bo - ao;
+          });
+          return { ...d, pos: sorted };
+        }
+        return d;
+      });
+  }, [tree.dealers, q, sortMode, today]);
+
   return (
     <aside className="border border-ink-200 rounded-lg bg-white overflow-hidden flex flex-col">
-      <header className="px-3 py-2.5 border-b border-ink-200 shrink-0 flex items-baseline justify-between">
-        <h3 className="text-sm font-bold text-midnight">Dealers ▸ POs</h3>
-        <span className="text-xs text-ink-500 tabular-nums">
-          {tree.dealers.length} {tree.dealers.length === 1 ? "dealer" : "dealers"}
-        </span>
+      <header className="px-3 py-2.5 border-b border-ink-200 shrink-0 space-y-2">
+        <div className="flex items-baseline justify-between">
+          <h3 className="text-sm font-bold text-midnight">Dealers ▸ POs</h3>
+          <span className="text-xs text-ink-500 tabular-nums">
+            {filteredDealers.length} {filteredDealers.length === 1 ? "dealer" : "dealers"}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search PO / dealer / batch…"
+            className="flex-1 text-xs px-2 py-1 border border-ink-300 rounded"
+          />
+          <button
+            type="button"
+            onClick={() => setSortMode((m) => m === "alpha" ? "overdue" : "alpha")}
+            title={sortMode === "alpha"
+              ? "Sorting alphabetically — click to surface overdue first"
+              : "Sorting most-overdue first — click to revert to alphabetical"}
+            className={cn(
+              "text-[0.7rem] px-2 py-1 rounded border whitespace-nowrap",
+              sortMode === "overdue"
+                ? "border-flame text-flame-dark bg-flame-pale/30"
+                : "border-ink-300 text-ink-600 hover:bg-ink-50",
+            )}
+          >
+            {sortMode === "alpha" ? "A→Z" : "⚠ Overdue"}
+          </button>
+        </div>
       </header>
 
       {/* "Mine" cross-PO inbox — lives at the top of the tree as a
@@ -347,7 +444,7 @@ function DealerTree({
       </button>
 
       <ul className="flex-1 overflow-auto">
-        {tree.dealers.map((d) => {
+        {filteredDealers.map((d) => {
           const expanded = expandedDealers.has(d.id);
           return (
             <li key={d.id} className="border-b border-ink-200/60 last:border-b-0">
@@ -412,8 +509,10 @@ function DealerTree({
             </li>
           );
         })}
-        {tree.dealers.length === 0 && (
-          <li className="px-3 py-8 text-sm text-ink-500 text-center">No POs yet.</li>
+        {filteredDealers.length === 0 && (
+          <li className="px-3 py-8 text-sm text-ink-500 text-center">
+            {q ? `No POs match "${query}".` : "No POs yet."}
+          </li>
         )}
       </ul>
     </aside>
@@ -426,7 +525,7 @@ function DealerTree({
 
 function PoDrawer({
   po, dealerName, view, onChangeView,
-  busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  busyActionId, busyBatchId, onChangeStatus, onBulkSetStatus, onBatchOp,
   mutationError, cascadeFlash, onDismissFlash,
   expandedWaveIds, onToggleWave,
   inlineForm, onOpenInlineForm, onCloseInlineForm,
@@ -502,6 +601,7 @@ function PoDrawer({
             busyActionId={busyActionId}
             busyBatchId={busyBatchId}
             onChangeStatus={onChangeStatus}
+            onBulkSetStatus={onBulkSetStatus}
             onBatchOp={onBatchOp}
             expandedWaveIds={expandedWaveIds}
             onToggleWave={onToggleWave}
@@ -531,7 +631,7 @@ interface MineRow {
 }
 
 function MineView({
-  tree, busyActionId, onChangeStatus,
+  tree, busyActionId, onChangeStatus, onBulkSetStatus,
   mutationError, cascadeFlash, onDismissFlash,
   onJumpToPo,
 }: {
@@ -539,7 +639,7 @@ function MineView({
   cascadeFlash: string | null;
   onDismissFlash: () => void;
   onJumpToPo: (poId: number) => void;
-} & Pick<MutationProps, "busyActionId" | "onChangeStatus" | "mutationError">) {
+} & Pick<MutationProps, "busyActionId" | "onChangeStatus" | "onBulkSetStatus" | "mutationError">) {
   const today = todayIso();
 
   // Department filter — operators in Pricing should see Pricing first.
@@ -638,7 +738,7 @@ function MineView({
         </p>
       </header>
 
-      {/* Filters */}
+      {/* Filters + bulk-apply */}
       <div className="px-4 py-2 border-b border-ink-200 shrink-0 bg-white flex flex-wrap gap-2 items-center text-xs">
         <span className="text-ink-500">Filter:</span>
         <select
@@ -664,6 +764,30 @@ function MineView({
             className="text-[0.7rem] text-brand-dark underline ml-1"
           >
             clear
+          </button>
+        )}
+        {/* Bulk "Mark all visible done" — only active when a filter is
+            applied; closing the safety guard against accidentally
+            settling every action across the system in one click. */}
+        {(deptFilter || stakeholderFilter) && sorted.length > 0 && (
+          <button
+            type="button"
+            onClick={() => {
+              const waitingIds = sorted
+                .filter((r) => r.action.status === "waiting")
+                .map((r) => r.action.id);
+              if (waitingIds.length === 0) {
+                window.alert("No waiting actions in the current filter (blocked rows are excluded from bulk apply).");
+                return;
+              }
+              const ok = window.confirm(
+                `Mark ${waitingIds.length} filtered action${waitingIds.length === 1 ? "" : "s"} as done?\n\nThis cascades through any dependent actions.`,
+              );
+              if (ok) onBulkSetStatus(waitingIds, "done");
+            }}
+            className="ml-auto text-[0.7rem] px-2 py-0.5 rounded border border-green text-green-dark hover:bg-green-pale"
+          >
+            ✓ Mark filtered done
           </button>
         )}
       </div>
@@ -1019,10 +1143,10 @@ function Column({
 // ─────────────────────────────────────────────────────────────
 
 function VinChaseView({
-  po, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  po, busyActionId, busyBatchId, onChangeStatus, onBulkSetStatus, onBatchOp,
   expandedWaveIds, onToggleWave, inlineForm, onOpenInlineForm, onCloseInlineForm,
 }: { po: PoNode }
-  & Pick<MutationProps, "busyActionId" | "onChangeStatus">
+  & Pick<MutationProps, "busyActionId" | "onChangeStatus" | "onBulkSetStatus">
   & BatchOpProps
   & UiStateProps
 ) {
@@ -1043,6 +1167,7 @@ function VinChaseView({
           busyActionId={busyActionId}
           busyBatchId={busyBatchId}
           onChangeStatus={onChangeStatus}
+          onBulkSetStatus={onBulkSetStatus}
           onBatchOp={onBatchOp}
           expandedWaveIds={expandedWaveIds}
           onToggleWave={onToggleWave}
@@ -1056,10 +1181,10 @@ function VinChaseView({
 }
 
 function WaveSection({
-  wave, internalPhaseDone, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  wave, internalPhaseDone, busyActionId, busyBatchId, onChangeStatus, onBulkSetStatus, onBatchOp,
   expandedWaveIds, onToggleWave, inlineForm, onOpenInlineForm, onCloseInlineForm,
 }: { wave: WaveNode; internalPhaseDone: boolean }
-  & Pick<MutationProps, "busyActionId" | "onChangeStatus">
+  & Pick<MutationProps, "busyActionId" | "onChangeStatus" | "onBulkSetStatus">
   & BatchOpProps
   & UiStateProps
 ) {
@@ -1072,37 +1197,70 @@ function WaveSection({
   // progress without expanding every wave.
   const doneCount    = wave.actions.filter((a) => a.status === "done").length;
   const blockedCount = wave.actions.filter((a) => a.status === "blocked").length;
+  const waitingCount = wave.actions.filter((a) => a.status === "waiting").length;
+
+  function handleMarkAllDone(e: React.MouseEvent) {
+    // Stop the click from also toggling the wave's expanded state —
+    // the button is logically nested inside the toggle row.
+    e.stopPropagation();
+    const ids = wave.actions
+      .filter((a) => a.status === "waiting")
+      .map((a) => a.id);
+    if (ids.length === 0) return;
+    const ok = window.confirm(
+      `Mark ${ids.length} waiting wave-action${ids.length === 1 ? "" : "s"} done?\n\n` +
+      `Blocked rows are excluded — unblock them first if they should also flip.`,
+    );
+    if (ok) onBulkSetStatus(ids, "done");
+  }
+
   return (
     <section className="border border-ink-200 rounded-md bg-ink-50/30 overflow-hidden">
-      <button
-        type="button"
+      {/* Header row uses a wrapper <div> + nested <button> roles so we
+          can place an inline "Mark all done" affordance next to the
+          toggle without nesting <button>s (invalid HTML). */}
+      <div
+        role="button"
+        tabIndex={0}
         onClick={setExpanded}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded(); } }}
         aria-expanded={expanded}
-        className="w-full text-left px-3 py-2 border-b border-ink-200 bg-white hover:bg-ink-50 transition-colors"
+        className="w-full px-3 py-2 border-b border-ink-200 bg-white hover:bg-ink-50 transition-colors cursor-pointer flex flex-wrap items-baseline gap-x-2 gap-y-0.5"
       >
-        <p className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span aria-hidden className="text-ink-400 text-xs">
-            {expanded ? "▾" : "▸"}
+        <span aria-hidden className="text-ink-400 text-xs">
+          {expanded ? "▾" : "▸"}
+        </span>
+        <span className="text-sm font-semibold text-midnight">📅 Wave · {wave.availabilityDate}</span>
+        <span className="text-xs text-ink-500 tabular-nums">
+          {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
+        </span>
+        {wave.opsExpectedDate && wave.opsExpectedDate !== wave.availabilityDate && (
+          <span className="text-xs text-gold-dark tabular-nums">
+            · ops projecting {wave.opsExpectedDate}
           </span>
-          <span className="text-sm font-semibold text-midnight">📅 Wave · {wave.availabilityDate}</span>
-          <span className="text-xs text-ink-500 tabular-nums">
-            {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
+        )}
+        {wave.actions.length > 0 && (
+          <span className="text-[0.65rem] text-ink-500 tabular-nums">
+            · {doneCount}/{wave.actions.length} done
+            {blockedCount > 0 && (
+              <span className="text-flame-dark ml-1">· {blockedCount} blocked</span>
+            )}
           </span>
-          {wave.opsExpectedDate && wave.opsExpectedDate !== wave.availabilityDate && (
-            <span className="text-xs text-gold-dark tabular-nums">
-              · ops projecting {wave.opsExpectedDate}
-            </span>
-          )}
-          {wave.actions.length > 0 && (
-            <span className="text-[0.65rem] text-ink-500 tabular-nums ml-auto">
-              {doneCount}/{wave.actions.length} done
-              {blockedCount > 0 && (
-                <span className="text-flame-dark ml-1">· {blockedCount} blocked</span>
-              )}
-            </span>
-          )}
-        </p>
-      </button>
+        )}
+        {/* Wave-level bulk-apply: when expanded AND ≥ 1 waiting action,
+            give ops a one-click "all waiting → done" affordance. Hidden
+            on closed-status waves to avoid clutter. */}
+        {expanded && waitingCount > 0 && (
+          <button
+            type="button"
+            onClick={handleMarkAllDone}
+            onKeyDown={(e) => e.stopPropagation()}
+            className="ml-auto text-[0.7rem] px-2 py-0.5 rounded border border-green text-green-dark hover:bg-green-pale"
+          >
+            ✓ Mark all wave actions done ({waitingCount})
+          </button>
+        )}
+      </div>
 
       {expanded && (
         <div className="p-2 space-y-2">
