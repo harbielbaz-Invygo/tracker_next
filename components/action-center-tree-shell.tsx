@@ -73,8 +73,35 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   const [busyActionId,  setBusyActionId]  = useState<number | null>(null);
   const [busyBatchId,   setBusyBatchId]   = useState<number | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
-  /** Transient toast — shows cascade results ("2 actions unblocked"). */
+  /** Cascade flash sticks until the next action fires (no 4 s timer). */
   const [cascadeFlash,  setCascadeFlash]  = useState<string | null>(null);
+  /**
+   * Set of expanded wave ids — lifted from WaveSection so a router.refresh
+   * doesn't collapse waves the operator was working in. Persists for the
+   * life of this component instance. Could be moved to URL state if
+   * deep-linking is ever needed.
+   */
+  const [expandedWaveIds, setExpandedWaveIds] = useState<Set<number>>(new Set());
+  function toggleWave(id: number) {
+    setExpandedWaveIds((curr) => {
+      const next = new Set(curr);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  /**
+   * Batch row that's showing an inline form (Shift date or Cancel) +
+   * which form is open. Only one inline form per drawer at a time —
+   * keeps focus, prevents accidental edits to other batches.
+   */
+  const [inlineForm, setInlineForm] = useState<
+    | { batchId: number; kind: "shift" | "cancel" }
+    | null
+  >(null);
+  function openInlineForm(batchId: number, kind: "shift" | "cancel") {
+    setInlineForm({ batchId, kind });
+  }
+  function closeInlineForm() { setInlineForm(null); }
 
   /**
    * Generic batch-level mutation runner. Used by the per-batch buttons
@@ -131,13 +158,10 @@ export default function ActionCenterTreeShell({ tree }: Props) {
       setBusyActionId(null);
     }
   }
-  // Auto-clear the cascade flash after a few seconds so it doesn't
-  // linger on screen forever.
-  useEffect(() => {
-    if (cascadeFlash == null) return;
-    const t = window.setTimeout(() => setCascadeFlash(null), 4000);
-    return () => window.clearTimeout(t);
-  }, [cascadeFlash]);
+  // Cascade flash intentionally sticks — it clears on the next action
+  // mutation (see setActionStatus / runBatchOp) or on dismiss-click in
+  // the banner. The earlier 4 s timer cleared the message before slow
+  // readers could scan it.
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(DRAWER_VIEW_KEY);
@@ -193,6 +217,12 @@ export default function ActionCenterTreeShell({ tree }: Props) {
             onBatchOp={runBatchOp}
             mutationError={mutationError}
             cascadeFlash={cascadeFlash}
+            onDismissFlash={() => setCascadeFlash(null)}
+            expandedWaveIds={expandedWaveIds}
+            onToggleWave={toggleWave}
+            inlineForm={inlineForm}
+            onOpenInlineForm={openInlineForm}
+            onCloseInlineForm={closeInlineForm}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-ink-500 text-center px-8">
@@ -215,6 +245,16 @@ interface MutationProps {
 interface BatchOpProps {
   busyBatchId: number | null;
   onBatchOp:   (batchId: number, url: string, body: unknown) => Promise<void>;
+}
+
+/** State for the persisted wave-expansion + inline forms, threaded
+ *  from the top-level component down to BatchRow. */
+interface UiStateProps {
+  expandedWaveIds: Set<number>;
+  onToggleWave: (id: number) => void;
+  inlineForm: { batchId: number; kind: "shift" | "cancel" } | null;
+  onOpenInlineForm:  (batchId: number, kind: "shift" | "cancel") => void;
+  onCloseInlineForm: () => void;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -332,14 +372,17 @@ function DealerTree({
 function PoDrawer({
   po, dealerName, view, onChangeView,
   busyActionId, busyBatchId, onChangeStatus, onBatchOp,
-  mutationError, cascadeFlash,
+  mutationError, cascadeFlash, onDismissFlash,
+  expandedWaveIds, onToggleWave,
+  inlineForm, onOpenInlineForm, onCloseInlineForm,
 }: {
   po: PoNode;
   dealerName: string;
   view: DrawerView;
   onChangeView: (v: DrawerView) => void;
   cascadeFlash: string | null;
-} & MutationProps & BatchOpProps) {
+  onDismissFlash: () => void;
+} & MutationProps & BatchOpProps & UiStateProps) {
   return (
     <>
       {/* Header */}
@@ -381,9 +424,20 @@ function PoDrawer({
           </p>
         )}
         {cascadeFlash && (
-          <p role="status" className="text-xs text-green-dark bg-green-pale border border-green px-3 py-2 rounded-md">
-            ✓ {cascadeFlash}
-          </p>
+          <div
+            role="status"
+            className="flex items-center justify-between text-xs text-green-dark bg-green-pale border border-green px-3 py-2 rounded-md"
+          >
+            <span>✓ {cascadeFlash}</span>
+            <button
+              type="button"
+              onClick={onDismissFlash}
+              aria-label="Dismiss"
+              className="text-green-dark/70 hover:text-green-dark text-[0.85rem] leading-none px-1"
+            >
+              ✕
+            </button>
+          </div>
         )}
         {view === "internal" ? (
           <InternalPhaseView po={po} busyActionId={busyActionId} onChangeStatus={onChangeStatus} />
@@ -394,6 +448,11 @@ function PoDrawer({
             busyBatchId={busyBatchId}
             onChangeStatus={onChangeStatus}
             onBatchOp={onBatchOp}
+            expandedWaveIds={expandedWaveIds}
+            onToggleWave={onToggleWave}
+            inlineForm={inlineForm}
+            onOpenInlineForm={onOpenInlineForm}
+            onCloseInlineForm={onCloseInlineForm}
           />
         )}
       </div>
@@ -606,9 +665,11 @@ function Column({
 
 function VinChaseView({
   po, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  expandedWaveIds, onToggleWave, inlineForm, onOpenInlineForm, onCloseInlineForm,
 }: { po: PoNode }
   & Pick<MutationProps, "busyActionId" | "onChangeStatus">
   & BatchOpProps
+  & UiStateProps
 ) {
   if (po.waves.length === 0) {
     return (
@@ -627,6 +688,11 @@ function VinChaseView({
           busyBatchId={busyBatchId}
           onChangeStatus={onChangeStatus}
           onBatchOp={onBatchOp}
+          expandedWaveIds={expandedWaveIds}
+          onToggleWave={onToggleWave}
+          inlineForm={inlineForm}
+          onOpenInlineForm={onOpenInlineForm}
+          onCloseInlineForm={onCloseInlineForm}
         />
       ))}
     </div>
@@ -635,13 +701,16 @@ function VinChaseView({
 
 function WaveSection({
   wave, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  expandedWaveIds, onToggleWave, inlineForm, onOpenInlineForm, onCloseInlineForm,
 }: { wave: WaveNode }
   & Pick<MutationProps, "busyActionId" | "onChangeStatus">
   & BatchOpProps
+  & UiStateProps
 ) {
-  // Waves are collapsed by default — a PO can have many waves and the
-  // VIN Chase view gets long fast. Click the header to open one.
-  const [expanded, setExpanded] = useState(false);
+  // Expansion state is lifted to the top-level shell so router.refresh()
+  // after a mutation doesn't collapse the wave the operator is working in.
+  const expanded = expandedWaveIds.has(wave.id);
+  const setExpanded = () => onToggleWave(wave.id);
   const totalCars = wave.batches.reduce((s, b) => s + b.requestedQuantity, 0);
   // Tiny status summary in the collapsed header so ops can scan
   // progress without expanding every wave.
@@ -651,7 +720,7 @@ function WaveSection({
     <section className="border border-ink-200 rounded-md bg-ink-50/30 overflow-hidden">
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={setExpanded}
         aria-expanded={expanded}
         className="w-full text-left px-3 py-2 border-b border-ink-200 bg-white hover:bg-ink-50 transition-colors"
       >
@@ -693,6 +762,9 @@ function WaveSection({
             busyBatchId={busyBatchId}
             onChangeStatus={onChangeStatus}
             onBatchOp={onBatchOp}
+            inlineForm={inlineForm}
+            onOpenInlineForm={onOpenInlineForm}
+            onCloseInlineForm={onCloseInlineForm}
           />
 
           {/* Wave-scope actions — flat list (no Blocked/Done columns
@@ -739,9 +811,11 @@ function WaveSection({
  */
 function BatchListInWave({
   wave, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  inlineForm, onOpenInlineForm, onCloseInlineForm,
 }: { wave: WaveNode }
   & Pick<MutationProps, "busyActionId" | "onChangeStatus">
   & BatchOpProps
+  & Pick<UiStateProps, "inlineForm" | "onOpenInlineForm" | "onCloseInlineForm">
 ) {
   // "Wave ready" = every wave-scope action is settled.
   const wavePending = wave.actions.filter(
@@ -765,6 +839,9 @@ function BatchListInWave({
             busyBatchId={busyBatchId}
             onChangeStatus={onChangeStatus}
             onBatchOp={onBatchOp}
+            inlineForm={inlineForm}
+            onOpenInlineForm={onOpenInlineForm}
+            onCloseInlineForm={onCloseInlineForm}
           />
         ))}
       </ul>
@@ -788,12 +865,14 @@ function BatchListInWave({
 function BatchRow({
   batch: b, wavePending, waveReady,
   busyActionId, busyBatchId, onChangeStatus, onBatchOp,
+  inlineForm, onOpenInlineForm, onCloseInlineForm,
 }: {
   batch: BatchNode;
   wavePending: number;
   waveReady: boolean;
 } & Pick<MutationProps, "busyActionId" | "onChangeStatus">
   & BatchOpProps
+  & Pick<UiStateProps, "inlineForm" | "onOpenInlineForm" | "onCloseInlineForm">
 ) {
   const delivery = b.actions.find((a) => a.actionTypeName === "Delivery");
   const alreadyDelivered = b.closedAt != null && b.closureReason === "delivered";
@@ -803,51 +882,16 @@ function BatchRow({
   const deliveryBusy = !!delivery && busyActionId === delivery.id;
   const batchBusy    = busyBatchId === b.id;
   const isListed = b.appListedAt != null;
+  const showShiftForm  = inlineForm?.batchId === b.id && inlineForm.kind === "shift";
+  const showCancelForm = inlineForm?.batchId === b.id && inlineForm.kind === "cancel";
 
-  // Confirm + run helpers — small inline prompts keep this self-
-  // contained. window.prompt / window.confirm are intentionally crude
-  // until we wire a proper modal pattern.
   function handleMarkListed() {
-    if (isListed) {
-      if (!window.confirm(`Un-list ${b.batchCode}? This clears the App Listing timestamp.`)) return;
-      onBatchOp(b.id, "/api/batch-app-listing", { batchId: b.id, appListedAt: null });
-    } else {
-      onBatchOp(b.id, "/api/batch-app-listing", {
-        batchId: b.id,
-        appListedAt: new Date().toISOString(),
-      });
-    }
-  }
-  function handleShiftDate() {
-    const current = "current projection";
-    const next = window.prompt(
-      `New projected availability date for ${b.batchCode} (${current})\n\nFormat: yyyy-mm-dd`,
-    );
-    if (!next) return;
-    const trimmed = next.trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-      window.alert("Date must be yyyy-mm-dd. Cancelled.");
-      return;
-    }
-    const reason = window.prompt("Reason for the shift (optional):") || null;
-    const bookingsStr = window.prompt("Bookings already held against this batch at the shift moment (optional, default 0):");
-    const bookingsAtShift = bookingsStr && /^\d+$/.test(bookingsStr.trim())
-      ? parseInt(bookingsStr.trim(), 10)
-      : 0;
-    onBatchOp(b.id, "/api/batch-shift", {
+    // Toggle the app-listed flag. No confirmation for the un-list path
+    // either — the action is reversible, so a one-click toggle is
+    // appropriate for daily use.
+    onBatchOp(b.id, "/api/batch-app-listing", {
       batchId: b.id,
-      newProjectedDate: trimmed,
-      bookingsAtShift,
-      reason,
-    });
-  }
-  function handleCancel() {
-    if (!window.confirm(`Cancel ${b.batchCode}? This closes the batch as cancelled.`)) return;
-    const note = window.prompt("Cancellation note (optional):") || null;
-    onBatchOp(b.id, "/api/batch-close", {
-      batchId: b.id,
-      reason: "cancelled",
-      note,
+      appListedAt: isListed ? null : new Date().toISOString(),
     });
   }
 
@@ -873,8 +917,8 @@ function BatchRow({
         )}
       </div>
 
-      {/* Action buttons — hide entirely once the batch is closed. */}
-      {!closed && (
+      {/* Action buttons — hide once the batch is closed. */}
+      {!closed && !showShiftForm && !showCancelForm && (
         <div className="flex flex-wrap gap-1.5 mt-1.5">
           <BatchOpBtn
             label={isListed ? "📱 Un-list" : "📱 Mark as listed"}
@@ -886,13 +930,13 @@ function BatchRow({
             label="📅 Shift date"
             tone="gold"
             busy={batchBusy}
-            onClick={handleShiftDate}
+            onClick={() => onOpenInlineForm(b.id, "shift")}
           />
           <BatchOpBtn
             label="🚫 Cancel"
             tone="flame"
             busy={batchBusy}
-            onClick={handleCancel}
+            onClick={() => onOpenInlineForm(b.id, "cancel")}
           />
           {delivery && (
             <button
@@ -921,7 +965,198 @@ function BatchRow({
           )}
         </div>
       )}
+
+      {showShiftForm && (
+        <ShiftDateForm
+          batch={b}
+          busy={batchBusy}
+          onSubmit={(payload) => {
+            onBatchOp(b.id, "/api/batch-shift", payload);
+            onCloseInlineForm();
+          }}
+          onCancel={onCloseInlineForm}
+        />
+      )}
+      {showCancelForm && (
+        <CancelBatchForm
+          batch={b}
+          busy={batchBusy}
+          onSubmit={(note) => {
+            onBatchOp(b.id, "/api/batch-close", {
+              batchId: b.id,
+              reason: "cancelled",
+              note: note || null,
+            });
+            onCloseInlineForm();
+          }}
+          onCancel={onCloseInlineForm}
+        />
+      )}
     </li>
+  );
+}
+
+/**
+ * Inline form for batches → Shift availability date. Date input
+ * uses the native date picker; reason + bookings are optional. The
+ * form replaces the legacy three-step window.prompt chain, which
+ * was unusable on a daily basis.
+ */
+function ShiftDateForm({
+  batch: b, busy, onSubmit, onCancel,
+}: {
+  batch: BatchNode;
+  busy: boolean;
+  onSubmit: (payload: { batchId: number; newProjectedDate: string; reason: string | null; bookingsAtShift: number }) => void;
+  onCancel: () => void;
+}) {
+  const [date, setDate] = useState<string>("");
+  const [reason, setReason] = useState<string>("");
+  const [bookings, setBookings] = useState<string>("0");
+  const [error, setError] = useState<string | null>(null);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      setError("Pick a valid date.");
+      return;
+    }
+    const n = parseInt(bookings, 10);
+    onSubmit({
+      batchId:          b.id,
+      newProjectedDate: date,
+      reason:           reason.trim() || null,
+      bookingsAtShift:  Number.isFinite(n) && n >= 0 ? n : 0,
+    });
+  }
+
+  return (
+    <form onSubmit={submit} className="mt-2 p-2 border border-gold rounded-md bg-gold-pale/30 space-y-2">
+      <p className="text-[0.7rem] font-medium text-gold-dark">📅 Shift availability date — {b.batchCode}</p>
+      <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2">
+        <label className="text-[0.65rem] text-ink-600 flex flex-col">
+          New date (yyyy-mm-dd)
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => { setDate(e.target.value); setError(null); }}
+            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5"
+            required
+          />
+        </label>
+        <label className="text-[0.65rem] text-ink-600 flex flex-col">
+          Bookings at shift
+          <input
+            type="number"
+            min="0"
+            value={bookings}
+            onChange={(e) => setBookings(e.target.value)}
+            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5 tabular-nums"
+          />
+        </label>
+        <label className="text-[0.65rem] text-ink-600 flex flex-col sm:col-span-3">
+          Reason (optional)
+          <input
+            type="text"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. Dealer VIN delayed by 5 days"
+            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5"
+          />
+        </label>
+      </div>
+      {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
+      <div className="flex justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-gold text-gold-dark hover:bg-gold-pale"
+        >
+          {busy ? "…" : "✓ Save shift"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * Inline confirm-to-cancel form. Requires ops to type the batch code
+ * to confirm — destructive actions deserve friction proportional to
+ * consequence. Free-text note carries through to /api/batch-close.
+ */
+function CancelBatchForm({
+  batch: b, busy, onSubmit, onCancel,
+}: {
+  batch: BatchNode;
+  busy: boolean;
+  onSubmit: (note: string) => void;
+  onCancel: () => void;
+}) {
+  const [confirmText, setConfirmText] = useState<string>("");
+  const [note, setNote] = useState<string>("");
+  const canConfirm = confirmText.trim() === b.batchCode;
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canConfirm) return;
+    onSubmit(note.trim());
+  }
+
+  return (
+    <form onSubmit={submit} className="mt-2 p-2 border border-flame rounded-md bg-flame-pale/30 space-y-2">
+      <p className="text-[0.7rem] font-bold text-flame-dark">
+        🚫 Cancel batch — irreversible
+      </p>
+      <p className="text-[0.65rem] text-ink-700 leading-snug">
+        Closing as cancelled removes the batch from active work. Type the batch
+        code <code className="font-mono text-midnight">{b.batchCode}</code> to confirm.
+      </p>
+      <input
+        type="text"
+        value={confirmText}
+        onChange={(e) => setConfirmText(e.target.value)}
+        placeholder={b.batchCode}
+        autoFocus
+        className="text-xs px-2 py-1 border border-ink-300 rounded w-full font-mono"
+      />
+      <input
+        type="text"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        placeholder="Cancellation reason (optional)"
+        className="text-xs px-2 py-1 border border-ink-300 rounded w-full"
+      />
+      <div className="flex justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+        >
+          Back
+        </button>
+        <button
+          type="submit"
+          disabled={!canConfirm || busy}
+          className={cn(
+            "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+            canConfirm
+              ? "border-flame text-flame-dark hover:bg-flame-pale"
+              : "border-ink-200 text-ink-400 cursor-not-allowed",
+          )}
+        >
+          {busy ? "…" : "🚫 Confirm cancel"}
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -969,7 +1204,10 @@ function ActionCard({
   // read-only; clicking buttons on them would attempt to update a
   // non-existent actions table row.
   const isSynthetic = action.id < 0;
-  const label = action.status === "done" ? action.doneLabel : action.waitingLabel;
+  // Always show the doneLabel base form. The card's column placement
+  // (Waiting / Blocked / Done) carries the status — repeating the
+  // word "Waiting" in front of every label was redundant.
+  const label = action.doneLabel || action.waitingLabel;
   const today = todayIso();
   const overdue = isOverdue(action, today);
 
@@ -1015,10 +1253,12 @@ function ActionCard({
           </p>
         )}
 
-        {/* Date — completed or due */}
+        {/* Date — completed (✓) or due (⏰). Differentiating prefixes
+            keep scan speed up: ✓ instantly reads as past tense, ⏰ as
+            future obligation, no need to also parse the colour. */}
         {action.status === "done" && action.completedAt && (
           <p className="text-[0.7rem] text-green-dark tabular-nums">
-            📅 {action.completedAt.slice(0, 10)}
+            ✓ {action.completedAt.slice(0, 10)}
           </p>
         )}
         {action.status !== "done" && action.status !== "skipped" && action.expectedDate && (
@@ -1026,7 +1266,7 @@ function ActionCard({
             "text-[0.7rem] tabular-nums",
             overdue ? "text-flame-dark font-medium" : "text-ink-500",
           )}>
-            📅 {action.expectedDate}
+            ⏰ {action.expectedDate}
           </p>
         )}
 
