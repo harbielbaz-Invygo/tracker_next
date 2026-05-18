@@ -21,6 +21,39 @@ import { cn } from "@/lib/utils";
 
 type Status = ScopedActionDetail["status"];
 
+/** Today's date in ISO yyyy-mm-dd — used for the overdue check. */
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+/**
+ * "Overdue" = expectedDate in the past AND the action isn't settled.
+ * Skipped/done rows aren't overdue regardless of date. Used to flag
+ * action rows in the drawer + roll up an at-risk count per PO.
+ */
+function isOverdue(a: ScopedActionDetail, today: string): boolean {
+  if (a.status === "done" || a.status === "skipped") return false;
+  if (!a.expectedDate) return false;
+  return a.expectedDate < today;
+}
+/**
+ * Walk every action under a PO (PO + waves + batches) and return
+ * total/done/overdue counts. Drives the progress chip in the left tree.
+ */
+function rollupPoCounts(po: PoNode, today: string): { total: number; done: number; overdue: number } {
+  let total = 0, done = 0, overdue = 0;
+  const tally = (a: ScopedActionDetail) => {
+    total++;
+    if (a.status === "done") done++;
+    if (isOverdue(a, today)) overdue++;
+  };
+  for (const a of po.actions) tally(a);
+  for (const w of po.waves) {
+    for (const a of w.actions) tally(a);
+    for (const b of w.batches) for (const a of b.actions) tally(a);
+  }
+  return { total, done, overdue };
+}
+
 type DrawerView = "internal" | "vin";
 const DRAWER_VIEW_KEY = "action-center-v2-drawer-view";
 
@@ -166,6 +199,9 @@ function DealerTree({
   const [expandedDealers, setExpandedDealers] = useState<Set<number>>(
     () => new Set(tree.dealers.map((d) => d.id)),
   );
+  // Memoised so we don't recompute on every render — same value for
+  // the whole session view (overdue is a date-only comparison).
+  const today = useMemo(() => todayIso(), []);
 
   function toggleDealer(id: number) {
     setExpandedDealers((curr) => {
@@ -203,27 +239,47 @@ function DealerTree({
               </button>
               {expanded && (
                 <ul>
-                  {d.pos.map((p) => (
-                    <li key={p.id}>
-                      <button
-                        type="button"
-                        onClick={() => onSelect(p.id)}
-                        className={cn(
-                          "w-full text-left px-3 py-2 pl-8 text-xs",
-                          "border-l-2",
-                          p.id === selectedPoId
-                            ? "bg-brand-pastel border-l-brand text-brand-dark"
-                            : "border-l-transparent hover:bg-ink-50 text-ink-700",
-                        )}
-                      >
-                        <div className="font-mono font-medium">{p.poNumber}</div>
-                        <div className="text-[0.65rem] text-ink-500 mt-0.5 tabular-nums">
-                          {p.totalCars} cars · {p.waves.length} wave{p.waves.length === 1 ? "" : "s"}
-                          {p.closedAt && <span className="ml-1 text-green-dark">· closed</span>}
-                        </div>
-                      </button>
-                    </li>
-                  ))}
+                  {d.pos.map((p) => {
+                    const counts = rollupPoCounts(p, today);
+                    return (
+                      <li key={p.id}>
+                        <button
+                          type="button"
+                          onClick={() => onSelect(p.id)}
+                          className={cn(
+                            "w-full text-left px-3 py-2 pl-8 text-xs",
+                            "border-l-2",
+                            p.id === selectedPoId
+                              ? "bg-brand-pastel border-l-brand text-brand-dark"
+                              : "border-l-transparent hover:bg-ink-50 text-ink-700",
+                            // Closed POs are dimmed but still selectable —
+                            // ops occasionally needs to see post-delivery
+                            // detail.
+                            p.closedAt && p.id !== selectedPoId && "opacity-60",
+                          )}
+                        >
+                          <div className="font-mono font-medium flex items-baseline gap-1.5">
+                            <span className="truncate">{p.poNumber}</span>
+                            {counts.overdue > 0 && (
+                              <span
+                                title={`${counts.overdue} overdue`}
+                                className="ml-auto text-[0.6rem] font-sans font-bold tabular-nums text-flame-dark"
+                              >
+                                ⚠ {counts.overdue}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[0.65rem] text-ink-500 mt-0.5 tabular-nums">
+                            {p.totalCars} cars · {p.waves.length} wave{p.waves.length === 1 ? "" : "s"}
+                            {counts.total > 0 && (
+                              <> · {counts.done}/{counts.total} done</>
+                            )}
+                            {p.closedAt && <span className="ml-1 text-green-dark">· closed</span>}
+                          </div>
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </li>
@@ -334,9 +390,16 @@ function InternalPhaseView({
 }: { po: PoNode } & Pick<MutationProps, "busyActionId" | "onChangeStatus">) {
   if (po.actions.length === 0) {
     return (
-      <p className="text-sm text-ink-500 italic px-2">
-        No PO-scope actions configured for this PO. Add some at Intake or in Settings → Action Types.
-      </p>
+      <div className="text-sm text-ink-500 px-2 space-y-2">
+        <p className="italic">
+          No internal-phase actions on this PO yet.
+        </p>
+        <p className="text-xs">
+          PO-scope actions are picked at Intake (Step 4) — choose Specs, Pricing,
+          SKU, etc. and they appear here. If this PO was created before
+          scope-aware actions landed, mark them done in the legacy /action-center.
+        </p>
+      </div>
     );
   }
   return (
@@ -496,12 +559,24 @@ function ActionRow({
              : action.status === "blocked" ? "⛔"
              :                                "⏳";
   const label = action.status === "done" ? action.doneLabel : action.waitingLabel;
+  // Recompute today each render — cheap, and re-renders are driven by
+  // status flips anyway. The check is date-only, no time math needed.
+  const today = todayIso();
+  const overdue = isOverdue(action, today);
 
   return (
-    <li className="rounded-md border border-ink-200 bg-white px-3 py-2">
+    <li className={cn(
+      "rounded-md border bg-white px-3 py-2",
+      overdue ? "border-flame bg-flame-pale/30" : "border-ink-200",
+    )}>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className="shrink-0" aria-hidden>{icon}</span>
         <span className="text-sm font-medium text-midnight">{label}</span>
+        {overdue && (
+          <span className="text-[0.6rem] font-bold tabular-nums text-flame-dark uppercase tracking-wide">
+            ⚠ Overdue
+          </span>
+        )}
         {action.stakeholderName && (
           <span className="text-[0.7rem] text-ink-500">@{action.stakeholderName}</span>
         )}
@@ -516,7 +591,10 @@ function ActionRow({
           </span>
         )}
         {action.status !== "done" && action.expectedDate && (
-          <span className="text-[0.65rem] text-ink-500 tabular-nums ml-auto">
+          <span className={cn(
+            "text-[0.65rem] tabular-nums ml-auto",
+            overdue ? "text-flame-dark font-medium" : "text-ink-500",
+          )}>
             due {action.expectedDate}
           </span>
         )}
