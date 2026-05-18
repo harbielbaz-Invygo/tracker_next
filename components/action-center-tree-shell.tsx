@@ -629,6 +629,18 @@ function WaveSection({
 
       {expanded && (
         <div className="p-2 space-y-2">
+          {/* Batches in this wave — placed first so ops sees WHAT this
+              wave covers (cars, cities, codes) before drilling into the
+              actions that get those batches delivered. Each batch row
+              carries its own Mark-as-delivered button, gated on the
+              wave's actions being all done/skipped so ops can't skip
+              ahead. */}
+          <BatchListInWave
+            wave={wave}
+            busyActionId={busyActionId}
+            onChangeStatus={onChangeStatus}
+          />
+
           {/* Wave-scope actions — flat list (no Blocked/Done columns
               since VIN-chase deps are strictly linear: each step is
               "waiting" or "done", never "blocked on a sibling"). The
@@ -652,15 +664,6 @@ function WaveSection({
                 ))}
             </ul>
           )}
-
-          {/* Batches in this wave — compact summary + Mark-as-delivered
-              button per batch. The button is gated on the wave's actions
-              being all done/skipped so ops can't skip ahead. */}
-          <BatchListInWave
-            wave={wave}
-            busyActionId={busyActionId}
-            onChangeStatus={onChangeStatus}
-          />
         </div>
       )}
     </section>
