@@ -16,9 +16,9 @@
 import { eq, asc, gte, or, isNull, inArray } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  batchActions, actionTypes, departments, stakeholders, batches, dealers, batchColorMatrix, batchDateRevisions, batchDeliveryLegs,
-  // Phase 4b — scope-aware reads so PO + wave actions completed in
-  // /action-center-v2 also flow into the performance report.
+  actionTypes, departments, stakeholders, batches, dealers, batchColorMatrix, batchDateRevisions, batchDeliveryLegs,
+  // Phase 5c — single-source from the scope-aware `actions` table.
+  // batch_actions reads are gone (table itself is dropped in phase 5d).
   waves, actions as actionsTable,
 } from "@/lib/db/schema";
 import { daysBetween } from "@/lib/expected-date";
@@ -333,41 +333,13 @@ function summarizeAcc(acc: AggregateAccumulator): {
 
 export async function getPerformanceReport(period: ReportPeriod = "all"): Promise<PerformanceReport> {
   const fromIso = fromIsoForPeriod(period);
-  // Filter predicates — applied only when a finite period was chosen.
-  // For batch_actions we keep rows whose completedAt is in the window
-  // OR is null (active actions still count — they're in flight today).
-  // For batches we keep rows whose closedAt is in the window OR is null
-  // (open batches always show; they're current state).
-  const actionInPeriod = fromIso
-    ? or(isNull(batchActions.completedAt), gte(batchActions.completedAt, fromIso))
-    : undefined;
+  // Filter predicate — applied only when a finite period was chosen.
+  // We keep rows whose completedAt is in the window OR is null (active
+  // actions still count — they're in flight today). For batches the
+  // closedAt window applies to the city-reliability lens further down.
   const batchInPeriod = fromIso
     ? or(isNull(batches.closedAt), gte(batches.closedAt, fromIso))
     : undefined;
-
-  // Pull every batch_action joined with the metadata we need.
-  let rowsQuery = db
-    .select({
-      ba:           batchActions,
-      atName:       actionTypes.name,
-      deptId:       departments.id,
-      deptName:     departments.name,
-      stakeholderId:    stakeholders.id,
-      stakeholderName:  stakeholders.name,
-      // Batch context for delayed-batch attribution.
-      batchId:                   batches.id,
-      batchClosedAt:             batches.closedAt,
-      batchClosureReason:        batches.closureReason,
-      batchPromisedDate:         batches.dealerPromisedDeliveryDate,
-    })
-    .from(batchActions)
-    .innerJoin(actionTypes,  eq(batchActions.actionTypeId, actionTypes.id))
-    .leftJoin(departments,   eq(batchActions.departmentId, departments.id))
-    .leftJoin(stakeholders,  eq(batchActions.assignedStakeholderId, stakeholders.id))
-    .innerJoin(batches,      eq(batchActions.batchId, batches.id))
-    .$dynamic();
-  if (actionInPeriod) rowsQuery = rowsQuery.where(actionInPeriod);
-  const rows = await rowsQuery;
 
   // Pull all departments + stakeholders so the report includes ones with
   // zero actions (e.g. a newly added department). Without this, anyone
@@ -401,113 +373,39 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
   const departmentWeekly = new Map<number, { onTime: number; late: number }[]>();
   const stakeholderWeekly = new Map<number, { onTime: number; late: number }[]>();
 
-  for (const r of rows) {
-    const ba = r.ba;
-    const isDone     = ba.status === "done";
-    const isSkipped  = ba.status === "skipped";
-    const isActive   = ba.status === "waiting" || ba.status === "blocked";
-
-    // Compute this action's delay (if measurable).
-    //   - Done action with expectedDate → completedAt − expectedDate
-    //   - Active action past expected → today − expectedDate (counts as late even though not done)
-    let delayDays: number | null = null;
-    let isLate = false;
-    if (isDone && ba.expectedDate && ba.completedAt) {
-      delayDays = daysBetween(ba.completedAt.slice(0, 10), ba.expectedDate);
-      isLate = delayDays > 0;
-    } else if (isActive && ba.expectedDate && todayIso > ba.expectedDate) {
-      // Past-due active action — late but no completedAt yet
-      isLate = true;
-    }
-
-    // Map this row into a weekly bucket index (0–11) when it has a
-    // completion timestamp inside the 12-week window. Used for the
-    // per-row sparkline.
-    let bucketIdx: number | null = null;
-    if (isDone && ba.completedAt && delayDays !== null) {
-      const ts = new Date(ba.completedAt).getTime();
-      if (ts >= bucketEdges[0] && ts < thisWeekStartMs + WEEK_MS) {
-        bucketIdx = Math.min(11, Math.floor((ts - bucketEdges[0]) / WEEK_MS));
-      }
-    }
-
-    function bump(acc: AggregateAccumulator) {
-      acc.totalActions++;
-      if (isDone)    acc.doneActions++;
-      if (isSkipped) acc.skippedActions++;
-      if (isActive)  acc.activeActions++;
-      if (isDone && delayDays !== null) {
-        acc.delayDays.push(delayDays);
-        acc.measurableDoneCount++;
-        if (delayDays <= 0) acc.onTimeDoneCount++;
-      }
-      if (isLate) acc.delayedBatchIds.add(r.batchId);
-    }
-
-    if (r.deptId != null) {
-      const acc = departmentAcc.get(r.deptId) ?? emptyAcc();
-      bump(acc);
-      departmentAcc.set(r.deptId, acc);
-      if (bucketIdx !== null && delayDays !== null) {
-        const wk = departmentWeekly.get(r.deptId) ?? newWeekly();
-        if (delayDays <= 0) wk[bucketIdx].onTime++; else wk[bucketIdx].late++;
-        departmentWeekly.set(r.deptId, wk);
-      }
-    }
-    if (r.stakeholderId != null) {
-      const acc = stakeholderAcc.get(r.stakeholderId) ?? emptyAcc();
-      bump(acc);
-      stakeholderAcc.set(r.stakeholderId, acc);
-      if (bucketIdx !== null && delayDays !== null) {
-        const wk = stakeholderWeekly.get(r.stakeholderId) ?? newWeekly();
-        if (delayDays <= 0) wk[bucketIdx].onTime++; else wk[bucketIdx].late++;
-        stakeholderWeekly.set(r.stakeholderId, wk);
-      }
-    }
-  }
-
-  // Phase 4b — second pass: pull po-scope and wave-scope action rows
-  // from the scope-aware `actions` table. Batch-scope is intentionally
-  // skipped because Phase 2 double-writes those into batch_actions
-  // already (the legacy pass above covers them). For PO/wave actions
-  // we attribute "delayed batches owned" to every batch under the PO
-  // (or wave) — a late Pricing decision delays every batch beneath.
+  // Phase 5c — single source. Pull every action row across all three
+  // scopes (po + wave + batch) from the scope-aware `actions` table.
+  // Period filter: completed-in-window OR not-yet-completed (active
+  // actions still count — they're in flight today).
   const scopedRows = await (async () => {
-    try {
-      const q = db
-        .select({
-          scope:           actionsTable.scope,
-          scopeId:         actionsTable.scopeId,
-          status:          actionsTable.status,
-          completedAt:     actionsTable.completedAt,
-          expectedDate:    actionsTable.expectedDate,
-          deptId:          departments.id,
-          stakeholderId:   stakeholders.id,
-        })
-        .from(actionsTable)
-        .leftJoin(departments,  eq(actionsTable.departmentId, departments.id))
-        .leftJoin(stakeholders, eq(actionsTable.assignedStakeholderId, stakeholders.id))
-        .where(inArray(actionsTable.scope, ["po", "wave"]))
-        .$dynamic();
-      // Same period semantics as the legacy pass: include completed-in-window
-      // OR not-yet-completed. Active actions count toward "active" metric.
-      return await (fromIso
-        ? q.where(or(isNull(actionsTable.completedAt), gte(actionsTable.completedAt, fromIso)))
-        : q);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/no such table|no such column/i.test(msg)) return [];
-      throw err;
-    }
+    const q = db
+      .select({
+        scope:           actionsTable.scope,
+        scopeId:         actionsTable.scopeId,
+        status:          actionsTable.status,
+        completedAt:     actionsTable.completedAt,
+        expectedDate:    actionsTable.expectedDate,
+        deptId:          departments.id,
+        stakeholderId:   stakeholders.id,
+      })
+      .from(actionsTable)
+      .leftJoin(departments,  eq(actionsTable.departmentId, departments.id))
+      .leftJoin(stakeholders, eq(actionsTable.assignedStakeholderId, stakeholders.id))
+      .$dynamic();
+    return fromIso
+      ? q.where(or(isNull(actionsTable.completedAt), gte(actionsTable.completedAt, fromIso)))
+      : q;
   })();
 
   // Build wave→batches and po→batches lookups once. Used to fan out a
   // late wave/PO action's "delayed batches owned" attribution to every
   // batch beneath that level — matches operator intuition that a slow
-  // Specs decision impacts ALL batches in the PO, not "one".
+  // Specs decision impacts ALL batches in the PO, not "one". Batch-
+  // scope rows attribute to a single batch (their scopeId IS the
+  // batchId), no lookup needed.
   const waveToBatches = new Map<number, number[]>();
   const poToBatches   = new Map<number, number[]>();
-  if (scopedRows.length > 0) {
+  if (scopedRows.some((r) => r.scope === "po" || r.scope === "wave")) {
     const allWaves = await db.select({ id: waves.id, poId: waves.poId }).from(waves);
     const allBatchIds = await db
       .select({ id: batches.id, waveId: batches.waveId })
@@ -547,10 +445,15 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       }
     }
 
-    // Fan out: which batches does this PO/wave action "cover"?
+    // Fan out: which batches does this action "cover"?
+    //   po-scope   → every batch under that PO
+    //   wave-scope → every batch in that wave
+    //   batch-scope → just that one batch (scopeId IS the batchId)
     const coveredBatchIds = r.scope === "po"
       ? (poToBatches.get(r.scopeId)   ?? [])
-      : (waveToBatches.get(r.scopeId) ?? []);
+      : r.scope === "wave"
+        ? (waveToBatches.get(r.scopeId) ?? [])
+        : [r.scopeId];
 
     function bumpScoped(acc: AggregateAccumulator) {
       acc.totalActions++;
