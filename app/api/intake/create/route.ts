@@ -746,6 +746,34 @@ export async function POST(req: NextRequest) {
           if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
         }
       }
+
+      // Per-batch external-phase copies. Each wave-scope action_type
+      // also gets a batch-scope row on every batch so ops can track
+      // dealer-side execution per car-group instead of only at the
+      // window level. The window-scope row stays as the "bulk" handle;
+      // ticking it cascades to all batch copies (see lib/scope-cascade).
+      for (const at of allWaveActionTypes) {
+        const expected = computeExpectedDate({
+          anchor:     at.offsetAnchor,
+          offsetDays: at.offsetDays,
+          submission: requestedAt,
+          vin:        null,
+          promised:   batchPromised,
+        });
+        try {
+          await tx.insert(actionsTable).values({
+            scope:        "batch",
+            scopeId:      b.id,
+            actionTypeId: at.id,
+            departmentId: at.defaultDepartmentId ?? undefined,
+            status:       "waiting",
+            expectedDate: expected ?? undefined,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
+        }
+      }
     }
 
     return out;

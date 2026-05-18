@@ -1568,48 +1568,46 @@ function WaveSection({
       </div>
 
       {expanded && (
-        <div className="p-2 space-y-2">
-          {/* Batches in this wave — placed first so ops sees WHAT this
-              wave covers (cars, cities, codes) before drilling into the
-              actions that get those batches delivered. Each batch row
-              carries its own Mark-as-delivered button, gated on the
-              wave's actions being all done/skipped so ops can't skip
-              ahead. */}
-          <BatchListInWave
+        <div className="p-2 space-y-3">
+          {/* WINDOW-LEVEL ACTION BAR
+              Left: closure controls applied across every batch in the
+                    window (Shift all / Cancel all / Mark all delivered).
+              Right: wave-scope External-Phase action chips. Clicking a
+                    chip flips the wave-level row; the cross-scope
+                    cascade in /api/scope-action then propagates the
+                    same status to every batch's batch-scope copy. */}
+          <WindowActionBar
             wave={wave}
             internalPhaseDone={internalPhaseDone}
             busyActionId={busyActionId}
             busyBatchId={busyBatchId}
             onChangeStatus={onChangeStatus}
             onBatchOp={onBatchOp}
-            inlineForm={inlineForm}
             onOpenInlineForm={onOpenInlineForm}
-            onCloseInlineForm={onCloseInlineForm}
           />
 
-          {/* Wave-scope actions — flat list (no Blocked/Done columns
-              since VIN-chase deps are strictly linear: each step is
-              "waiting" or "done", never "blocked on a sibling"). The
-              ActionCard is reused for the rich label + status buttons. */}
-          {wave.actions.length === 0 ? (
-            <p className="text-xs text-ink-500 italic px-2 py-1">
-              No External-Phase actions on this delivery window.
-            </p>
-          ) : (
-            <ul className="space-y-2">
-              {wave.actions
-                .slice()
-                .sort((a, b) => a.sortOrder - b.sortOrder)
-                .map((a) => (
-                  <ActionCard
-                    key={a.id}
-                    action={a}
-                    busy={busyActionId === a.id}
-                    onChangeStatus={onChangeStatus}
-                  />
-                ))}
-            </ul>
-          )}
+          {/* PER-BATCH BLOCK
+              Each batch gets its own box with identity meta on top and
+              a single Action Bar at the bottom: closure controls on
+              the left (single-batch), External-Phase chips on the
+              right that reflect THIS batch's batch-scope copies. */}
+          <ul className="space-y-2">
+            {wave.batches.map((b) => (
+              <BatchRow
+                key={b.id}
+                batch={b}
+                wave={wave}
+                internalPhaseDone={internalPhaseDone}
+                busyActionId={busyActionId}
+                busyBatchId={busyBatchId}
+                onChangeStatus={onChangeStatus}
+                onBatchOp={onBatchOp}
+                inlineForm={inlineForm}
+                onOpenInlineForm={onOpenInlineForm}
+                onCloseInlineForm={onCloseInlineForm}
+              />
+            ))}
+          </ul>
         </div>
       )}
     </section>
@@ -1617,56 +1615,277 @@ function WaveSection({
 }
 
 /**
- * Compact list of batches in a wave, with a per-batch "Mark as
- * delivered" button. The button finds the batch's Delivery action
- * (auto-attached at Intake) and flips it to done — the existing
- * /api/scope-action handler then auto-closes the batch.
- *
- * Gating:
- *   - The Delivery action must exist on the batch (always true for
- *     new-shape batches; defensive null-check otherwise).
- *   - The batch must not already be closed (delivered or cancelled).
- *   - Every wave-scope action must be done or skipped, otherwise the
- *     button shows pending count and is disabled.
+ * WINDOW-LEVEL ACTION BAR. A single horizontal row at the top of an
+ * expanded delivery window. Three closure controls on the left
+ * (Shift / Cancel all / Mark all delivered) and the wave-scope
+ * External-Phase action chips on the right. Bar is purely a presenter
+ * — every click delegates to the existing per-batch endpoints or to
+ * /api/scope-action with cross-scope wave→batch propagation.
  */
-function BatchListInWave({
-  wave, internalPhaseDone, busyActionId, busyBatchId, onChangeStatus, onBatchOp,
-  inlineForm, onOpenInlineForm, onCloseInlineForm,
-}: { wave: WaveNode; internalPhaseDone: boolean }
-  & Pick<MutationProps, "busyActionId" | "onChangeStatus">
+function WindowActionBar({
+  wave, internalPhaseDone, busyActionId, busyBatchId,
+  onChangeStatus, onBatchOp, onOpenInlineForm,
+}: {
+  wave: WaveNode;
+  internalPhaseDone: boolean;
+} & Pick<MutationProps, "busyActionId" | "onChangeStatus">
   & BatchOpProps
-  & Pick<UiStateProps, "inlineForm" | "onOpenInlineForm" | "onCloseInlineForm">
+  & Pick<UiStateProps, "onOpenInlineForm">
 ) {
-  // "Wave ready" = every wave-scope action is settled.
+  const openBatches = wave.batches.filter((b) => b.closedAt == null);
+  const deliveredCount = wave.batches.filter((b) => b.closureReason === "delivered").length;
+
+  // Mark-all-delivered fires the same Delivery-action flip as the
+  // per-batch button, just iterated over every still-open batch in
+  // the window. Gates mirror the single-batch case: every wave action
+  // settled + internal phase done + every batch app-listed.
   const wavePending = wave.actions.filter(
     (a) => a.status !== "done" && a.status !== "skipped",
   ).length;
   const waveReady = wave.actions.length > 0 && wavePending === 0;
+  const allListed = openBatches.length > 0
+    && openBatches.every((b) => b.appListedAt != null);
+  const canMarkAllDelivered = waveReady && internalPhaseDone && allListed && openBatches.length > 0;
+  const markAllDeliveredTooltip = !internalPhaseDone
+    ? "Internal-phase actions still pending on the PO."
+    : !waveReady
+      ? `${wavePending} External-Phase action${wavePending === 1 ? "" : "s"} still pending in this window.`
+      : !allListed
+        ? "Some batches aren't app-listed yet — list them via Internal Phase first."
+        : `Marks every open batch's Delivery action done (${openBatches.length}).`;
+
+  async function handleMarkAllDelivered() {
+    if (!canMarkAllDelivered) return;
+    if (!window.confirm(
+      `Mark all ${openBatches.length} open batch${openBatches.length === 1 ? "" : "es"} in this window as delivered? This closes them.`,
+    )) return;
+    for (const b of openBatches) {
+      const delivery = b.actions.find((a) => a.actionTypeName === "Delivery");
+      if (delivery) onChangeStatus(delivery.id, "done");
+      // onChangeStatus is fire-and-forget from this caller; we await
+      // the router refresh implicitly via setActionStatus's own state.
+    }
+  }
+
+  async function handleCancelWindow() {
+    if (openBatches.length === 0) return;
+    const codes = openBatches.map((b) => b.batchCode).join(", ");
+    const ok = window.confirm(
+      `Cancel every open batch in this window?\n\n${codes}\n\nThis closes them as cancelled.`,
+    );
+    if (!ok) return;
+    const note = window.prompt("Cancellation note (optional, applied to every batch):") || null;
+    for (const b of openBatches) {
+      await onBatchOp(b.id, "/api/batch-close", {
+        batchId: b.id,
+        reason: "cancelled",
+        note,
+      });
+    }
+  }
+
+  async function handleShiftWindow() {
+    if (openBatches.length === 0) return;
+    const next = window.prompt(
+      `New projected availability date for every open batch in this window (yyyy-mm-dd):`,
+    );
+    if (!next) return;
+    const trimmed = next.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      window.alert("Date must be yyyy-mm-dd. Cancelled.");
+      return;
+    }
+    const reason = window.prompt("Reason for the shift (optional):") || null;
+    for (const b of openBatches) {
+      await onBatchOp(b.id, "/api/batch-shift", {
+        batchId: b.id,
+        newProjectedDate: trimmed,
+        bookingsAtShift: 0,
+        reason,
+      });
+    }
+  }
 
   return (
-    <div className="px-2 py-1.5 border border-ink-200 rounded-md bg-white">
+    <div className="border border-ink-200 rounded-md bg-white px-2 py-1.5">
       <p className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 mb-1.5">
-        Batches in this delivery window
+        Window controls
+        {deliveredCount > 0 && (
+          <span className="ml-1.5 text-green-dark normal-case font-normal">
+            · {deliveredCount}/{wave.batches.length} delivered
+          </span>
+        )}
       </p>
-      <ul className="space-y-2">
-        {wave.batches.map((b) => (
-          <BatchRow
-            key={b.id}
-            batch={b}
-            wavePending={wavePending}
-            waveReady={waveReady}
-            internalPhaseDone={internalPhaseDone}
-            busyActionId={busyActionId}
-            busyBatchId={busyBatchId}
-            onChangeStatus={onChangeStatus}
-            onBatchOp={onBatchOp}
-            inlineForm={inlineForm}
-            onOpenInlineForm={onOpenInlineForm}
-            onCloseInlineForm={onCloseInlineForm}
+      <div className="flex flex-wrap items-stretch gap-2">
+        {/* LEFT: closure cluster */}
+        <div className="flex flex-wrap gap-1.5">
+          <BulkBtn
+            label="📅 Shift all"
+            tone="gold"
+            disabled={openBatches.length === 0}
+            onClick={handleShiftWindow}
           />
-        ))}
-      </ul>
+          <BulkBtn
+            label="🚫 Cancel all"
+            tone="flame"
+            disabled={openBatches.length === 0}
+            onClick={handleCancelWindow}
+          />
+          <BulkBtn
+            label={canMarkAllDelivered
+              ? `✓ Mark all delivered (${openBatches.length})`
+              : `🔒 Mark all delivered`}
+            tone="green"
+            disabled={!canMarkAllDelivered}
+            title={markAllDeliveredTooltip}
+            onClick={handleMarkAllDelivered}
+          />
+        </div>
+        <span className="text-ink-300 mx-1 hidden md:inline">|</span>
+        {/* RIGHT: External-Phase chips, wave-scope source.
+            Clicking flips the wave row + cascades to every batch's
+            copy via /api/scope-action. */}
+        <div className="flex flex-wrap gap-1.5 md:ml-auto">
+          {wave.actions.length === 0 ? (
+            <span className="text-[0.7rem] text-ink-500 italic px-2 py-0.5">
+              No External-Phase actions configured.
+            </span>
+          ) : wave.actions
+              .slice()
+              .sort((a, b) => a.sortOrder - b.sortOrder)
+              .map((a) => (
+                <ActionChip
+                  key={a.id}
+                  action={a}
+                  busy={busyActionId === a.id}
+                  onChangeStatus={onChangeStatus}
+                />
+              ))}
+        </div>
+      </div>
+      {/* Silence unused-prop lint until per-bar busy state is shown. */}
+      <span className="hidden" data-busy={busyBatchId} />
     </div>
+  );
+}
+
+/**
+ * Compact horizontal chip representation of a single action — used
+ * inside the WindowActionBar (right cluster) and the per-batch
+ * ActionBar (right cluster). One click flips the action's status in
+ * the canonical waiting → done direction; shift-click reverts via
+ * the cascade. Status drives the icon + colour:
+ *   ⏳ waiting   → click marks done
+ *   ⛔ blocked   → click marks waiting (unblock)
+ *   ✅ done      → click re-opens
+ *   ⏭ skipped   → click re-opens (waiting)
+ * Tooltip carries the full label + due date + (when blocked) the
+ * pending parents list.
+ */
+function ActionChip({
+  action, busy, onChangeStatus,
+}: {
+  action: ScopedActionDetail;
+  busy: boolean;
+  onChangeStatus: (actionId: number, status: Status) => void;
+}) {
+  // Synthetic rows (negative id) shouldn't expose interactive chips —
+  // they're read-only summaries.
+  if (action.id < 0) return null;
+
+  const today = todayIso();
+  const overdue = isOverdue(action, today);
+  const label = action.doneLabel || action.waitingLabel;
+
+  const icon = action.status === "done"    ? "✅"
+             : action.status === "skipped" ? "⏭"
+             : action.status === "blocked" ? "⛔"
+             : overdue                     ? "⚠️"
+             :                                "⏳";
+
+  // Tone derived from status. Done = green; blocked/overdue = flame;
+  // waiting = neutral.
+  const toneCls =
+    action.status === "done"    ? "border-green text-green-dark hover:bg-green-pale" :
+    action.status === "skipped" ? "border-ink-300 text-ink-500 hover:bg-ink-50" :
+    action.status === "blocked" ? "border-flame text-flame-dark hover:bg-flame-pale" :
+    overdue                     ? "border-flame text-flame-dark hover:bg-flame-pale" :
+    "border-ink-300 text-ink-700 hover:bg-ink-50";
+
+  // Next-state on click: progresses waiting → done, otherwise reverts
+  // to waiting (re-open / unblock). Skip is intentionally NOT on the
+  // chip — keep that to the deeper ActionCard view to avoid silent
+  // dep-cascade satisfaction from a single quick click.
+  const nextStatus: Status =
+    action.status === "waiting" ? "done" :
+    action.status === "blocked" ? "waiting" :
+    "waiting";
+
+  // Tooltip aggregates everything ops might want to see at a glance.
+  const tooltipBits = [
+    label,
+    action.expectedDate ? `due ${action.expectedDate}` : null,
+    action.status === "done" && action.completedAt
+      ? `✓ done ${action.completedAt.slice(0, 10)}`
+      : null,
+    action.stakeholderName ? `@${action.stakeholderName}` : null,
+    action.departmentName,
+    action.status === "blocked" && action.blockedByNames.length > 0
+      ? `waiting on ${action.blockedByNames.join(", ")}`
+      : null,
+  ].filter(Boolean) as string[];
+
+  return (
+    <button
+      type="button"
+      onClick={() => onChangeStatus(action.id, nextStatus)}
+      disabled={busy}
+      title={tooltipBits.join(" · ")}
+      className={cn(
+        "text-[0.7rem] px-2 py-0.5 rounded border transition-colors inline-flex items-center gap-1",
+        toneCls,
+        busy && "opacity-50 cursor-wait",
+      )}
+    >
+      <span aria-hidden>{icon}</span>
+      <span className="font-medium truncate max-w-[10rem]">{label}</span>
+    </button>
+  );
+}
+
+/**
+ * Bulk-action button used inside the WindowActionBar's left cluster.
+ * Thin wrapper over <button> with the same tone palette as BatchOpBtn
+ * but with `disabled`/`title` plumbing for the gated bulk actions.
+ */
+function BulkBtn({
+  label, tone, disabled, title, onClick,
+}: {
+  label: string;
+  tone: "green" | "gold" | "flame" | "ink";
+  disabled?: boolean;
+  title?: string;
+  onClick: () => void;
+}) {
+  const toneCls = disabled
+    ? "border-ink-200 text-ink-400 cursor-not-allowed"
+    : tone === "green" ? "border-green text-green-dark hover:bg-green-pale"
+    : tone === "gold"  ? "border-gold text-gold-dark hover:bg-gold-pale"
+    : tone === "flame" ? "border-flame text-flame-dark hover:bg-flame-pale"
+    : "border-ink-300 text-ink-600 hover:bg-ink-50";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={cn(
+        "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+        toneCls,
+      )}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -1684,13 +1903,12 @@ function BatchListInWave({
  * action is done/skipped; Cancel/Shift hide once the batch is closed.
  */
 function BatchRow({
-  batch: b, wavePending, waveReady, internalPhaseDone,
+  batch: b, wave, internalPhaseDone,
   busyActionId, busyBatchId, onChangeStatus, onBatchOp,
   inlineForm, onOpenInlineForm, onCloseInlineForm,
 }: {
   batch: BatchNode;
-  wavePending: number;
-  waveReady: boolean;
+  wave: WaveNode;
   internalPhaseDone: boolean;
 } & Pick<MutationProps, "busyActionId" | "onChangeStatus">
   & BatchOpProps
@@ -1701,6 +1919,20 @@ function BatchRow({
   const cancelled        = b.closedAt != null && b.closureReason === "cancelled";
   const closed = alreadyDelivered || cancelled;
   const isListed = b.appListedAt != null;
+
+  // Derive External-Phase gate status from THIS batch's batch-scope
+  // copies of the wave's action_type set. We match by actionTypeId
+  // rather than by name so a renamed action_type doesn't break the
+  // gate. Batches created before the per-batch rollout don't have
+  // these copies — fall back to the wave-level status so the gate
+  // still behaves sensibly (until admin runs the backfill endpoint).
+  const externalActionTypeIds = new Set(wave.actions.map((a) => a.actionTypeId));
+  const batchScopeExternal = b.actions.filter((a) => externalActionTypeIds.has(a.actionTypeId));
+  const externalActions = batchScopeExternal.length > 0 ? batchScopeExternal : wave.actions;
+  const externalPending = externalActions.filter(
+    (a) => a.status !== "done" && a.status !== "skipped",
+  ).length;
+  const externalReady = externalActions.length > 0 && externalPending === 0;
 
   // Multi-gate Mark-as-delivered:
   //   1. Delivery action must exist on the batch
@@ -1714,7 +1946,7 @@ function BatchRow({
     if (!delivery)             return { ok: false, reason: "No Delivery action on this batch." };
     if (closed)                return { ok: false, reason: "Batch already closed." };
     if (!internalPhaseDone)    return { ok: false, reason: "Internal-phase actions still pending on the PO." };
-    if (!waveReady)            return { ok: false, reason: `${wavePending} External-Phase action${wavePending === 1 ? "" : "s"} still pending in this window.` };
+    if (!externalReady)        return { ok: false, reason: `${externalPending} External-Phase action${externalPending === 1 ? "" : "s"} still pending on this batch.` };
     if (!isListed)             return { ok: false, reason: "Batch not yet app-listed (do it via Internal Phase → App listed)." };
     return { ok: true, reason: "Marks the Delivery action done and auto-closes the batch." };
   })();
@@ -1727,6 +1959,7 @@ function BatchRow({
 
   return (
     <li className="border border-ink-200 rounded-md bg-white px-2 py-1.5">
+      {/* Identity strip — code, model, qty, city, listed/closure chips. */}
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
         <code className="text-[0.7rem] text-midnight font-mono">{b.batchCode}</code>
         <span className="text-ink-600">{b.modelYear}</span>
@@ -1747,45 +1980,68 @@ function BatchRow({
         )}
       </div>
 
-      {/* Action buttons — hide once the batch is closed.
-          Note: Mark-as-listed lives in Internal Phase now as a single
-          PO-wide step (it's a commercial commitment that crosses
-          every batch under the PO, not a per-batch toggle). */}
+      {/* PER-BATCH ACTION BAR — left cluster: closure controls (Shift /
+          Cancel / Mark delivered) applied to THIS batch only. Right
+          cluster: External-Phase chips driven by THIS batch's batch-
+          scope copies (independent state from the wave's bulk row). */}
       {!closed && !showShiftForm && !showCancelForm && (
-        <div className="flex flex-wrap gap-1.5 mt-1.5">
-          <BatchOpBtn
-            label="📅 Shift date"
-            tone="gold"
-            busy={batchBusy}
-            onClick={() => onOpenInlineForm(b.id, "shift")}
-          />
-          <BatchOpBtn
-            label="🚫 Cancel"
-            tone="flame"
-            busy={batchBusy}
-            onClick={() => onOpenInlineForm(b.id, "cancel")}
-          />
-          {delivery && (
-            <button
-              type="button"
-              disabled={!canDeliver || deliveryBusy}
-              onClick={() => onChangeStatus(delivery.id, "done")}
-              className={cn(
-                "text-[0.7rem] px-2 py-0.5 rounded border transition-colors ml-auto",
-                canDeliver
-                  ? "border-green text-green-dark hover:bg-green-pale"
-                  : "border-ink-200 text-ink-400 cursor-not-allowed",
-                deliveryBusy && "opacity-50 cursor-wait",
-              )}
-              title={deliveryGate.reason}
-            >
-              {deliveryBusy
-                ? "…"
-                : canDeliver
-                  ? "✓ Mark as delivered"
-                  : "🔒 Mark as delivered"}
-            </button>
-          )}
+        <div className="flex flex-wrap items-stretch gap-2 mt-1.5">
+          <div className="flex flex-wrap gap-1.5">
+            <BatchOpBtn
+              label="📅 Shift date"
+              tone="gold"
+              busy={batchBusy}
+              onClick={() => onOpenInlineForm(b.id, "shift")}
+            />
+            <BatchOpBtn
+              label="🚫 Cancel"
+              tone="flame"
+              busy={batchBusy}
+              onClick={() => onOpenInlineForm(b.id, "cancel")}
+            />
+            {delivery && (
+              <button
+                type="button"
+                disabled={!canDeliver || deliveryBusy}
+                onClick={() => onChangeStatus(delivery.id, "done")}
+                className={cn(
+                  "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+                  canDeliver
+                    ? "border-green text-green-dark hover:bg-green-pale"
+                    : "border-ink-200 text-ink-400 cursor-not-allowed",
+                  deliveryBusy && "opacity-50 cursor-wait",
+                )}
+                title={deliveryGate.reason}
+              >
+                {deliveryBusy
+                  ? "…"
+                  : canDeliver
+                    ? "✓ Mark as delivered"
+                    : "🔒 Mark as delivered"}
+              </button>
+            )}
+          </div>
+          <span className="text-ink-300 mx-1 hidden md:inline">|</span>
+          {/* RIGHT: External-Phase chips — driven by batch-scope rows
+              when present, with the wave's wave-scope row as fallback
+              for legacy batches that pre-date the per-batch rollout. */}
+          <div className="flex flex-wrap gap-1.5 md:ml-auto">
+            {externalActions.length === 0 ? (
+              <span className="text-[0.7rem] text-ink-500 italic px-2 py-0.5">
+                No External-Phase actions on this batch.
+              </span>
+            ) : externalActions
+                .slice()
+                .sort((a, b) => a.sortOrder - b.sortOrder)
+                .map((a) => (
+                  <ActionChip
+                    key={a.id}
+                    action={a}
+                    busy={busyActionId === a.id}
+                    onChangeStatus={onChangeStatus}
+                  />
+                ))}
+          </div>
         </div>
       )}
 
