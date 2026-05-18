@@ -157,7 +157,12 @@ function extractDeliveryInstructions(text: string): string | null {
 }
 
 // ─── Items ───────────────────────────────────────────────
-const ITEM_HEAD_RE = /^([A-Z][A-Za-z\-]+(?:\s+[A-Za-z\-]+){1,4})\s+(20[2-3][0-9])\s*$/gm;
+// The item heading is "<Make> <Model …> <Year>". Most POs put pricing
+// (qty, unit price, tax %, line amount) on the line BELOW the heading,
+// but some templates put it INLINE on the same line. We anchor on the
+// year via \b (not \s*$) so both variants match: the parseItemChunk
+// regex then peels the pricing back off when needed.
+const ITEM_HEAD_RE = /^([A-Z][A-Za-z\-]+(?:\s+[A-Za-z\-]+){1,4})\s+(20[2-3][0-9])\b/gm;
 
 /**
  * Drop table-header garbage that some PDFs concatenate into a row, e.g.
@@ -232,9 +237,18 @@ function parseItemChunk(chunk: string, model: string, year: number): ParsedItem 
     if (cm) out.contractLengthMonths = parseInt(cm[1], 10);
   }
 
-  const colors = chunk.match(/Car Colors?:\s*([^\n]+)/i);
+  // Colors often wrap across multiple lines in the PDF render, e.g.
+  //   "Car Colors: 40 Titan Gray.  30\nAmazon Gray. 10 Atlas White."
+  // Capture every subsequent line until we hit either the pricing line
+  // (a digits.decimal-followed-by-decimal pattern) or end of chunk.
+  // Whitespace within the capture gets collapsed to single spaces so
+  // the resulting colorsRaw reads naturally on a single line.
+  const colors = chunk.match(/Car Colors?:\s*([\s\S]+?)(?=\n\s*\d+\.\d+\s+[\d,]+\.\d+|$)/i);
   if (colors) {
-    out.colorsRaw = colors[1].trim().replace(/\.$/, "");
+    out.colorsRaw = colors[1]
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\.$/, "");
     out.colors = parseColors(out.colorsRaw);
   }
 
