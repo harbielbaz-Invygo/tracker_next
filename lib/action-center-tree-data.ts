@@ -217,7 +217,9 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     (async () => {
       // Defensive: pre-Phase-A DBs don't have batch_date_revisions yet.
       // Wrapped so the missing-table case falls back to [] rather
-      // than 500-ing the whole Action Center page.
+      // than 500-ing the whole Action Center page. We log a warning
+      // so an operator's "I shifted but the history is empty" can be
+      // traced from the server logs to the missing-table cause.
       try {
         return await db.select({
           batchId:               batchDateRevisions.batchId,
@@ -230,11 +232,18 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           .orderBy(asc(batchDateRevisions.revisedAt));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (/no such table/i.test(msg)) return [] as {
-          batchId: number; revisedAt: string | null;
-          previousProjectedDate: string; newProjectedDate: string;
-          reason: string | null;
-        }[];
+        if (/no such table/i.test(msg)) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[action-center-tree-data] batch_date_revisions table missing — " +
+            "Shift History will render empty. Run POST /api/admin/ensure-batch-date-revisions to migrate.",
+          );
+          return [] as {
+            batchId: number; revisedAt: string | null;
+            previousProjectedDate: string; newProjectedDate: string;
+            reason: string | null;
+          }[];
+        }
         throw err;
       }
     })(),
