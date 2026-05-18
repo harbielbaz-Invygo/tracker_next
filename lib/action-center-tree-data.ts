@@ -80,8 +80,15 @@ export interface PoNode {
   poReference:        string | null;
   contractLengthMonths: number | null;
   buyBackRate:        number | null;
+  /** Unit price (SAR) — surfaced in the header for at-a-glance value. */
+  unitPriceSar:       number | null;
   closedAt:           string | null;
   totalCars:          number;          // sum of requestedQuantity across batches in this PO
+  /** Sum across batches: requestedQuantity × unitPriceSar (when available). */
+  totalValueSar:      number | null;
+  /** Earliest availability date across waves under this PO. Drives the
+   *  "in N days" indicator in the header. */
+  nextAvailability:   string | null;
   actions:            ScopedActionDetail[]; // scope='po' for this PO
   /** Waves under this PO, sorted by availability date. */
   waves:              WaveNode[];
@@ -356,6 +363,15 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     const poActions = actionsByKey.get(`po:${p.id}`) ?? [];
     const internalPhaseDone = poActions.length > 0
       && poActions.every((a) => a.status === "done" || a.status === "skipped");
+    const totalValueSar = p.unitPriceSar != null && totalCars > 0
+      ? Math.round(p.unitPriceSar * totalCars)
+      : null;
+    const nextAvailability = wavesForPo.length === 0
+      ? null
+      : wavesForPo
+          .map((w) => w.availabilityDate)
+          .sort()
+          .at(0) ?? null;
 
     const node: PoNode = {
       id:                   p.id,
@@ -364,8 +380,11 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       poReference:          p.poReference ?? null,
       contractLengthMonths: p.contractLengthMonths ?? null,
       buyBackRate:          p.buyBackRate ?? null,
+      unitPriceSar:         p.unitPriceSar ?? null,
       closedAt:             p.closedAt ?? null,
       totalCars,
+      totalValueSar,
+      nextAvailability,
       actions:              poActions,
       waves:                wavesForPo,
       appListingSummary: {
