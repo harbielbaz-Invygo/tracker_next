@@ -2597,6 +2597,8 @@ function BatchRow({
     );
   })();
 
+  const formActive = showShiftForm || showCancelForm || showVinsForm || showDeliverForm || showDateForm;
+
   return (
     <li className={cn(
       "border border-ink-200 rounded-md overflow-hidden",
@@ -2604,171 +2606,151 @@ function BatchRow({
         ? (b.closureReason === "delivered" ? "bg-green-pale/30" : "bg-flame-pale/20")
         : "bg-white",
     )}>
-      {/* Identity strip — code, model, total qty, listed/closure
-          chips. The per-city breakdown moves to the meta line below
-          so the identity row stays readable when there are many
-          cities. */}
-      <div className="px-3 pt-2 pb-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
-        <code className="text-[0.75rem] text-midnight font-mono font-semibold">{b.batchCode}</code>
-        <span className="text-midnight font-medium">{b.modelYear}</span>
-        <span className="text-ink-300">·</span>
-        <span className="tabular-nums">{b.requestedQuantity} cars</span>
-        {/* VIN reception badge — surfaces partial vs. full receipt on
-            the identity strip so the operator scanning the window sees
-            "which batches are still waiting on VINs" without reading
-            every chip. Hidden when 0 (the chip itself carries that). */}
-        {(vinsPartial || vinsAllIn) && (
-          <span className={cn(
-            "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
-            vinsAllIn
-              ? "text-green-dark bg-green-pale"
-              : "text-gold-dark bg-gold-pale",
-          )}>
-            🔑 {vinsReceived}/{b.requestedQuantity} VINs
-          </span>
-        )}
-        {b.closedAt && (
-          <span className={cn(
-            "ml-auto text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
-            b.closureReason === "delivered"
-              ? "text-green-dark bg-green-pale"
-              : "text-flame-dark bg-flame-pale",
-          )}>
-            {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
-          </span>
-        )}
-      </div>
+      {/* Two-column layout: information on the left, actions stacked
+          on the right. Stacks to a single column at narrow widths so
+          the right rail doesn't squeeze the identity unreadable.
+          Inline forms (shift/cancel/vins/deliver/date) take over the
+          full width below when active. */}
+      {!formActive && (
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_min(260px,40%)] min-h-[7.5rem]">
+          {/* LEFT — identity + meta. No colors line (intentionally
+              dropped from this view — the modal at intake captures it
+              and the dashboard surfaces it; here it crowded the row). */}
+          <div className="px-3 py-2 space-y-1 md:border-r border-ink-200">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
+              <code className="text-[0.75rem] text-midnight font-mono font-semibold">{b.batchCode}</code>
+              <span className="text-midnight font-medium">{b.modelYear}</span>
+              <span className="text-ink-300">·</span>
+              <span className="tabular-nums">{b.requestedQuantity} cars</span>
+              {(vinsPartial || vinsAllIn) && (
+                <span className={cn(
+                  "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
+                  vinsAllIn
+                    ? "text-green-dark bg-green-pale"
+                    : "text-gold-dark bg-gold-pale",
+                )}>
+                  🔑 {vinsReceived}/{b.requestedQuantity} VINs
+                </span>
+              )}
+              {b.closedAt && (
+                <span className={cn(
+                  "ml-auto text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
+                  b.closureReason === "delivered"
+                    ? "text-green-dark bg-green-pale"
+                    : "text-flame-dark bg-flame-pale",
+                )}>
+                  {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
+                </span>
+              )}
+            </div>
 
-      {/* Meta line — operationally important context: promised vs.
-          projected, delay, listing, per-city qty, colors. Monetary
-          fields are intentionally omitted from this view. */}
-      <div className="px-3 pb-2 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[0.7rem] text-ink-600">
-        <span className="tabular-nums">
-          📅 Promised <span className="text-midnight">{b.promisedDate}</span>
-        </span>
-        {b.currentProjectedDeliveryDate && b.currentProjectedDeliveryDate !== b.promisedDate && (
-          <span className="tabular-nums">
-            ⏰ Ops <span className="text-midnight">{b.currentProjectedDeliveryDate}</span>
-          </span>
-        )}
-        {delayDays !== 0 && !closed && (
-          <span className={cn(
-            "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
-            delayDays > 0
-              ? "text-flame-dark bg-flame-pale"
-              : "text-brand-dark bg-brand-pastel",
-          )}>
-            {delayDays > 0 ? `+${delayDays}d late` : `${-delayDays}d ahead`}
-          </span>
-        )}
-        {isListed && (
-          <span className="tabular-nums text-green-dark">
-            📱 listed {b.appListedAt!.slice(0, 10)}
-          </span>
-        )}
-        {/* Per-city qty — render the legs explicitly; fall back to
-            the comma-joined `city` field when legs aren't populated
-            (legacy single-city batches or pre-Phase-α DBs). */}
-        {b.legs.length > 0 ? (
-          <span className="text-ink-500">
-            📍 {b.legs.map((l) => `${l.city} ${l.quantity}`).join(", ")}
-          </span>
-        ) : (
-          <span className="text-ink-500">📍 {b.city}</span>
-        )}
-        {b.colorSummary && (
-          <span className="text-ink-500 truncate max-w-[24rem]" title={b.colorSummary}>
-            🎨 {b.colorSummary}
-          </span>
-        )}
-      </div>
-
-      {/* PER-BATCH ACTION BAR — closure cluster row above the
-          External-Phase chip row, both edge-to-edge so the chip
-          columns align with the WINDOW bar above. */}
-      {!closed && !showShiftForm && !showCancelForm && !showVinsForm && !showDeliverForm && !showDateForm && (
-        <>
-          <div className="px-3 py-1.5 border-t border-ink-200 bg-ink-50/40 flex flex-wrap gap-1.5">
-            <BatchOpBtn
-              label="📅 Shift date"
-              tone="gold"
-              busy={batchBusy}
-              onClick={() => onOpenInlineForm(b.id, "shift")}
-            />
-            <BatchOpBtn
-              label="🚫 Cancel"
-              tone="flame"
-              busy={batchBusy}
-              onClick={() => onOpenInlineForm(b.id, "cancel")}
-            />
-            {/* The 🔑 VIN received chip in the External-Phase row
-                below is the single entry point for recording VINs —
-                a standalone "Set VINs" button here was a confusing
-                duplicate. The identity-strip badge (🔑 n/N VINs)
-                still surfaces the current count at a glance. */}
-            {delivery && (
-              <button
-                type="button"
-                disabled={!canDeliver || deliveryBusy}
-                onClick={() => onOpenInlineForm(b.id, "deliver")}
-                className={cn(
-                  "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
-                  canDeliver
-                    ? "border-green text-green-dark hover:bg-green-pale bg-white"
-                    : "border-ink-200 text-ink-400 cursor-not-allowed bg-white",
-                  deliveryBusy && "opacity-50 cursor-wait",
-                )}
-                title={deliveryGate.reason}
-              >
-                {deliveryBusy
-                  ? "…"
-                  : canDeliver
-                    ? "✓ Mark as delivered"
-                    : "🔒 Mark as delivered"}
-              </button>
-            )}
-          </div>
-
-          {/* External-Phase chips — same grid template as the WINDOW
-              bar's chip row, so chips align vertically across the
-              entire delivery window.
-
-              VIN chips on a batch scope are special-cased: clicking
-              them opens the VINs qty form instead of immediately
-              flipping the chip done. That way the operator can record
-              "3 of 5 VINs received" rather than implicitly saying "all
-              5" via a single click. */}
-          <div className="px-3 py-2 border-t border-ink-200 grid gap-1.5 grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">
-            {externalActions.length === 0 ? (
-              <span className="text-[0.7rem] text-ink-500 italic">
-                No External-Phase actions on this batch.
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[0.7rem] text-ink-600">
+              <span className="tabular-nums">
+                📅 Promised <span className="text-midnight">{b.promisedDate}</span>
               </span>
-            ) : externalActions
-                .slice()
-                .sort((a, b) => a.sortOrder - b.sortOrder)
-                .map((a) => {
-                  const isVin = /vin/i.test(a.actionTypeName);
-                  const isBatchScopeVin = isVin && batchScopeExternal.some((x) => x.id === a.id);
-                  return (
-                    <ActionChip
-                      key={a.id}
-                      action={a}
-                      busy={busyActionId === a.id}
-                      onChangeStatus={onChangeStatus}
-                      vinsBadge={isBatchScopeVin && vinsReceived > 0
-                        ? `${vinsReceived}/${b.requestedQuantity}`
-                        : null}
-                      onClickOverride={isBatchScopeVin
-                        ? () => onOpenInlineForm(b.id, "vins", a.id)
-                        : null}
-                      onEditDate={a.status === "done"
-                        ? () => onOpenInlineForm(b.id, "date", a.id)
-                        : null}
-                    />
-                  );
-                })}
+              {b.currentProjectedDeliveryDate && b.currentProjectedDeliveryDate !== b.promisedDate && (
+                <span className="tabular-nums">
+                  ⏰ Ops <span className="text-midnight">{b.currentProjectedDeliveryDate}</span>
+                </span>
+              )}
+              {delayDays !== 0 && !closed && (
+                <span className={cn(
+                  "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
+                  delayDays > 0
+                    ? "text-flame-dark bg-flame-pale"
+                    : "text-brand-dark bg-brand-pastel",
+                )}>
+                  {delayDays > 0 ? `+${delayDays}d late` : `${-delayDays}d ahead`}
+                </span>
+              )}
+              {isListed && (
+                <span className="tabular-nums text-green-dark">
+                  📱 listed {b.appListedAt!.slice(0, 10)}
+                </span>
+              )}
+              {b.legs.length > 0 ? (
+                <span className="text-ink-500">
+                  📍 {b.legs.map((l) => `${l.city} ${l.quantity}`).join(", ")}
+                </span>
+              ) : (
+                <span className="text-ink-500">📍 {b.city}</span>
+              )}
+            </div>
           </div>
-        </>
+
+          {/* RIGHT — actions stacked vertically. Closure cluster on
+              top (Shift / Cancel / Mark delivered), External-Phase
+              chips below in a single column so the eye scans the
+              chain top→bottom. Hidden once the batch is closed. */}
+          {!closed && (
+            <div className="px-3 py-2 bg-ink-50/40 flex flex-col gap-1.5">
+              <div className="flex flex-col gap-1">
+                <BatchOpBtn
+                  label="📅 Shift date"
+                  tone="gold"
+                  busy={batchBusy}
+                  onClick={() => onOpenInlineForm(b.id, "shift")}
+                />
+                <BatchOpBtn
+                  label="🚫 Cancel"
+                  tone="flame"
+                  busy={batchBusy}
+                  onClick={() => onOpenInlineForm(b.id, "cancel")}
+                />
+                {delivery && (
+                  <button
+                    type="button"
+                    disabled={!canDeliver || deliveryBusy}
+                    onClick={() => onOpenInlineForm(b.id, "deliver")}
+                    className={cn(
+                      "text-[0.7rem] px-2 py-0.5 rounded border transition-colors text-left",
+                      canDeliver
+                        ? "border-green text-green-dark hover:bg-green-pale bg-white"
+                        : "border-ink-200 text-ink-400 cursor-not-allowed bg-white",
+                      deliveryBusy && "opacity-50 cursor-wait",
+                    )}
+                    title={deliveryGate.reason}
+                  >
+                    {deliveryBusy
+                      ? "…"
+                      : canDeliver
+                        ? "✓ Mark as delivered"
+                        : "🔒 Mark as delivered"}
+                  </button>
+                )}
+              </div>
+
+              {externalActions.length > 0 && (
+                <div className="flex flex-col gap-1 pt-1 border-t border-ink-200">
+                  {externalActions
+                    .slice()
+                    .sort((a, b) => a.sortOrder - b.sortOrder)
+                    .map((a) => {
+                      const isVin = /vin/i.test(a.actionTypeName);
+                      const isBatchScopeVin = isVin && batchScopeExternal.some((x) => x.id === a.id);
+                      return (
+                        <ActionChip
+                          key={a.id}
+                          action={a}
+                          busy={busyActionId === a.id}
+                          onChangeStatus={onChangeStatus}
+                          vinsBadge={isBatchScopeVin && vinsReceived > 0
+                            ? `${vinsReceived}/${b.requestedQuantity}`
+                            : null}
+                          onClickOverride={isBatchScopeVin
+                            ? () => onOpenInlineForm(b.id, "vins", a.id)
+                            : null}
+                          onEditDate={a.status === "done"
+                            ? () => onOpenInlineForm(b.id, "date", a.id)
+                            : null}
+                        />
+                      );
+                    })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {showShiftForm && (
