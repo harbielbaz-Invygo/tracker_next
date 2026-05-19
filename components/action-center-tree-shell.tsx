@@ -1416,7 +1416,10 @@ function ToggleBtn({ active, onClick, label }: { active: boolean; onClick: () =>
  *   📱 App Listing        po.appListingSummary.completedAt (when all batches listed)
  *   🔑 VIN Received       earliest "done" wave-scope action whose
  *                          action_type name matches /vin/i
- *   🚗 Availability       po.nextAvailability (earliest wave date)
+ *   🚗 Op Availability    earliest wave opsExpectedDate (falls back
+ *                          to availabilityDate when ops hasn't
+ *                          re-projected). Operations' best estimate
+ *                          of when the cohort actually lands.
  *
  * A "today" marker shows where we sit relative to those milestones.
  * Past milestones render green ✓; future ones grey ⏰.
@@ -1443,11 +1446,24 @@ function PoHeaderTimeline({ po }: { po: PoNode }) {
     ? po.appListingSummary.completedAt.slice(0, 10)
     : null;
 
+  // Op availability = earliest projected delivery across the PO's
+  // waves. Each wave's opsExpectedDate is ops's current best
+  // estimate; when it's missing we fall back to the wave's PO-
+  // promised availabilityDate so the chip still shows something
+  // useful on freshly-created POs.
+  const opNextAvailability: string | null = (() => {
+    const candidates = po.waves
+      .map((w) => w.opsExpectedDate ?? w.availabilityDate)
+      .filter((s): s is string => !!s);
+    if (candidates.length === 0) return null;
+    return candidates.slice().sort().at(0) ?? null;
+  })();
+
   const milestones: { icon: string; label: string; date: string | null }[] = [
-    { icon: "📅", label: "PO date",    date: po.poDate },
-    { icon: "📱", label: "App listed", date: appListedAt },
-    { icon: "🔑", label: "VIN",        date: vinCompletedAt },
-    { icon: "🚗", label: "Availability", date: po.nextAvailability },
+    { icon: "📅", label: "PO date",         date: po.poDate },
+    { icon: "📱", label: "App listed",      date: appListedAt },
+    { icon: "🔑", label: "VIN",             date: vinCompletedAt },
+    { icon: "🚗", label: "Op Availability", date: opNextAvailability },
   ];
   const hasAnyDate = milestones.some((m) => m.date != null);
 
