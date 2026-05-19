@@ -220,7 +220,10 @@ export async function POST(req: NextRequest) {
         }).where(eq(batches.id, body.batchId));
 
         // Recompute the OLD wave's opsExpectedDate based on whatever
-        // batches still remain under it (it might be empty now).
+        // batches still remain under it — OR delete the wave entirely
+        // when nothing's left. Wave-scope actions on the empty wave
+        // have to go with it (actions.scope_id is an integer FK with
+        // no cascade), so we drop them in the same transaction.
         const remaining = await tx
           .select({
             projection: batches.currentProjectedDeliveryDate,
@@ -228,16 +231,28 @@ export async function POST(req: NextRequest) {
           })
           .from(batches)
           .where(eq(batches.waveId, oldWaveId));
-        const remainingDates = remaining
-          .map((r) => r.projection ?? r.promised)
-          .filter(Boolean) as string[];
-        const oldOps = remainingDates.length > 0
-          ? remainingDates.sort().at(-1)!
-          : oldWaveRow.availabilityDate;
-        await tx.update(waves).set({
-          opsExpectedDate: oldOps,
-          updatedAt:       new Date().toISOString(),
-        }).where(eq(waves.id, oldWaveId));
+        if (remaining.length === 0) {
+          // Empty → prune. The batch's audit trail in
+          // batch_date_revisions survives (batchId, not waveId), so
+          // the Shift History on the destination window still shows
+          // the move out of this date.
+          await tx.delete(actionsTable).where(and(
+            eq(actionsTable.scope, "wave"),
+            eq(actionsTable.scopeId, oldWaveId),
+          ));
+          await tx.delete(waves).where(eq(waves.id, oldWaveId));
+        } else {
+          const remainingDates = remaining
+            .map((r) => r.projection ?? r.promised)
+            .filter(Boolean) as string[];
+          const oldOps = remainingDates.length > 0
+            ? remainingDates.sort().at(-1)!
+            : oldWaveRow.availabilityDate;
+          await tx.update(waves).set({
+            opsExpectedDate: oldOps,
+            updatedAt:       new Date().toISOString(),
+          }).where(eq(waves.id, oldWaveId));
+        }
       } else if (oldWaveRow) {
         // Same-window path: only the batch's own projection moved.
         // Bring the wave's opsExpectedDate in line with the slowest

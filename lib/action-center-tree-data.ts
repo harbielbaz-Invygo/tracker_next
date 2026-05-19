@@ -412,7 +412,13 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     );
     if (!hasAnyBatch) continue;
 
-    const wavesForPo: WaveNode[] = (wavesByPo.get(p.id) ?? []).map((w) => {
+    // Filter out empty waves (no batches). After the batch-shift
+    // auto-prune lands these should be rare, but defending here
+    // hides any pre-existing empty placeholders from the UI even
+    // before the admin cleanup runs.
+    const wavesForPo: WaveNode[] = (wavesByPo.get(p.id) ?? [])
+      .filter((w) => (batchesByWave.get(w.id)?.length ?? 0) > 0)
+      .map((w) => {
       const wBatches = (batchesByWave.get(w.id) ?? []).map<BatchNode>((b) => {
         const totalValueSar = b.unitPriceSar != null && b.requestedQuantity > 0
           ? Math.round(b.unitPriceSar * b.requestedQuantity)
