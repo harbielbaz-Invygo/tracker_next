@@ -2015,8 +2015,7 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
       </button>
 
       {expanded && (
-      <div className="px-3 pb-2 -mt-1">
-      <div className="space-y-1.5">
+      <div className="px-3 pb-2 -mt-1 space-y-3">
         {wave.batches.map((b) => {
           // Original promise = first revision's previousDate when any
           // shifts exist; otherwise the batch's current promisedDate.
@@ -2024,46 +2023,92 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
             ? b.shiftHistory[0].previousDate
             : b.promisedDate;
           return (
-            <div key={b.id} className="leading-tight">
-              <p className="flex flex-wrap items-baseline gap-x-1.5">
-                <code className="text-[0.65rem] text-midnight font-mono">{b.batchCode}</code>
-                <span className="text-ink-300">·</span>
-                <span className="text-ink-600">
-                  Promised <span className="text-midnight tabular-nums">{original}</span>
-                </span>
+            <div key={b.id}>
+              {/* Batch identity line. Code in mono, model in regular
+                  so the eye locks onto the human label, not the slug. */}
+              <p className="flex flex-wrap items-baseline gap-x-2 leading-tight mb-1">
+                <code className="text-[0.65rem] text-midnight font-mono font-semibold">
+                  {b.batchCode}
+                </code>
+                {b.modelYear && b.modelYear !== "—" && (
+                  <span className="text-[0.65rem] text-ink-500">{b.modelYear}</span>
+                )}
                 {b.shiftHistory.length === 0 && (
-                  <span className="text-ink-400 italic">(no shifts yet)</span>
+                  <span className="text-ink-400 italic text-[0.65rem]">(no shifts yet)</span>
                 )}
               </p>
-              {b.shiftHistory.length > 0 && (
-                <ul className="ml-4 mt-0.5 space-y-0.5">
-                  {b.shiftHistory.map((s, idx) => {
-                    const shiftedOn = s.revisedAt
-                      ? s.revisedAt.slice(0, 10)
-                      : "—";
-                    return (
-                      <li key={`${b.id}:${idx}`} className="text-ink-600">
-                        <span className="text-gold-dark font-medium">{ordinal(idx + 1)} shift</span>
-                        {" on "}
-                        <span className="tabular-nums text-midnight">{shiftedOn}</span>
-                        {" → new date "}
-                        <span className="tabular-nums text-midnight">{s.newDate}</span>
-                        {s.reason && (
-                          <span className="text-ink-500 italic ml-1">· {s.reason}</span>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
+
+              {/* Tabular roll-up — columns line up across rows so ops
+                  can scan New Date / Δ / Shifted-on vertically. Uses
+                  a 4-column grid: label · new date · delta · day. */}
+              <div className="grid grid-cols-[5rem_minmax(0,1fr)_3rem_4rem] gap-x-2 gap-y-0.5 text-[0.7rem] leading-tight">
+                {/* Promised row — anchor everything else against the
+                    original commitment. Empty cells in the delta /
+                    day columns keep alignment with the shift rows. */}
+                <span className="text-ink-500">Promised</span>
+                <span className="tabular-nums text-midnight font-medium">{original}</span>
+                <span />
+                <span />
+                {b.shiftHistory.map((s, idx) => {
+                  const shiftedOn = s.revisedAt ? s.revisedAt.slice(0, 10) : "—";
+                  const fromDate = idx === 0 ? original : b.shiftHistory[idx - 1].newDate;
+                  const delta = signedDayDiff(s.newDate, fromDate);
+                  const deltaCls = delta > 0 ? "text-flame-dark" : delta < 0 ? "text-green-dark" : "text-ink-400";
+                  return (
+                    <ShiftHistoryRow
+                      key={`${b.id}:${idx}`}
+                      label={`${ordinal(idx + 1)} shift`}
+                      newDate={s.newDate}
+                      delta={delta}
+                      deltaCls={deltaCls}
+                      shiftedOn={shiftedOn}
+                      reason={s.reason}
+                    />
+                  );
+                })}
+              </div>
             </div>
           );
         })}
       </div>
-      </div>
       )}
     </div>
   );
+}
+
+/** One row inside the shift-history tabular layout. Lifted out so
+ *  the optional reason can span all 4 columns on its own line. */
+function ShiftHistoryRow({
+  label, newDate, delta, deltaCls, shiftedOn, reason,
+}: {
+  label: string;
+  newDate: string;
+  delta: number;
+  deltaCls: string;
+  shiftedOn: string;
+  reason: string | null;
+}) {
+  return (
+    <>
+      <span className="text-gold-dark font-medium">{label}</span>
+      <span className="tabular-nums text-midnight font-medium">{newDate}</span>
+      <span className={`tabular-nums ${deltaCls}`}>
+        {delta > 0 ? `+${delta}d` : delta < 0 ? `${delta}d` : "0d"}
+      </span>
+      <span className="tabular-nums text-ink-500">{shiftedOn}</span>
+      {reason && (
+        <span className="col-span-4 text-ink-500 italic text-[0.65rem] ml-[5.5rem] -mt-0.5">
+          {reason}
+        </span>
+      )}
+    </>
+  );
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+function signedDayDiff(a: string, b: string): number {
+  const t = (s: string) => new Date(s + "T12:00:00Z").getTime();
+  return Math.round((t(a) - t(b)) / DAY_MS);
 }
 
 /**
