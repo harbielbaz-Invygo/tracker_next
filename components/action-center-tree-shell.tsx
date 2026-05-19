@@ -815,8 +815,10 @@ function PoDrawer({
   return (
     <>
       {/* Header — denser meta line so ops glances value, urgency, and
-          at-risk count without scrolling. Inbox-grade summary. */}
-      <header className="px-4 py-3 border-b border-ink-200 shrink-0 bg-ink-50/50">
+          at-risk count without scrolling. Inbox-grade summary, plus
+          a phase-status strip and a milestone timeline so ops sees
+          the operational picture for this PO in one block. */}
+      <header className="px-4 py-3 border-b border-ink-200 shrink-0 bg-ink-50/50 space-y-2">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-xl font-mono font-bold text-midnight">{po.poNumber}</h2>
           {po.poDate && (
@@ -828,7 +830,7 @@ function PoDrawer({
             </span>
           )}
         </div>
-        <p className="text-xs text-ink-600 mt-1">
+        <p className="text-xs text-ink-600">
           <span className="font-medium text-midnight">🏢 {dealerName}</span>
           <span className="text-ink-300 mx-1.5">·</span>
           <span className="tabular-nums">{po.totalCars} cars</span>
@@ -872,6 +874,10 @@ function PoDrawer({
             </>
           )}
         </p>
+
+        {/* Phase status chips + milestone timeline. Both pull from the
+            same already-resolved PO object — no extra round-trips. */}
+        <PoHeaderTimeline po={po} />
       </header>
 
       {/* View toggle */}
@@ -1326,6 +1332,195 @@ function ToggleBtn({ active, onClick, label }: { active: boolean; onClick: () =>
  * otherwise. Read-only: actual listing happens through the app-listing
  * flow on each batch.
  */
+/**
+ * PO header strip: phase status chips + a milestone timeline.
+ * Renders ONLY when there is at least one milestone date to show
+ * (po date exists, or a wave gives us availability) — keeps the
+ * header tidy on brand-new POs with no waves yet.
+ *
+ * Milestones (left → right in chronological order):
+ *   📅 PO Date            from po.poDate
+ *   📱 App Listing        po.appListingSummary.completedAt (when all batches listed)
+ *   🔑 VIN Received       earliest "done" wave-scope action whose
+ *                          action_type name matches /vin/i
+ *   🚗 Availability       po.nextAvailability (earliest wave date)
+ *
+ * A "today" marker shows where we sit relative to those milestones.
+ * Past milestones render green ✓; future ones grey ⏰.
+ */
+function PoHeaderTimeline({ po }: { po: PoNode }) {
+  const today = todayIso();
+
+  // Phase status — counts pulled from the same logic used by the
+  // left-tree progress lines so the numbers can't drift.
+  const counts = rollupPoCounts(po, today);
+
+  // VIN received date: scan every wave's actions for a done action
+  // whose name contains "vin", pick the earliest completion.
+  const vinCompletedAt = po.waves
+    .flatMap((w) => w.actions)
+    .filter((a) => a.status === "done"
+                && /vin/i.test(a.actionTypeName)
+                && !!a.completedAt)
+    .map((a) => a.completedAt!.slice(0, 10))
+    .sort()
+    .at(0) ?? null;
+
+  const appListedAt = po.appListingSummary.completedAt
+    ? po.appListingSummary.completedAt.slice(0, 10)
+    : null;
+
+  const milestones: { icon: string; label: string; date: string | null }[] = [
+    { icon: "📅", label: "PO date",    date: po.poDate },
+    { icon: "📱", label: "App listed", date: appListedAt },
+    { icon: "🔑", label: "VIN",        date: vinCompletedAt },
+    { icon: "🚗", label: "Availability", date: po.nextAvailability },
+  ];
+  const hasAnyDate = milestones.some((m) => m.date != null);
+
+  function dayDelta(iso: string): number {
+    const t = (d: string) => new Date(d + "T12:00:00Z").getTime();
+    return Math.round((t(iso) - t(today)) / (24 * 60 * 60 * 1000));
+  }
+
+  function relativeLabel(iso: string): string {
+    const d = dayDelta(iso);
+    if (d === 0) return "today";
+    if (d < 0)   return `${-d}d ago`;
+    return `in ${d}d`;
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {/* Phase chips — counts only, mirrors the tree summary. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.7rem]">
+        {counts.internal.total > 0 && (
+          <span className="inline-flex items-baseline gap-1">
+            <span className="text-ink-500">Internal phase</span>
+            <span className={cn(
+              "tabular-nums font-medium",
+              counts.internal.done === counts.internal.total
+                ? "text-green-dark"
+                : "text-midnight",
+            )}>
+              {counts.internal.done}/{counts.internal.total}
+            </span>
+          </span>
+        )}
+        {counts.external.total > 0 && (
+          <>
+            <span className="text-ink-300">·</span>
+            <span className="inline-flex items-baseline gap-1">
+              <span className="text-ink-500">External phase</span>
+              <span className={cn(
+                "tabular-nums font-medium",
+                counts.external.done === counts.external.total
+                  ? "text-green-dark"
+                  : "text-midnight",
+              )}>
+                {counts.external.done}/{counts.external.total}
+              </span>
+            </span>
+          </>
+        )}
+        {counts.overdue > 0 && (
+          <>
+            <span className="text-ink-300">·</span>
+            <span className="text-flame-dark font-bold tabular-nums">
+              ⚠ {counts.overdue} overdue
+            </span>
+          </>
+        )}
+      </div>
+
+      {/* Milestone strip — horizontal chips. Each milestone shows
+          icon, label, date, status (done / pending). Today badge
+          sits on the right so ops can scan "past vs future" by
+          comparing chip dates against it. */}
+      {hasAnyDate && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {milestones.map((m) => (
+            <MilestoneChip
+              key={m.label}
+              icon={m.icon}
+              label={m.label}
+              date={m.date}
+              today={today}
+              relativeLabel={m.date ? relativeLabel(m.date) : null}
+            />
+          ))}
+          <span className="text-[0.65rem] text-brand-dark font-medium tabular-nums bg-brand-pastel/70 rounded-full px-2 py-0.5 ml-1">
+            ⭐ Today {today}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MilestoneChip({
+  icon, label, date, today, relativeLabel,
+}: {
+  icon:   string;
+  label:  string;
+  date:   string | null;
+  today:  string;
+  relativeLabel: string | null;
+}) {
+  const isPast = date != null && date <= today;
+  const isFuture = date != null && date > today;
+  const isToday  = date != null && date === today;
+
+  const toneCls = !date
+    ? "border-ink-200 bg-ink-50 text-ink-400"
+    : isToday
+      ? "border-brand text-brand-dark bg-brand-pastel/40"
+      : isPast
+        ? "border-green text-green-dark bg-green-pale/40"
+        : "border-ink-300 text-ink-700 bg-white";
+
+  const statusGlyph = !date
+    ? "⏰"
+    : isPast
+      ? "✓"
+      : "⏰";
+
+  return (
+    <span
+      className={cn(
+        "text-[0.65rem] inline-flex items-baseline gap-1 border rounded-full px-2 py-0.5 tabular-nums whitespace-nowrap",
+        toneCls,
+      )}
+      title={date
+        ? `${label} · ${date}${relativeLabel ? ` · ${relativeLabel}` : ""}`
+        : `${label} · pending`}
+    >
+      <span aria-hidden>{icon}</span>
+      <span className="font-medium">{label}</span>
+      <span className="text-ink-300">·</span>
+      {date ? (
+        <>
+          <span>{date}</span>
+          {relativeLabel && (
+            <>
+              <span className="text-ink-300">·</span>
+              <span className="text-ink-500">{relativeLabel}</span>
+            </>
+          )}
+          <span className="ml-0.5">{statusGlyph}</span>
+        </>
+      ) : (
+        <span className="italic">pending</span>
+      )}
+      {isFuture && !isToday && (
+        <>
+          {/* Nothing extra — the relativeLabel already says "in Xd" */}
+        </>
+      )}
+    </span>
+  );
+}
+
 function appListedSyntheticAction(po: PoNode): ScopedActionDetail | null {
   if (po.appListingSummary.total === 0) return null;
   const isDone = po.appListingSummary.completedAt != null;
