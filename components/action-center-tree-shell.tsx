@@ -483,8 +483,6 @@ export default function ActionCenterTreeShell({ tree }: Props) {
         {selection.kind === "mine" ? (
           <MineView
             tree={tree}
-            busyActionId={busyActionId}
-            onChangeStatus={setActionStatus}
             mutationError={mutationError}
             cascadeFlash={cascadeFlash}
             onDismissFlash={() => setCascadeFlash(null)}
@@ -1038,7 +1036,7 @@ function isPending(a: ScopedActionDetail): boolean {
 }
 
 function MineView({
-  tree, busyActionId, onChangeStatus,
+  tree,
   mutationError, cascadeFlash, onDismissFlash,
   onJumpToPo,
 }: {
@@ -1046,7 +1044,7 @@ function MineView({
   cascadeFlash: string | null;
   onDismissFlash: () => void;
   onJumpToPo: (poId: number) => void;
-} & Pick<MutationProps, "busyActionId" | "onChangeStatus" | "mutationError">) {
+} & Pick<MutationProps, "mutationError">) {
   const today = todayIso();
 
   // Roll up every (PO × delivery window) cohort. Each cohort gathers
@@ -1180,8 +1178,6 @@ function MineView({
                 key={`${r.poId}:${r.windowDate}`}
                 row={r}
                 today={today}
-                busyActionId={busyActionId}
-                onChangeStatus={onChangeStatus}
                 onJumpToPo={onJumpToPo}
               />
             ))}
@@ -1202,12 +1198,10 @@ function MineView({
  *    there's nothing to act on.
  */
 function InboxWindowCard({
-  row, today, busyActionId, onChangeStatus, onJumpToPo,
+  row, today, onJumpToPo,
 }: {
   row: InboxWindow;
   today: string;
-  busyActionId: number | null;
-  onChangeStatus: (actionId: number, status: Status) => void;
   onJumpToPo: (poId: number) => void;
 }) {
   const isOverdueWindow = row.sortDate < today;
@@ -1273,7 +1267,9 @@ function InboxWindowCard({
         </p>
       )}
 
-      {/* Internal phase pending actions — only when there's pending work. */}
+      {/* Internal phase pending actions — read-only labels. The
+          Inbox is an info box; to act on a chip, ops clicks the PO
+          number above to jump into the detail drawer. */}
       {hasPending && (
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 w-28 shrink-0">
@@ -1282,21 +1278,12 @@ function InboxWindowCard({
         {row.internalPending.length === 0 ? (
           <span className="text-[0.7rem] text-green-dark">✓ all done</span>
         ) : (
-          <div className="flex flex-wrap gap-1.5 flex-1 min-w-0">
-            {row.internalPending.map((a) => (
-              <ActionChip
-                key={`int:${a.id}`}
-                action={a}
-                busy={busyActionId === a.id}
-                onChangeStatus={onChangeStatus}
-              />
-            ))}
-          </div>
+          <ReadOnlyChipList actions={row.internalPending} today={today} />
         )}
       </div>
       )}
 
-      {/* External phase pending actions — only when there's pending work. */}
+      {/* External phase pending actions — read-only labels. */}
       {hasPending && (
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 w-28 shrink-0">
@@ -1305,20 +1292,63 @@ function InboxWindowCard({
         {row.externalPending.length === 0 ? (
           <span className="text-[0.7rem] text-green-dark">✓ all done</span>
         ) : (
-          <div className="flex flex-wrap gap-1.5 flex-1 min-w-0">
-            {row.externalPending.map((a) => (
-              <ActionChip
-                key={`ext:${a.id}`}
-                action={a}
-                busy={busyActionId === a.id}
-                onChangeStatus={onChangeStatus}
-              />
-            ))}
-          </div>
+          <ReadOnlyChipList actions={row.externalPending} today={today} />
         )}
       </div>
       )}
     </li>
+  );
+}
+
+/**
+ * Read-only chip list for the Inbox. Each chip is plain text — no
+ * click, no buttons. Tone follows the action's status (overdue =
+ * flame, blocked = flame, waiting = neutral) so ops can still scan
+ * which rows need attention without giving them an actionable
+ * surface from this view.
+ */
+function ReadOnlyChipList({
+  actions, today,
+}: {
+  actions: ScopedActionDetail[];
+  today: string;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5 flex-1 min-w-0">
+      {actions
+        .slice()
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .map((a) => {
+          const overdue = isOverdue(a, today);
+          const tone =
+            a.status === "blocked" ? "border-flame text-flame-dark bg-flame-pale/40" :
+            overdue                ? "border-flame text-flame-dark bg-flame-pale/40" :
+            "border-ink-300 text-ink-700 bg-white";
+          const icon =
+            a.status === "blocked" ? "⛔" :
+            overdue                ? "⚠️" :
+            "⏳";
+          const label = a.waitingLabel || a.doneLabel;
+          return (
+            <span
+              key={a.id}
+              className={cn(
+                "text-[0.7rem] px-2 py-0.5 rounded border inline-flex items-center gap-1",
+                tone,
+              )}
+              title={[
+                label,
+                a.expectedDate ? `due ${a.expectedDate}` : null,
+                a.stakeholderName ? `@${a.stakeholderName}` : null,
+                a.departmentName,
+              ].filter(Boolean).join(" · ")}
+            >
+              <span aria-hidden>{icon}</span>
+              <span className="font-medium truncate max-w-[10rem]">{label}</span>
+            </span>
+          );
+        })}
+    </div>
   );
 }
 
