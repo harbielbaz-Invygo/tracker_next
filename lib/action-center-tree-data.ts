@@ -16,7 +16,7 @@ import { db } from "@/lib/db";
 import {
   pos, waves, batches, dealers,
   actions as actionsTable, actionTypes, actionDependencies, departments, stakeholders,
-  batchDateRevisions,
+  batchDateRevisions, batchDeliveryLegs,
 } from "@/lib/db/schema";
 
 export type ScopedActionStatus = "waiting" | "blocked" | "done" | "skipped";
@@ -73,8 +73,17 @@ export interface BatchNode {
   /** SAR unit price from the batch's commercial terms. Null when
    *  Intake didn't capture one. */
   unitPriceSar:       number | null;
-  /** Pre-computed requestedQuantity × unitPriceSar for the value chip. */
+  /** Pre-computed requestedQuantity × unitPriceSar. Retained on the
+   *  type for any downstream metric callers; the External-Phase view
+   *  no longer renders monetary fields. */
   totalValueSar:      number | null;
+  /**
+   * Per-city delivery breakdown sourced from batch_delivery_legs.
+   * Empty when the batch is single-city (legacy) or the legs table
+   * isn't migrated. UI renders the comma-joined city + total fallback
+   * when this is empty.
+   */
+  legs:               { city: string; quantity: number }[];
   /**
    * Chronological shift history sourced from batch_date_revisions.
    * Earliest first. Each entry's `previousDate` is the date the batch
@@ -176,7 +185,7 @@ export interface ActionCenterTree {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, revisionRows] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     db.select().from(batches),
@@ -215,6 +224,25 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       .from(stakeholders)
       .orderBy(asc(stakeholders.sortOrder)),
     (async () => {
+      // batch_delivery_legs feeds the per-city qty breakdown in the
+      // batch meta line. Same defensive try/catch as the other
+      // optional tables — if not migrated yet, return [] and the UI
+      // falls back to the comma-joined city + total.
+      try {
+        return await db.select({
+          batchId:           batchDeliveryLegs.batchId,
+          city:              batchDeliveryLegs.city,
+          requestedQuantity: batchDeliveryLegs.requestedQuantity,
+        }).from(batchDeliveryLegs);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/no such table/i.test(msg)) return [] as {
+          batchId: number; city: string; requestedQuantity: number;
+        }[];
+        throw err;
+      }
+    })(),
+    (async () => {
       // Defensive: pre-Phase-A DBs don't have batch_date_revisions yet.
       // Wrapped so the missing-table case falls back to [] rather
       // than 500-ing the whole Action Center page. We log a warning
@@ -248,6 +276,14 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       }
     })(),
   ]);
+
+  // Index per-city legs by batch — order preserved (intake order).
+  const legsByBatch = new Map<number, BatchNode["legs"]>();
+  for (const l of legsRows) {
+    const arr = legsByBatch.get(l.batchId) ?? [];
+    arr.push({ city: l.city, quantity: l.requestedQuantity });
+    legsByBatch.set(l.batchId, arr);
+  }
 
   // Index shift history by batch — earliest first.
   const shiftHistoryByBatch = new Map<number, BatchNode["shiftHistory"]>();
@@ -439,6 +475,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           unitPriceSar:                  b.unitPriceSar ?? null,
           totalValueSar,
           shiftHistory:                  shiftHistoryByBatch.get(b.id) ?? [],
+          legs:                          legsByBatch.get(b.id) ?? [],
           actions:            actionsByKey.get(`batch:${b.id}`) ?? [],
         };
       });

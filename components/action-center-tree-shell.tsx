@@ -1632,6 +1632,12 @@ function WindowActionBar({
   & BatchOpProps
   & Pick<UiStateProps, "onOpenInlineForm">
 ) {
+  // Collapsed by default. Bulk controls + window-wide chips live
+  // inside this card; per-batch action is the more common operation,
+  // so we keep the bulk surface tucked away until ops explicitly
+  // asks for it. State is local — each window's card maintains its
+  // own toggle independent of others.
+  const [expanded, setExpanded] = useState<boolean>(false);
   const openBatches = wave.batches.filter((b) => b.closedAt == null);
   const deliveredCount = wave.batches.filter((b) => b.closureReason === "delivered").length;
 
@@ -1708,23 +1714,39 @@ function WindowActionBar({
 
   return (
     <div className="border-2 border-brand rounded-md bg-brand-pastel/40 shadow-sm">
-      {/* Distinguishing label — colored pill at the top-left so ops
-          immediately knows this row is WINDOW-LEVEL (applies to all
-          batches below) and not a single-batch row. */}
-      <div className="flex items-baseline gap-2 px-3 pt-2">
+      {/* Click-to-toggle header. Collapsed = pill + subtitle only,
+          expanded = full bulk control surface beneath. The chevron
+          gives an explicit affordance even though the whole row is
+          clickable. */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="w-full flex items-baseline gap-2 px-3 py-2 text-left hover:bg-brand-pastel/30 transition-colors"
+      >
+        <span aria-hidden className="text-brand-dark text-xs">
+          {expanded ? "▾" : "▸"}
+        </span>
         <span className="inline-block text-[0.6rem] font-bold uppercase tracking-wide bg-brand text-white rounded-full px-2 py-0.5">
           Window
         </span>
         <span className="text-[0.7rem] text-brand-dark font-medium">
           Applies to every batch in this delivery window
         </span>
+        {!expanded && (
+          <span className="text-[0.65rem] text-brand-dark/70 italic ml-2">
+            click to expand bulk controls
+          </span>
+        )}
         {deliveredCount > 0 && (
           <span className="text-[0.7rem] text-green-dark tabular-nums ml-auto">
             ✓ {deliveredCount}/{wave.batches.length} delivered
           </span>
         )}
-      </div>
+      </button>
 
+      {expanded && (
+      <>
       {/* SHIFT HISTORY — sourced from batch_date_revisions per batch.
           Lists each shift that brought a batch into this window in
           chronological order so ops can see the date-change audit
@@ -1782,6 +1804,8 @@ function WindowActionBar({
       </div>
       {/* Silence unused-prop lint until per-bar busy state is shown. */}
       <span className="hidden" data-busy={busyBatchId} />
+      </>
+      )}
     </div>
   );
 }
@@ -2066,12 +2090,15 @@ function BatchRow({
         ? (b.closureReason === "delivered" ? "bg-green-pale/30" : "bg-flame-pale/20")
         : "bg-white",
     )}>
-      {/* Identity strip — code, model, qty, city, listed/closure chips. */}
+      {/* Identity strip — code, model, total qty, listed/closure
+          chips. The per-city breakdown moves to the meta line below
+          so the identity row stays readable when there are many
+          cities. */}
       <div className="px-3 pt-2 pb-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
         <code className="text-[0.75rem] text-midnight font-mono font-semibold">{b.batchCode}</code>
         <span className="text-midnight font-medium">{b.modelYear}</span>
         <span className="text-ink-300">·</span>
-        <span className="tabular-nums">{b.requestedQuantity}× {b.city}</span>
+        <span className="tabular-nums">{b.requestedQuantity} cars</span>
         {b.closedAt && (
           <span className={cn(
             "ml-auto text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
@@ -2085,8 +2112,8 @@ function BatchRow({
       </div>
 
       {/* Meta line — operationally important context: promised vs.
-          projected, delay, listing, value, colors. Renders as small
-          chips with consistent spacing. */}
+          projected, delay, listing, per-city qty, colors. Monetary
+          fields are intentionally omitted from this view. */}
       <div className="px-3 pb-2 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[0.7rem] text-ink-600">
         <span className="tabular-nums">
           📅 Promised <span className="text-midnight">{b.promisedDate}</span>
@@ -2111,10 +2138,15 @@ function BatchRow({
             📱 listed {b.appListedAt!.slice(0, 10)}
           </span>
         )}
-        {b.totalValueSar != null && (
-          <span className="tabular-nums" title="requestedQuantity × unitPriceSar">
-            💰 <span className="text-midnight">{b.totalValueSar.toLocaleString()}</span> SAR
+        {/* Per-city qty — render the legs explicitly; fall back to
+            the comma-joined `city` field when legs aren't populated
+            (legacy single-city batches or pre-Phase-α DBs). */}
+        {b.legs.length > 0 ? (
+          <span className="text-ink-500">
+            📍 {b.legs.map((l) => `${l.city} ${l.quantity}`).join(", ")}
           </span>
+        ) : (
+          <span className="text-ink-500">📍 {b.city}</span>
         )}
         {b.colorSummary && (
           <span className="text-ink-500 truncate max-w-[24rem]" title={b.colorSummary}>
