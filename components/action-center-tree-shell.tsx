@@ -2696,7 +2696,9 @@ function BatchRow({
                       onClickOverride={isBatchScopeVin
                         ? () => onOpenInlineForm(b.id, "vins", a.id)
                         : null}
-                      onEditDate={() => onOpenInlineForm(b.id, "date", a.id)}
+                      onEditDate={a.status === "done"
+                        ? () => onOpenInlineForm(b.id, "date", a.id)
+                        : null}
                     />
                   );
                 })}
@@ -2777,12 +2779,13 @@ function BatchRow({
             action={action}
             busy={busyActionId === action.id}
             onSubmit={(payload) => {
+              // expectedDate is left null on the wire so the API
+              // leaves it alone (the route currently always writes
+              // expectedDate; pass the current value to preserve it).
               onBatchOp(b.id, "/api/scope-action/date", {
                 actionId:     action.id,
-                expectedDate: payload.expectedDate,
-                ...(payload.completedAt !== undefined
-                  ? { completedAt: payload.completedAt }
-                  : {}),
+                expectedDate: action.expectedDate,
+                completedAt:  payload.completedAt,
               });
               onCloseInlineForm();
             }}
@@ -2959,74 +2962,52 @@ function CancelBatchForm({
 }
 
 /**
- * Inline form for editing an action's expectedDate and (when done)
- * its completedAt. Triggered by the 📅 button on each ActionChip.
- *
- * expectedDate is editable on any status; completedAt is only
- * editable when status === "done" (the API enforces this too).
- * Clearing the date input + submit nulls out the field.
+ * Inline form for backdating an action's completedAt. Triggered by
+ * the 📅 button on each *done* ActionChip — non-done chips don't
+ * show the trigger since there's no completion timestamp to edit.
+ * Clearing the input + submit nulls the field (effectively reverts
+ * to "auto-stamped at done click").
  */
 function ActionDateForm({
   action, busy, onSubmit, onCancel,
 }: {
   action: ScopedActionDetail;
   busy: boolean;
-  onSubmit: (payload: { expectedDate: string | null; completedAt?: string | null }) => void;
+  onSubmit: (payload: { completedAt: string | null }) => void;
   onCancel: () => void;
 }) {
   const label = action.doneLabel || action.waitingLabel;
-  const isDone = action.status === "done";
-
-  const [expected, setExpected] = useState<string>(action.expectedDate ?? "");
-  // completedAt comes in as full ISO datetime; the date input needs yyyy-mm-dd.
-  const initialCompleted = action.completedAt ? action.completedAt.slice(0, 10) : "";
-  const [completed, setCompleted] = useState<string>(initialCompleted);
+  const initial = action.completedAt ? action.completedAt.slice(0, 10) : "";
+  const [completed, setCompleted] = useState<string>(initial);
   const [error, setError] = useState<string | null>(null);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (expected && !/^\d{4}-\d{2}-\d{2}$/.test(expected)) {
-      setError("Expected date must be yyyy-mm-dd or empty.");
-      return;
-    }
-    if (isDone && completed && !/^\d{4}-\d{2}-\d{2}$/.test(completed)) {
+    if (completed && !/^\d{4}-\d{2}-\d{2}$/.test(completed)) {
       setError("Completed date must be yyyy-mm-dd or empty.");
       return;
     }
-    onSubmit({
-      expectedDate: expected ? expected : null,
-      ...(isDone ? { completedAt: completed ? completed : null } : {}),
-    });
+    onSubmit({ completedAt: completed ? completed : null });
   }
 
   return (
     <form onSubmit={submit} className="mt-2 p-2 border border-ink-300 rounded-md bg-ink-50 space-y-2">
       <p className="text-[0.7rem] font-medium text-midnight">
-        📅 Edit dates — {label}
+        📅 Completion date — {label}
       </p>
       <p className="text-[0.65rem] text-ink-600 leading-snug">
-        Override the auto-computed dates for this action.
-        {isDone ? " Completed date is editable since the action is done." : " Mark the action done first to backdate its completion."}
+        When did this action actually complete? Defaults to the click
+        time when ops first marked it done. Clear to revert.
       </p>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        <label className="text-[0.65rem] text-ink-600 flex flex-col">
-          Expected
-          <input
-            type="date"
-            value={expected}
-            onChange={(e) => { setExpected(e.target.value); setError(null); }}
-            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5"
-            autoFocus
-          />
-        </label>
-        <label className="text-[0.65rem] text-ink-600 flex flex-col">
-          Completed{!isDone && <span className="text-ink-400"> · done-only</span>}
+      <div className="flex items-baseline gap-2">
+        <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
+          Completed
           <input
             type="date"
             value={completed}
             onChange={(e) => { setCompleted(e.target.value); setError(null); }}
-            disabled={!isDone}
-            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5 disabled:bg-ink-100 disabled:text-ink-400"
+            className="text-xs px-2 py-1 border border-ink-300 rounded tabular-nums"
+            autoFocus
           />
         </label>
       </div>
@@ -3045,7 +3026,7 @@ function ActionDateForm({
           disabled={busy}
           className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel"
         >
-          {busy ? "…" : "✓ Save dates"}
+          {busy ? "…" : "✓ Save"}
         </button>
       </div>
     </form>
