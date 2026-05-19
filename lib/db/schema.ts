@@ -104,6 +104,16 @@ export const batches = sqliteTable("batches", {
   requestedQuantity:   integer("requested_quantity").notNull(),
   allocatedQuantity:   integer("allocated_quantity").default(0),
   deliveredQuantity:   integer("delivered_quantity").default(0),
+  /**
+   * VINs actually received from the dealer, per batch. 0 = none yet
+   * (default). Captured when ops marks the batch-scope "VIN" External-
+   * Phase chip done — the operator types how many of the N cars in
+   * the batch actually got a VIN. Caps `deliveredQuantity` at close:
+   * you can't deliver more cars than the VINs you've received.
+   * Partial (0 < n < requestedQuantity) is normal — dealers often
+   * ship VINs in waves.
+   */
+  vinsReceivedQuantity: integer("vins_received_quantity").notNull().default(0),
 
   // Dates
   requestedAt:                text("requested_at").notNull(),                 // ISO

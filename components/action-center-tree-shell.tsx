@@ -157,11 +157,15 @@ export default function ActionCenterTreeShell({ tree }: Props) {
    * keeps focus, prevents accidental edits to other batches.
    */
   const [inlineForm, setInlineForm] = useState<
-    | { batchId: number; kind: "shift" | "cancel" }
+    | { batchId: number; kind: "shift" | "cancel" | "vins" | "deliver"; actionId?: number }
     | null
   >(null);
-  function openInlineForm(batchId: number, kind: "shift" | "cancel") {
-    setInlineForm({ batchId, kind });
+  function openInlineForm(
+    batchId: number,
+    kind: "shift" | "cancel" | "vins" | "deliver",
+    actionId?: number,
+  ) {
+    setInlineForm({ batchId, kind, actionId });
   }
   function closeInlineForm() { setInlineForm(null); }
 
@@ -537,8 +541,8 @@ interface BatchOpProps {
 interface UiStateProps {
   expandedWaveIds: Set<number>;
   onToggleWave: (id: number) => void;
-  inlineForm: { batchId: number; kind: "shift" | "cancel" } | null;
-  onOpenInlineForm:  (batchId: number, kind: "shift" | "cancel") => void;
+  inlineForm: { batchId: number; kind: "shift" | "cancel" | "vins" | "deliver"; actionId?: number } | null;
+  onOpenInlineForm:  (batchId: number, kind: "shift" | "cancel" | "vins" | "deliver", actionId?: number) => void;
   onCloseInlineForm: () => void;
 }
 
@@ -2097,11 +2101,17 @@ function WindowActionBar({
  * pending parents list.
  */
 function ActionChip({
-  action, busy, onChangeStatus,
+  action, busy, onChangeStatus, vinsBadge, onClickOverride,
 }: {
   action: ScopedActionDetail;
   busy: boolean;
   onChangeStatus: (actionId: number, status: Status) => void;
+  /** When provided (batch-scope VIN chip), appends a "n/N" count after
+   *  the label so ops can see partial reception at a glance. */
+  vinsBadge?: string | null;
+  /** When provided, intercepts the click instead of flipping status.
+   *  Used by the batch-scope VIN chip to open the qty form. */
+  onClickOverride?: (() => void) | null;
 }) {
   // Synthetic rows (negative id) shouldn't expose interactive chips —
   // they're read-only summaries.
@@ -2152,9 +2162,13 @@ function ActionChip({
   return (
     <button
       type="button"
-      onClick={() => onChangeStatus(action.id, nextStatus)}
+      onClick={() => onClickOverride
+        ? onClickOverride()
+        : onChangeStatus(action.id, nextStatus)}
       disabled={busy}
-      title={tooltipBits.join(" · ")}
+      title={vinsBadge
+        ? `${tooltipBits.join(" · ")} · ${vinsBadge} VINs received`
+        : tooltipBits.join(" · ")}
       className={cn(
         "text-[0.7rem] px-2 py-0.5 rounded border transition-colors inline-flex items-center gap-1",
         toneCls,
@@ -2163,6 +2177,11 @@ function ActionChip({
     >
       <span aria-hidden>{icon}</span>
       <span className="font-medium truncate max-w-[10rem]">{label}</span>
+      {vinsBadge && (
+        <span className="tabular-nums text-[0.65rem] ml-0.5 text-ink-500">
+          {vinsBadge}
+        </span>
+      )}
     </button>
   );
 }
@@ -2452,14 +2471,30 @@ function BatchRow({
     if (!internalPhaseDone)    return { ok: false, reason: "Internal-phase actions still pending on the PO." };
     if (!externalReady)        return { ok: false, reason: `${externalPending} External-Phase action${externalPending === 1 ? "" : "s"} still pending on this batch.` };
     if (!isListed)             return { ok: false, reason: "Batch not yet app-listed (do it via Internal Phase → App listed)." };
-    return { ok: true, reason: "Marks the Delivery action done and auto-closes the batch." };
+    // VIN gate — can't deliver more cars than VINs received. We block
+    // delivery outright when zero VINs are recorded, and rely on the
+    // delivery qty form's max cap for the partial case.
+    if ((b.vinsReceivedQuantity ?? 0) <= 0) {
+      return { ok: false, reason: "No VINs received yet — set the count via 🔑 Set VINs." };
+    }
+    return { ok: true, reason: `Up to ${b.vinsReceivedQuantity} car${b.vinsReceivedQuantity === 1 ? "" : "s"} deliverable (VINs received).` };
   })();
   const canDeliver = deliveryGate.ok;
   const deliveryBusy = !!delivery && busyActionId === delivery.id;
   const batchBusy    = busyBatchId === b.id;
 
-  const showShiftForm  = inlineForm?.batchId === b.id && inlineForm.kind === "shift";
-  const showCancelForm = inlineForm?.batchId === b.id && inlineForm.kind === "cancel";
+  const showShiftForm   = inlineForm?.batchId === b.id && inlineForm.kind === "shift";
+  const showCancelForm  = inlineForm?.batchId === b.id && inlineForm.kind === "cancel";
+  const showVinsForm    = inlineForm?.batchId === b.id && inlineForm.kind === "vins";
+  const showDeliverForm = inlineForm?.batchId === b.id && inlineForm.kind === "deliver";
+
+  // Identify the batch-scope VIN action (if any). We pass it to the
+  // VIN qty form so the inline submit can flip the chip in the same
+  // round-trip — saves a second API call.
+  const vinAction = batchScopeExternal.find((a) => /vin/i.test(a.actionTypeName)) ?? null;
+  const vinsReceived = b.vinsReceivedQuantity ?? 0;
+  const vinsPartial  = vinsReceived > 0 && vinsReceived < b.requestedQuantity;
+  const vinsAllIn    = vinsReceived > 0 && vinsReceived >= b.requestedQuantity;
 
   // Delay vs. dealer promise — positive means we're projecting later
   // than promised; negative means we're tracking ahead. Used for the
@@ -2488,6 +2523,20 @@ function BatchRow({
         <span className="text-midnight font-medium">{b.modelYear}</span>
         <span className="text-ink-300">·</span>
         <span className="tabular-nums">{b.requestedQuantity} cars</span>
+        {/* VIN reception badge — surfaces partial vs. full receipt on
+            the identity strip so the operator scanning the window sees
+            "which batches are still waiting on VINs" without reading
+            every chip. Hidden when 0 (the chip itself carries that). */}
+        {(vinsPartial || vinsAllIn) && (
+          <span className={cn(
+            "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
+            vinsAllIn
+              ? "text-green-dark bg-green-pale"
+              : "text-gold-dark bg-gold-pale",
+          )}>
+            🔑 {vinsReceived}/{b.requestedQuantity} VINs
+          </span>
+        )}
         {b.closedAt && (
           <span className={cn(
             "ml-auto text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
@@ -2547,7 +2596,7 @@ function BatchRow({
       {/* PER-BATCH ACTION BAR — closure cluster row above the
           External-Phase chip row, both edge-to-edge so the chip
           columns align with the WINDOW bar above. */}
-      {!closed && !showShiftForm && !showCancelForm && (
+      {!closed && !showShiftForm && !showCancelForm && !showVinsForm && !showDeliverForm && (
         <>
           <div className="px-3 py-1.5 border-t border-ink-200 bg-ink-50/40 flex flex-wrap gap-1.5">
             <BatchOpBtn
@@ -2562,11 +2611,25 @@ function BatchRow({
               busy={batchBusy}
               onClick={() => onOpenInlineForm(b.id, "cancel")}
             />
+            {/* 🔑 Set VINs — opens the qty form. Shown even when no
+                batch-scope VIN action exists (legacy batches): the
+                form still updates batches.vinsReceivedQuantity, just
+                without flipping a chip. Label reflects current state. */}
+            <BatchOpBtn
+              label={
+                vinsReceived === 0
+                  ? "🔑 Set VINs"
+                  : `🔑 VINs ${vinsReceived}/${b.requestedQuantity}`
+              }
+              tone={vinsAllIn ? "ink" : "brand"}
+              busy={batchBusy}
+              onClick={() => onOpenInlineForm(b.id, "vins", vinAction?.id)}
+            />
             {delivery && (
               <button
                 type="button"
                 disabled={!canDeliver || deliveryBusy}
-                onClick={() => onChangeStatus(delivery.id, "done")}
+                onClick={() => onOpenInlineForm(b.id, "deliver")}
                 className={cn(
                   "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
                   canDeliver
@@ -2587,7 +2650,13 @@ function BatchRow({
 
           {/* External-Phase chips — same grid template as the WINDOW
               bar's chip row, so chips align vertically across the
-              entire delivery window. */}
+              entire delivery window.
+
+              VIN chips on a batch scope are special-cased: clicking
+              them opens the VINs qty form instead of immediately
+              flipping the chip done. That way the operator can record
+              "3 of 5 VINs received" rather than implicitly saying "all
+              5" via a single click. */}
           <div className="px-3 py-2 border-t border-ink-200 grid gap-1.5 grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">
             {externalActions.length === 0 ? (
               <span className="text-[0.7rem] text-ink-500 italic">
@@ -2596,14 +2665,24 @@ function BatchRow({
             ) : externalActions
                 .slice()
                 .sort((a, b) => a.sortOrder - b.sortOrder)
-                .map((a) => (
-                  <ActionChip
-                    key={a.id}
-                    action={a}
-                    busy={busyActionId === a.id}
-                    onChangeStatus={onChangeStatus}
-                  />
-                ))}
+                .map((a) => {
+                  const isVin = /vin/i.test(a.actionTypeName);
+                  const isBatchScopeVin = isVin && batchScopeExternal.some((x) => x.id === a.id);
+                  return (
+                    <ActionChip
+                      key={a.id}
+                      action={a}
+                      busy={busyActionId === a.id}
+                      onChangeStatus={onChangeStatus}
+                      vinsBadge={isBatchScopeVin && vinsReceived > 0
+                        ? `${vinsReceived}/${b.requestedQuantity}`
+                        : null}
+                      onClickOverride={isBatchScopeVin
+                        ? () => onOpenInlineForm(b.id, "vins", a.id)
+                        : null}
+                    />
+                  );
+                })}
           </div>
         </>
       )}
@@ -2628,6 +2707,33 @@ function BatchRow({
               batchId: b.id,
               reason: "cancelled",
               note: note || null,
+            });
+            onCloseInlineForm();
+          }}
+          onCancel={onCloseInlineForm}
+        />
+      )}
+      {showVinsForm && (
+        <VinsReceivedForm
+          batch={b}
+          actionId={inlineForm?.actionId ?? vinAction?.id ?? null}
+          busy={batchBusy}
+          onSubmit={(payload) => {
+            onBatchOp(b.id, "/api/batch-vins-received", payload);
+            onCloseInlineForm();
+          }}
+          onCancel={onCloseInlineForm}
+        />
+      )}
+      {showDeliverForm && (
+        <DeliverForm
+          batch={b}
+          busy={batchBusy}
+          onSubmit={(qty) => {
+            onBatchOp(b.id, "/api/batch-close", {
+              batchId:           b.id,
+              reason:            "delivered",
+              deliveredQuantity: qty,
             });
             onCloseInlineForm();
           }}
@@ -2796,6 +2902,179 @@ function CancelBatchForm({
           )}
         >
           {busy ? "…" : "🚫 Confirm cancel"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * Inline form for recording how many VINs the dealer has shared for
+ * this batch. Defaults to the full requested quantity so the common
+ * "all VINs in" case is one Enter away; the operator overrides only
+ * when reception is partial. Submitting hits /api/batch-vins-received,
+ * which persists the count AND flips the batch-scope VIN chip
+ * (waiting ↔ done) in a single round-trip.
+ */
+function VinsReceivedForm({
+  batch: b, actionId, busy, onSubmit, onCancel,
+}: {
+  batch: BatchNode;
+  actionId: number | null;
+  busy: boolean;
+  onSubmit: (payload: { batchId: number; vinsReceivedQuantity: number; actionId?: number }) => void;
+  onCancel: () => void;
+}) {
+  const current = b.vinsReceivedQuantity ?? 0;
+  // Default = current value if already set, else full requested qty
+  // (the common "all VINs landed" case).
+  const initial = current > 0 ? current : b.requestedQuantity;
+  const [qty, setQty] = useState<string>(String(initial));
+  const [error, setError] = useState<string | null>(null);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const n = parseInt(qty, 10);
+    if (!Number.isFinite(n) || n < 0) {
+      setError("Enter a non-negative integer.");
+      return;
+    }
+    if (n > b.requestedQuantity) {
+      setError(`Can't exceed the batch size (${b.requestedQuantity}).`);
+      return;
+    }
+    onSubmit({
+      batchId:              b.id,
+      vinsReceivedQuantity: n,
+      ...(actionId ? { actionId } : {}),
+    });
+  }
+
+  return (
+    <form onSubmit={submit} className="mt-2 p-2 border border-brand rounded-md bg-brand-pastel/30 space-y-2">
+      <p className="text-[0.7rem] font-medium text-brand-dark">
+        🔑 VINs received — {b.batchCode}
+      </p>
+      <p className="text-[0.65rem] text-ink-600 leading-snug">
+        How many VINs has the dealer shared so far? Partial is fine —
+        you can update this as more VINs arrive. Mark-as-delivered will
+        cap at this number.
+      </p>
+      <div className="flex items-baseline gap-2">
+        <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
+          Received
+          <input
+            type="number"
+            min={0}
+            max={b.requestedQuantity}
+            value={qty}
+            onChange={(e) => { setQty(e.target.value); setError(null); }}
+            className="text-xs px-2 py-1 border border-ink-300 rounded w-20 tabular-nums"
+            autoFocus
+          />
+        </label>
+        <span className="text-[0.65rem] text-ink-500 tabular-nums">
+          / {b.requestedQuantity} cars
+        </span>
+      </div>
+      {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
+      <div className="flex justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel"
+        >
+          {busy ? "…" : "✓ Save VIN count"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * Inline form for Mark-as-delivered. Caps the qty input at the
+ * number of VINs received — you can't deliver more cars than VINs.
+ * Defaults to vinsReceivedQuantity (the most common case: deliver
+ * everything the dealer has shipped VINs for). Submits to
+ * /api/batch-close with reason=delivered + deliveredQuantity.
+ */
+function DeliverForm({
+  batch: b, busy, onSubmit, onCancel,
+}: {
+  batch: BatchNode;
+  busy: boolean;
+  onSubmit: (deliveredQuantity: number) => void;
+  onCancel: () => void;
+}) {
+  const cap = b.vinsReceivedQuantity ?? 0;
+  const [qty, setQty] = useState<string>(String(cap));
+  const [error, setError] = useState<string | null>(null);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const n = parseInt(qty, 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      setError("Enter a positive integer.");
+      return;
+    }
+    if (n > cap) {
+      setError(`Capped at VINs received (${cap}). Record more VINs first if needed.`);
+      return;
+    }
+    onSubmit(n);
+  }
+
+  return (
+    <form onSubmit={submit} className="mt-2 p-2 border border-green rounded-md bg-green-pale/30 space-y-2">
+      <p className="text-[0.7rem] font-medium text-green-dark">
+        ✓ Mark as delivered — {b.batchCode}
+      </p>
+      <p className="text-[0.65rem] text-ink-600 leading-snug">
+        Cars delivered to the customer. Capped at VINs received
+        ({cap} / {b.requestedQuantity}). The batch closes once any
+        delivered qty is recorded.
+      </p>
+      <div className="flex items-baseline gap-2">
+        <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
+          Delivered
+          <input
+            type="number"
+            min={1}
+            max={cap}
+            value={qty}
+            onChange={(e) => { setQty(e.target.value); setError(null); }}
+            className="text-xs px-2 py-1 border border-ink-300 rounded w-20 tabular-nums"
+            autoFocus
+          />
+        </label>
+        <span className="text-[0.65rem] text-ink-500 tabular-nums">
+          / {cap} VINs · {b.requestedQuantity} cars
+        </span>
+      </div>
+      {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
+      <div className="flex justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-green text-green-dark hover:bg-green-pale"
+        >
+          {busy ? "…" : "✓ Confirm delivery"}
         </button>
       </div>
     </form>
