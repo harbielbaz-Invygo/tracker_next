@@ -145,8 +145,13 @@ export interface BatchNode {
    * Empty when the batch is single-city (legacy) or the legs table
    * isn't migrated. UI renders the comma-joined city + total fallback
    * when this is empty.
+   *   - id: legs row id, used as the key when ops records per-city
+   *         VINs received or per-city delivered quantity.
+   *   - quantity: requested cars to this city.
+   *   - vinsReceivedQuantity: VINs the dealer has assigned to this
+   *         leg so far (0 by default). Sum across legs = batch total.
    */
-  legs:               { city: string; quantity: number }[];
+  legs:               { id: number; city: string; quantity: number; vinsReceivedQuantity: number }[];
   /**
    * Chronological shift history sourced from batch_date_revisions.
    * Earliest first. Each entry's `previousDate` is the date the batch
@@ -291,17 +296,37 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       // batch meta line. Same defensive try/catch as the other
       // optional tables — if not migrated yet, return [] and the UI
       // falls back to the comma-joined city + total.
+      // Two-step degradation: legs table missing → []. Legs table
+      // present but vins_received_quantity column missing → re-query
+      // without it (defaulted to 0 in-memory).
       try {
         return await db.select({
-          batchId:           batchDeliveryLegs.batchId,
-          city:              batchDeliveryLegs.city,
-          requestedQuantity: batchDeliveryLegs.requestedQuantity,
+          id:                   batchDeliveryLegs.id,
+          batchId:              batchDeliveryLegs.batchId,
+          city:                 batchDeliveryLegs.city,
+          requestedQuantity:    batchDeliveryLegs.requestedQuantity,
+          vinsReceivedQuantity: batchDeliveryLegs.vinsReceivedQuantity,
         }).from(batchDeliveryLegs);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (/no such table/i.test(msg)) return [] as {
-          batchId: number; city: string; requestedQuantity: number;
+          id: number; batchId: number; city: string;
+          requestedQuantity: number; vinsReceivedQuantity: number;
         }[];
+        if (/no such column/i.test(msg)) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[action-center-tree-data] batch_delivery_legs.vins_received_quantity missing — " +
+            "Run /api/admin/ensure-vins-received-column to migrate. Treating per-leg VINs as 0.",
+          );
+          const legacy = await db.select({
+            id:                batchDeliveryLegs.id,
+            batchId:           batchDeliveryLegs.batchId,
+            city:              batchDeliveryLegs.city,
+            requestedQuantity: batchDeliveryLegs.requestedQuantity,
+          }).from(batchDeliveryLegs);
+          return legacy.map((l) => ({ ...l, vinsReceivedQuantity: 0 }));
+        }
         throw err;
       }
     })(),
@@ -344,7 +369,12 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
   const legsByBatch = new Map<number, BatchNode["legs"]>();
   for (const l of legsRows) {
     const arr = legsByBatch.get(l.batchId) ?? [];
-    arr.push({ city: l.city, quantity: l.requestedQuantity });
+    arr.push({
+      id:                   l.id,
+      city:                 l.city,
+      quantity:             l.requestedQuantity,
+      vinsReceivedQuantity: l.vinsReceivedQuantity ?? 0,
+    });
     legsByBatch.set(l.batchId, arr);
   }
 

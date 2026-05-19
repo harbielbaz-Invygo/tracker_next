@@ -270,6 +270,13 @@ export const batchDeliveryLegs = sqliteTable("batch_delivery_legs", {
    * deliveries cleanly (e.g. 3/3 to Riyadh, 1/2 to Khobar).
    */
   deliveredQuantity:   integer("delivered_quantity").default(0),
+  /**
+   * VINs the dealer has shared for THIS city's leg of the batch. 0 by
+   * default. Sum across legs equals the batch-level VINs received.
+   * Caps the per-leg delivered quantity at close — you can't deliver
+   * more cars to a city than the VINs assigned to it.
+   */
+  vinsReceivedQuantity: integer("vins_received_quantity").notNull().default(0),
   /** Optional per-leg note (transit problems, address issues, etc.). */
   notes:               text("notes"),
   createdAt:           text("created_at").default(sql`(CURRENT_TIMESTAMP)`),

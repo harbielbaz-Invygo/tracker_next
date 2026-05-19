@@ -2729,11 +2729,14 @@ function BatchRow({
         <DeliverForm
           batch={b}
           busy={batchBusy}
-          onSubmit={(qty) => {
+          onSubmit={(payload) => {
             onBatchOp(b.id, "/api/batch-close", {
               batchId:           b.id,
               reason:            "delivered",
-              deliveredQuantity: qty,
+              deliveredQuantity: payload.deliveredQuantity,
+              ...(payload.legConfirmations
+                ? { legConfirmations: payload.legConfirmations }
+                : {}),
             });
             onCloseInlineForm();
           }}
@@ -2910,11 +2913,15 @@ function CancelBatchForm({
 
 /**
  * Inline form for recording how many VINs the dealer has shared for
- * this batch. Defaults to the full requested quantity so the common
- * "all VINs in" case is one Enter away; the operator overrides only
- * when reception is partial. Submitting hits /api/batch-vins-received,
- * which persists the count AND flips the batch-scope VIN chip
- * (waiting ↔ done) in a single round-trip.
+ * this batch. When the batch has multiple delivery legs (cities), one
+ * input per leg lets ops record partial reception per destination
+ * (e.g. all 15 Riyadh VINs in, but only 6 of 10 for Jeddah). The
+ * batch total rolls up as the sum. Single-leg / legacy batches keep
+ * a single input.
+ *
+ * Submitting hits /api/batch-vins-received which persists the
+ * per-leg counts, updates the batch total atomically, and flips the
+ * batch-scope VIN chip in the same round-trip.
  */
 function VinsReceivedForm({
   batch: b, actionId, busy, onSubmit, onCancel,
@@ -2922,19 +2929,66 @@ function VinsReceivedForm({
   batch: BatchNode;
   actionId: number | null;
   busy: boolean;
-  onSubmit: (payload: { batchId: number; vinsReceivedQuantity: number; actionId?: number }) => void;
+  onSubmit: (payload:
+    | { batchId: number; vinsReceivedQuantity: number; actionId?: number }
+    | { batchId: number; legs: { id: number; vinsReceivedQuantity: number }[]; actionId?: number }
+  ) => void;
   onCancel: () => void;
 }) {
-  const current = b.vinsReceivedQuantity ?? 0;
-  // Default = current value if already set, else full requested qty
-  // (the common "all VINs landed" case).
-  const initial = current > 0 ? current : b.requestedQuantity;
-  const [qty, setQty] = useState<string>(String(initial));
+  // Multi-leg path activates when the batch has ≥ 2 legs in the data
+  // (legs table populated). Single-leg + legacy fall through to the
+  // single-input flow.
+  const multiLeg = b.legs.length >= 2;
+
+  // Per-leg state: keyed by leg.id, default to the current value or
+  // the requested qty (the "all in" case) when nothing's been recorded.
+  const [legQtys, setLegQtys] = useState<Record<number, string>>(() => {
+    const init: Record<number, string> = {};
+    for (const l of b.legs) {
+      init[l.id] = String(l.vinsReceivedQuantity > 0 ? l.vinsReceivedQuantity : l.quantity);
+    }
+    return init;
+  });
+
+  // Single-input state (legacy path).
+  const initialScalar = (b.vinsReceivedQuantity ?? 0) > 0
+    ? (b.vinsReceivedQuantity ?? 0)
+    : b.requestedQuantity;
+  const [scalarQty, setScalarQty] = useState<string>(String(initialScalar));
+
   const [error, setError] = useState<string | null>(null);
+
+  const total = multiLeg
+    ? b.legs.reduce((sum, l) => {
+        const n = parseInt(legQtys[l.id] ?? "0", 10);
+        return sum + (Number.isFinite(n) && n >= 0 ? n : 0);
+      }, 0)
+    : Math.max(0, parseInt(scalarQty, 10) || 0);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    const n = parseInt(qty, 10);
+    if (multiLeg) {
+      const legsPayload: { id: number; vinsReceivedQuantity: number }[] = [];
+      for (const l of b.legs) {
+        const n = parseInt(legQtys[l.id] ?? "0", 10);
+        if (!Number.isFinite(n) || n < 0) {
+          setError(`${l.city}: enter a non-negative integer.`);
+          return;
+        }
+        if (n > l.quantity) {
+          setError(`${l.city}: can't exceed ${l.quantity} cars.`);
+          return;
+        }
+        legsPayload.push({ id: l.id, vinsReceivedQuantity: n });
+      }
+      onSubmit({
+        batchId: b.id,
+        legs:    legsPayload,
+        ...(actionId ? { actionId } : {}),
+      });
+      return;
+    }
+    const n = parseInt(scalarQty, 10);
     if (!Number.isFinite(n) || n < 0) {
       setError("Enter a non-negative integer.");
       return;
@@ -2956,27 +3010,54 @@ function VinsReceivedForm({
         🔑 VINs received — {b.batchCode}
       </p>
       <p className="text-[0.65rem] text-ink-600 leading-snug">
-        How many VINs has the dealer shared so far? Partial is fine —
-        you can update this as more VINs arrive. Mark-as-delivered will
-        cap at this number.
+        {multiLeg
+          ? "Record per-city. Each city's Mark-as-delivered caps at its own VINs."
+          : "How many VINs has the dealer shared so far? Partial is fine — Mark-as-delivered caps at this number."}
       </p>
-      <div className="flex items-baseline gap-2">
-        <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
-          Received
-          <input
-            type="number"
-            min={0}
-            max={b.requestedQuantity}
-            value={qty}
-            onChange={(e) => { setQty(e.target.value); setError(null); }}
-            className="text-xs px-2 py-1 border border-ink-300 rounded w-20 tabular-nums"
-            autoFocus
-          />
-        </label>
-        <span className="text-[0.65rem] text-ink-500 tabular-nums">
-          / {b.requestedQuantity} cars
-        </span>
-      </div>
+      {multiLeg ? (
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-[8rem_5rem_auto] items-baseline gap-x-2 gap-y-1">
+            {b.legs.map((l) => (
+              <div key={l.id} className="contents">
+                <span className="text-[0.65rem] text-ink-600 truncate">📍 {l.city}</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={l.quantity}
+                  value={legQtys[l.id] ?? ""}
+                  onChange={(e) => {
+                    setLegQtys((prev) => ({ ...prev, [l.id]: e.target.value }));
+                    setError(null);
+                  }}
+                  className="text-xs px-2 py-1 border border-ink-300 rounded tabular-nums"
+                />
+                <span className="text-[0.65rem] text-ink-500 tabular-nums">/ {l.quantity}</span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[0.65rem] text-ink-500 tabular-nums pt-1 border-t border-ink-200">
+            Batch total: <span className="text-midnight font-medium">{total}</span> / {b.requestedQuantity} cars
+          </p>
+        </div>
+      ) : (
+        <div className="flex items-baseline gap-2">
+          <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
+            Received
+            <input
+              type="number"
+              min={0}
+              max={b.requestedQuantity}
+              value={scalarQty}
+              onChange={(e) => { setScalarQty(e.target.value); setError(null); }}
+              className="text-xs px-2 py-1 border border-ink-300 rounded w-20 tabular-nums"
+              autoFocus
+            />
+          </label>
+          <span className="text-[0.65rem] text-ink-500 tabular-nums">
+            / {b.requestedQuantity} cars
+          </span>
+        </div>
+      )}
       {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
       <div className="flex justify-end gap-1.5">
         <button
@@ -3002,34 +3083,79 @@ function VinsReceivedForm({
 /**
  * Inline form for Mark-as-delivered. Caps the qty input at the
  * number of VINs received — you can't deliver more cars than VINs.
- * Defaults to vinsReceivedQuantity (the most common case: deliver
- * everything the dealer has shipped VINs for). Submits to
- * /api/batch-close with reason=delivered + deliveredQuantity.
+ *
+ * Multi-leg batches get per-city inputs so ops can record partial
+ * city deliveries (e.g. all 15 in Riyadh, but only 8 of 10 for
+ * Jeddah). Each city caps at its own VINs-received count. Single-
+ * leg / legacy batches keep a single delivered input.
  */
 function DeliverForm({
   batch: b, busy, onSubmit, onCancel,
 }: {
   batch: BatchNode;
   busy: boolean;
-  onSubmit: (deliveredQuantity: number) => void;
+  onSubmit: (payload: {
+    deliveredQuantity: number;
+    legConfirmations?: { id: number; deliveredQuantity: number }[];
+  }) => void;
   onCancel: () => void;
 }) {
-  const cap = b.vinsReceivedQuantity ?? 0;
-  const [qty, setQty] = useState<string>(String(cap));
+  const multiLeg = b.legs.length >= 2;
+  const batchCap = b.vinsReceivedQuantity ?? 0;
+
+  // Per-leg state: default each city to its own VINs received (the
+  // "deliver everything we have VINs for" case).
+  const [legQtys, setLegQtys] = useState<Record<number, string>>(() => {
+    const init: Record<number, string> = {};
+    for (const l of b.legs) {
+      init[l.id] = String(l.vinsReceivedQuantity);
+    }
+    return init;
+  });
+
+  const [scalarQty, setScalarQty] = useState<string>(String(batchCap));
   const [error, setError] = useState<string | null>(null);
+
+  const total = multiLeg
+    ? b.legs.reduce((sum, l) => {
+        const n = parseInt(legQtys[l.id] ?? "0", 10);
+        return sum + (Number.isFinite(n) && n >= 0 ? n : 0);
+      }, 0)
+    : Math.max(0, parseInt(scalarQty, 10) || 0);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    const n = parseInt(qty, 10);
+    if (multiLeg) {
+      const legConfirmations: { id: number; deliveredQuantity: number }[] = [];
+      for (const l of b.legs) {
+        const n = parseInt(legQtys[l.id] ?? "0", 10);
+        if (!Number.isFinite(n) || n < 0) {
+          setError(`${l.city}: enter a non-negative integer.`);
+          return;
+        }
+        if (n > l.vinsReceivedQuantity) {
+          setError(`${l.city}: capped at VINs received (${l.vinsReceivedQuantity}).`);
+          return;
+        }
+        legConfirmations.push({ id: l.id, deliveredQuantity: n });
+      }
+      if (total <= 0) {
+        setError("Record at least one delivered car across the cities.");
+        return;
+      }
+      onSubmit({ deliveredQuantity: total, legConfirmations });
+      return;
+    }
+    const n = parseInt(scalarQty, 10);
     if (!Number.isFinite(n) || n <= 0) {
       setError("Enter a positive integer.");
       return;
     }
-    if (n > cap) {
-      setError(`Capped at VINs received (${cap}). Record more VINs first if needed.`);
+    if (n > batchCap) {
+      setError(`Capped at VINs received (${batchCap}). Record more VINs first if needed.`);
       return;
     }
-    onSubmit(n);
+    onSubmit({ deliveredQuantity: n });
   }
 
   return (
@@ -3038,27 +3164,60 @@ function DeliverForm({
         ✓ Mark as delivered — {b.batchCode}
       </p>
       <p className="text-[0.65rem] text-ink-600 leading-snug">
-        Cars delivered to the customer. Capped at VINs received
-        ({cap} / {b.requestedQuantity}). The batch closes once any
-        delivered qty is recorded.
+        {multiLeg
+          ? "Cars delivered per city. Each city caps at its own VINs received. The batch closes once any delivery is recorded."
+          : `Cars delivered to the customer. Capped at VINs received (${batchCap} / ${b.requestedQuantity}). The batch closes once any delivered qty is recorded.`}
       </p>
-      <div className="flex items-baseline gap-2">
-        <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
-          Delivered
-          <input
-            type="number"
-            min={1}
-            max={cap}
-            value={qty}
-            onChange={(e) => { setQty(e.target.value); setError(null); }}
-            className="text-xs px-2 py-1 border border-ink-300 rounded w-20 tabular-nums"
-            autoFocus
-          />
-        </label>
-        <span className="text-[0.65rem] text-ink-500 tabular-nums">
-          / {cap} VINs · {b.requestedQuantity} cars
-        </span>
-      </div>
+      {multiLeg ? (
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-[8rem_5rem_auto] items-baseline gap-x-2 gap-y-1">
+            {b.legs.map((l) => (
+              <div key={l.id} className="contents">
+                <span className="text-[0.65rem] text-ink-600 truncate">📍 {l.city}</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={l.vinsReceivedQuantity}
+                  value={legQtys[l.id] ?? ""}
+                  onChange={(e) => {
+                    setLegQtys((prev) => ({ ...prev, [l.id]: e.target.value }));
+                    setError(null);
+                  }}
+                  className="text-xs px-2 py-1 border border-ink-300 rounded tabular-nums"
+                  disabled={l.vinsReceivedQuantity === 0}
+                  title={l.vinsReceivedQuantity === 0
+                    ? "No VINs received for this city yet — record VINs first."
+                    : undefined}
+                />
+                <span className="text-[0.65rem] text-ink-500 tabular-nums">
+                  / {l.vinsReceivedQuantity} VINs · {l.quantity} cars
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[0.65rem] text-ink-500 tabular-nums pt-1 border-t border-ink-200">
+            Batch delivered: <span className="text-midnight font-medium">{total}</span> / {batchCap} VINs
+          </p>
+        </div>
+      ) : (
+        <div className="flex items-baseline gap-2">
+          <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
+            Delivered
+            <input
+              type="number"
+              min={1}
+              max={batchCap}
+              value={scalarQty}
+              onChange={(e) => { setScalarQty(e.target.value); setError(null); }}
+              className="text-xs px-2 py-1 border border-ink-300 rounded w-20 tabular-nums"
+              autoFocus
+            />
+          </label>
+          <span className="text-[0.65rem] text-ink-500 tabular-nums">
+            / {batchCap} VINs · {b.requestedQuantity} cars
+          </span>
+        </div>
+      )}
       {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
       <div className="flex justify-end gap-1.5">
         <button
