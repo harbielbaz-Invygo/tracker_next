@@ -2038,19 +2038,22 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
                 )}
               </p>
 
-              {/* Tabular roll-up — columns line up across rows so ops
-                  can scan New Date / Δ / Shifted-on vertically. Uses
-                  a 4-column grid: label · new date · delta · day. */}
-              <div className="grid grid-cols-[5rem_minmax(0,1fr)_3rem_4rem] gap-x-2 gap-y-0.5 text-[0.7rem] leading-tight">
+              {/* Tabular roll-up — three tight columns that cluster
+                  on the left of the box. No flex-1 spacer, so the
+                  delta + shifted-on cell stays adjacent to the date
+                  instead of floating to the far right. */}
+              <div className="grid grid-cols-[5rem_6.25rem_auto] gap-x-3 gap-y-0.5 text-[0.7rem] leading-tight items-baseline">
                 {/* Promised row — anchor everything else against the
-                    original commitment. Empty cells in the delta /
-                    day columns keep alignment with the shift rows. */}
+                    original commitment. The meta column is empty here
+                    so date columns still line up below. */}
                 <span className="text-ink-500">Promised</span>
                 <span className="tabular-nums text-midnight font-medium">{original}</span>
                 <span />
-                <span />
                 {b.shiftHistory.map((s, idx) => {
-                  const shiftedOn = s.revisedAt ? s.revisedAt.slice(0, 10) : "—";
+                  // Short "May 19" form for the day-of-shift so we
+                  // can keep the whole column on one line at the
+                  // narrow box width.
+                  const shiftedOn = s.revisedAt ? fmtShortDay(s.revisedAt) : "—";
                   const fromDate = idx === 0 ? original : b.shiftHistory[idx - 1].newDate;
                   const delta = signedDayDiff(s.newDate, fromDate);
                   const deltaCls = delta > 0 ? "text-flame-dark" : delta < 0 ? "text-green-dark" : "text-ink-400";
@@ -2076,8 +2079,10 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
   );
 }
 
-/** One row inside the shift-history tabular layout. Lifted out so
- *  the optional reason can span all 4 columns on its own line. */
+/** One row inside the shift-history tabular layout. Three columns:
+ *  label · new date · "(+Δd · shifted-on)". Delta + day live in the
+ *  same cell so they stay adjacent to each other and to the date,
+ *  instead of floating off to the right of the box. */
 function ShiftHistoryRow({
   label, newDate, delta, deltaCls, shiftedOn, reason,
 }: {
@@ -2091,13 +2096,16 @@ function ShiftHistoryRow({
   return (
     <>
       <span className="text-gold-dark font-medium">{label}</span>
-      <span className="tabular-nums text-midnight font-medium">{newDate}</span>
-      <span className={`tabular-nums ${deltaCls}`}>
-        {delta > 0 ? `+${delta}d` : delta < 0 ? `${delta}d` : "0d"}
+      <span className="tabular-nums text-midnight font-medium whitespace-nowrap">{newDate}</span>
+      <span className="tabular-nums text-ink-500 whitespace-nowrap">
+        <span className={deltaCls}>
+          {delta > 0 ? `+${delta}d` : delta < 0 ? `${delta}d` : "0d"}
+        </span>
+        <span className="text-ink-300 mx-1">·</span>
+        <span>{shiftedOn}</span>
       </span>
-      <span className="tabular-nums text-ink-500">{shiftedOn}</span>
       {reason && (
-        <span className="col-span-4 text-ink-500 italic text-[0.65rem] ml-[5.5rem] -mt-0.5">
+        <span className="col-span-3 text-ink-500 italic text-[0.65rem] ml-[5.5rem] -mt-0.5">
           {reason}
         </span>
       )}
@@ -2109,6 +2117,20 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function signedDayDiff(a: string, b: string): number {
   const t = (s: string) => new Date(s + "T12:00:00Z").getTime();
   return Math.round((t(a) - t(b)) / DAY_MS);
+}
+
+/** Short "May 19" / "Dec 3" form for the shifted-on column. Saves
+ *  ~5 characters vs. the full yyyy-mm-dd so the column fits the
+ *  Shift History box without wrapping. Falls back to the raw input
+ *  when the ISO timestamp doesn't parse. */
+function fmtShortDay(isoTs: string): string {
+  const datePart = isoTs.slice(0, 10);
+  const m = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return datePart || isoTs;
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const month = MONTHS[parseInt(m[2], 10) - 1] ?? m[2];
+  const day = String(parseInt(m[3], 10));
+  return `${month} ${day}`;
 }
 
 /**
