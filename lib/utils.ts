@@ -41,8 +41,14 @@ export interface BatchCodeArgs {
   splitN: number;
   /** Total batches that will be created in this submission. */
   splitTotal: number;
-  /** City for this batch's split. First word becomes the slug. */
-  city: string;
+  /**
+   * City retained for back-compat with existing callers but no longer
+   * embedded in the generated code — per-city qty is rendered in the
+   * batch meta line instead. Multi-city batches (intake legs) shared
+   * a single batch code anyway, so encoding one leg's city was
+   * misleading.
+   */
+  city?: string;
   /** Model string from the PDF (e.g. "Hyundai Accent"). First word becomes the slug. */
   model: string;
   /** Quantity for this split. */
@@ -55,7 +61,6 @@ export function makeBatchCode(args: BatchCodeArgs): string {
     firstWordSlug(args.dealerName),
     `${args.splitN} of ${args.splitTotal}`,
     carNameSlug(args.model),
-    firstWordSlug(args.city),
     String(args.qty),
   ].join("-");
 }
