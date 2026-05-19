@@ -1022,6 +1022,14 @@ interface InboxWindow {
   sortDate:       string;
   internalPending: ScopedActionDetail[];   // PO-scope, not settled
   externalPending: ScopedActionDetail[];   // wave + batch scope, not settled
+  /**
+   * The latest step the workflow has reached on this window — the
+   * highest-sortOrder action across (PO + wave + batch) whose
+   * status === "done". Drives the condensed row rendered when no
+   * pending work remains (we still show the window so ops can see
+   * where deliveries are sitting, just without the empty chip rows).
+   */
+  lastStep:       { label: string; completedAt: string | null } | null;
 }
 
 /** True when an action is still in flight (waiting or blocked). */
@@ -1063,8 +1071,6 @@ function MineView({
               externalPending.push(a);
             }
           }
-          if (internalPending.length === 0 && externalPending.length === 0) continue;
-
           // Earliest ops-projected date across batches in this wave.
           const opsDates = w.batches
             .map((b) => b.currentProjectedDeliveryDate)
@@ -1072,6 +1078,34 @@ function MineView({
             .sort();
           const opsDate = opsDates.length > 0 ? opsDates[0] : null;
           const sortDate = opsDate ?? w.availabilityDate;
+
+          // Latest step = highest-sortOrder done action across PO +
+          // wave + batch scopes. Sort-order reflects workflow order,
+          // so the highest done step IS the "furthest along we've
+          // gotten" — what ops cares about when no work is pending.
+          const allActionsOnWindow: ScopedActionDetail[] = [];
+          for (const a of p.actions) allActionsOnWindow.push(a);
+          for (const a of w.actions) allActionsOnWindow.push(a);
+          for (const b of w.batches) for (const a of b.actions) allActionsOnWindow.push(a);
+          const doneActions = allActionsOnWindow.filter((a) => a.status === "done");
+          let lastStep: InboxWindow["lastStep"] = null;
+          if (doneActions.length > 0) {
+            // Pick the highest-sortOrder row; break ties on completedAt
+            // so the visible label matches the freshest progress.
+            const winner = doneActions.reduce((best, cur) => {
+              if (cur.sortOrder > best.sortOrder) return cur;
+              if (cur.sortOrder < best.sortOrder) return best;
+              const ca = cur.completedAt ?? "";
+              const cb = best.completedAt ?? "";
+              return ca.localeCompare(cb) > 0 ? cur : best;
+            });
+            lastStep = {
+              label:       winner.doneLabel || winner.waitingLabel,
+              completedAt: winner.completedAt
+                ? winner.completedAt.slice(0, 10)
+                : null,
+            };
+          }
 
           acc.push({
             poId:        p.id,
@@ -1082,6 +1116,7 @@ function MineView({
             sortDate,
             internalPending,
             externalPending,
+            lastStep,
           });
         }
       }
@@ -1106,7 +1141,7 @@ function MineView({
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-xl font-bold text-midnight">📋 Inbox</h2>
           <span className="text-xs text-ink-500">
-            Delivery windows with open work — sorted by nearest date (ops projection wins).
+            Every delivery window — sorted by nearest date (ops projection wins). Idle rows show the current step.
           </span>
         </div>
         <p className="text-xs text-ink-600 mt-1">
@@ -1136,7 +1171,7 @@ function MineView({
         )}
         {sorted.length === 0 ? (
           <p className="text-sm text-ink-500 italic px-2">
-            🎉 Inbox zero — every delivery window is clear of pending work.
+            No delivery windows yet — submit an Intake to create one.
           </p>
         ) : (
           <ul className="space-y-2">
@@ -1158,11 +1193,13 @@ function MineView({
 }
 
 /**
- * One delivery-window row. Layout:
+ * One delivery-window row. Two render modes:
  *
- *   Dealer Name · PO-xxxx · 📅 PO 2026-06-10 · ⏰ Ops 2026-06-15
- *   Internal phase (pending): [chip] [chip] [chip]
- *   External phase (pending): [chip] [chip] [chip]
+ *  - Pending mode (has open actions): header + Internal / External
+ *    chip rows.
+ *  - Idle mode (no pending): condensed single-line — header + the
+ *    last step the workflow has reached. Skips the chip rows since
+ *    there's nothing to act on.
  */
 function InboxWindowCard({
   row, today, busyActionId, onChangeStatus, onJumpToPo,
@@ -1175,10 +1212,12 @@ function InboxWindowCard({
 }) {
   const isOverdueWindow = row.sortDate < today;
   const slipped = row.opsDate != null && row.opsDate !== row.windowDate;
+  const hasPending = row.internalPending.length > 0 || row.externalPending.length > 0;
 
   return (
     <li className={cn(
-      "rounded-md border bg-white px-3 py-2 space-y-1.5",
+      "rounded-md border bg-white px-3 py-2",
+      hasPending ? "space-y-1.5" : "space-y-0.5",
       isOverdueWindow ? "border-flame bg-flame-pale/20" : "border-ink-200",
     )}>
       {/* Header — dealer is the protagonist; PO + dates follow. */}
@@ -1212,7 +1251,30 @@ function InboxWindowCard({
         </span>
       </div>
 
-      {/* Internal phase pending actions. */}
+      {/* Idle mode — no pending work. Show only the last step the
+          workflow has reached. Skipping the chip rows entirely keeps
+          the inbox dense; ops scans these rows to confirm where
+          near-done deliveries are sitting. */}
+      {!hasPending && (
+        <p className="text-[0.7rem] text-ink-600">
+          {row.lastStep ? (
+            <>
+              <span className="text-ink-500 mr-1">Current step:</span>
+              <span className="text-green-dark font-medium">✓ {row.lastStep.label}</span>
+              {row.lastStep.completedAt && (
+                <span className="text-ink-400 ml-1 tabular-nums">
+                  ({row.lastStep.completedAt})
+                </span>
+              )}
+            </>
+          ) : (
+            <span className="text-ink-400 italic">No work has started yet.</span>
+          )}
+        </p>
+      )}
+
+      {/* Internal phase pending actions — only when there's pending work. */}
+      {hasPending && (
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 w-28 shrink-0">
           Internal phase
@@ -1232,8 +1294,10 @@ function InboxWindowCard({
           </div>
         )}
       </div>
+      )}
 
-      {/* External phase pending actions. */}
+      {/* External phase pending actions — only when there's pending work. */}
+      {hasPending && (
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 w-28 shrink-0">
           External phase
@@ -1253,6 +1317,7 @@ function InboxWindowCard({
           </div>
         )}
       </div>
+      )}
     </li>
   );
 }
