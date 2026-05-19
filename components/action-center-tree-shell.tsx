@@ -1283,7 +1283,12 @@ function InboxWindowCard({
       </div>
       )}
 
-      {/* External phase pending actions — read-only labels. */}
+      {/* External phase — only the next pending action. Dealer
+          execution runs as a chain (VIN → Plate → Insurance → …);
+          ops only needs to see the head of the queue. Downstream
+          chips will surface once the head clears. Dedupe by
+          action_type so wave + batch copies of the same step
+          don't render twice. */}
       {hasPending && (
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 w-28 shrink-0">
@@ -1291,9 +1296,27 @@ function InboxWindowCard({
         </span>
         {row.externalPending.length === 0 ? (
           <span className="text-[0.7rem] text-green-dark">✓ all done</span>
-        ) : (
-          <ReadOnlyChipList actions={row.externalPending} today={today} />
-        )}
+        ) : (() => {
+          const sortedByOrder = row.externalPending.slice().sort(
+            (a, b) => a.sortOrder - b.sortOrder,
+          );
+          const head = sortedByOrder[0];
+          const remaining = new Set(
+            sortedByOrder
+              .filter((a) => a.actionTypeId !== head.actionTypeId)
+              .map((a) => a.actionTypeId),
+          ).size;
+          return (
+            <div className="flex flex-wrap items-baseline gap-2 flex-1 min-w-0">
+              <ReadOnlyChipList actions={[head]} today={today} />
+              {remaining > 0 && (
+                <span className="text-[0.65rem] text-ink-500 tabular-nums">
+                  +{remaining} more downstream
+                </span>
+              )}
+            </div>
+          );
+        })()}
       </div>
       )}
     </li>
