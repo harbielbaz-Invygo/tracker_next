@@ -2231,12 +2231,23 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
 
       {expanded && (
       <div className="px-3 pb-2 -mt-1 space-y-3">
-        {wave.batches.map((b) => {
-          // Original promise = first revision's previousDate when any
-          // shifts exist; otherwise the batch's current promisedDate.
-          const original = b.shiftHistory.length > 0
-            ? b.shiftHistory[0].previousDate
-            : b.promisedDate;
+        {/* Only render batches that actually have shifts. Batches
+            with no revisions are operationally uninteresting in this
+            audit view — listing them just adds visual noise. The
+            collapsed header still surfaces "no shifts yet" when the
+            entire window is shift-free. */}
+        {(() => {
+          const shifted = wave.batches.filter((b) => b.shiftHistory.length > 0);
+          if (shifted.length === 0) {
+            return (
+              <p className="text-[0.7rem] text-ink-500 italic">
+                No shifts have been applied to any batch in this window.
+              </p>
+            );
+          }
+          return shifted.map((b) => {
+          // Original promise = first revision's previousDate.
+          const original = b.shiftHistory[0].previousDate;
           return (
             <div key={b.id}>
               {/* Batch identity line. Code in mono, model in regular
@@ -2247,9 +2258,6 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
                 </code>
                 {b.modelYear && b.modelYear !== "—" && (
                   <span className="text-[0.65rem] text-ink-500">{b.modelYear}</span>
-                )}
-                {b.shiftHistory.length === 0 && (
-                  <span className="text-ink-400 italic text-[0.65rem]">(no shifts yet)</span>
                 )}
               </p>
 
@@ -2287,7 +2295,8 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
               </div>
             </div>
           );
-        })}
+        });
+        })()}
       </div>
       )}
     </div>
