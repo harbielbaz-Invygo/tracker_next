@@ -1632,27 +1632,23 @@ function WaveSection({
 
       {expanded && (
         <div className="p-2 space-y-3">
-          {/* SHIFT HISTORY — rendered OUTSIDE the WindowActionBar so
-              the audit trail stays visible even when ops keeps the
-              window controls collapsed (their default state). */}
-          <ShiftHistoryBlock wave={wave} />
-
-          {/* WINDOW-LEVEL ACTION BAR
-              Left: closure controls applied across every batch in the
-                    window (Shift all / Cancel all / Mark all delivered).
-              Right: wave-scope External-Phase action chips. Clicking a
-                    chip flips the wave-level row; the cross-scope
-                    cascade in /api/scope-action then propagates the
-                    same status to every batch's batch-scope copy. */}
-          <WindowActionBar
-            wave={wave}
-            internalPhaseDone={internalPhaseDone}
-            busyActionId={busyActionId}
-            busyBatchId={busyBatchId}
-            onChangeStatus={onChangeStatus}
-            onBatchOp={onBatchOp}
-            onOpenInlineForm={onOpenInlineForm}
-          />
+          {/* TWO-COLUMN HEAD ROW: WINDOW controls (left) + Shift History
+              (right). Both boxes share the same outer height when
+              collapsed; expanding either pushes the row taller without
+              disturbing the other's resting height. Stacks on narrow
+              screens via grid-cols breakpoint. */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <WindowActionBar
+              wave={wave}
+              internalPhaseDone={internalPhaseDone}
+              busyActionId={busyActionId}
+              busyBatchId={busyBatchId}
+              onChangeStatus={onChangeStatus}
+              onBatchOp={onBatchOp}
+              onOpenInlineForm={onOpenInlineForm}
+            />
+            <ShiftHistoryBlock wave={wave} />
+          </div>
 
           {/* PER-BATCH BLOCK
               Each batch gets its own box with identity meta on top and
@@ -1969,6 +1965,18 @@ function ActionChip({
  * the window has no batches.
  */
 function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
+  // Collapsed by default — matches the WINDOW card's collapse pattern
+  // so the two boxes start in identical state when ops first expands
+  // a delivery window. Mounting either box doesn't surprise-fill the
+  // screen with audit data.
+  const [expanded, setExpanded] = useState<boolean>(false);
+
+  // Pre-count shift events so the collapsed header carries a hint of
+  // what's inside — ops can see "no shifts yet" without expanding.
+  const totalShifts = wave.batches.reduce(
+    (sum, b) => sum + b.shiftHistory.length,
+    0,
+  );
   if (wave.batches.length === 0) return null;
 
   function ordinal(n: number): string {
@@ -1977,15 +1985,37 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
     return n + (s[(v - 20) % 10] || s[v] || s[0]);
   }
 
-  // Stand-alone block now (was previously nested inside the
-  // brand-tinted WindowActionBar card). Keeps its own border + soft
-  // gold tint so the date-audit theme reads as informational without
-  // competing with the WINDOW-level brand color or batch boxes.
+  // Twin of the WindowActionBar — sits on the same row, same outer
+  // dimensions, collapsed by default. Click-to-toggle header so ops
+  // opens it on demand.
   return (
-    <div className="px-3 py-2 border border-gold/40 rounded-md bg-gold-pale/20 text-[0.7rem]">
-      <p className="text-[0.6rem] font-bold uppercase tracking-wide text-gold-dark mb-1">
-        📅 Shift history
-      </p>
+    <div className="border border-gold/40 rounded-md bg-gold-pale/20 text-[0.7rem] flex flex-col">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="w-full flex items-baseline gap-2 px-3 py-2 text-left hover:bg-gold-pale/40 transition-colors"
+      >
+        <span aria-hidden className="text-gold-dark text-xs">
+          {expanded ? "▾" : "▸"}
+        </span>
+        <span className="inline-block text-[0.6rem] font-bold uppercase tracking-wide bg-gold text-white rounded-full px-2 py-0.5">
+          History
+        </span>
+        <span className="text-[0.7rem] text-gold-dark font-medium">
+          Shift audit trail for this delivery window
+        </span>
+        {!expanded && (
+          <span className="text-[0.65rem] text-gold-dark/70 italic ml-auto tabular-nums">
+            {totalShifts === 0
+              ? "no shifts yet"
+              : `${totalShifts} shift${totalShifts === 1 ? "" : "s"}`}
+          </span>
+        )}
+      </button>
+
+      {expanded && (
+      <div className="px-3 pb-2 -mt-1">
       <div className="space-y-1.5">
         {wave.batches.map((b) => {
           // Original promise = first revision's previousDate when any
@@ -2030,6 +2060,8 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
           );
         })}
       </div>
+      </div>
+      )}
     </div>
   );
 }
