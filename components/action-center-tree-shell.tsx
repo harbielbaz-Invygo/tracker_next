@@ -58,22 +58,48 @@ function isOverdue(a: ScopedActionDetail, today: string): boolean {
   return a.expectedDate < today;
 }
 /**
- * Walk every action under a PO (PO + waves + batches) and return
- * total/done/overdue counts. Drives the progress chip in the left tree.
+ * Walk every action under a PO and split the counts by phase so the
+ * left tree can show "Internal x/y · External x/y" instead of a
+ * single combined total. Returns:
+ *   internal — PO-scope actions + the synthetic App-listed row
+ *              (counted as 1 done when every batch is listed)
+ *   external — wave-scope actions across every wave
+ *   overdue  — combined; ops cares about at-risk count regardless of phase
  */
-function rollupPoCounts(po: PoNode, today: string): { total: number; done: number; overdue: number } {
-  let total = 0, done = 0, overdue = 0;
-  const tally = (a: ScopedActionDetail) => {
-    total++;
-    if (a.status === "done") done++;
+function rollupPoCounts(po: PoNode, today: string): {
+  internal: { done: number; total: number };
+  external: { done: number; total: number };
+  overdue:  number;
+} {
+  let intDone = 0, intTotal = 0;
+  let extDone = 0, extTotal = 0;
+  let overdue = 0;
+  for (const a of po.actions) {
+    intTotal++;
+    if (a.status === "done" || a.status === "skipped") intDone++;
     if (isOverdue(a, today)) overdue++;
-  };
-  for (const a of po.actions) tally(a);
-  for (const w of po.waves) {
-    for (const a of w.actions) tally(a);
-    for (const b of w.batches) for (const a of b.actions) tally(a);
   }
-  return { total, done, overdue };
+  // Synthetic App-listed row: counted as ONE internal-phase row that
+  // is done when every batch under the PO has appListedAt set.
+  if (po.appListingSummary.total > 0) {
+    intTotal++;
+    if (po.appListingSummary.completedAt != null) intDone++;
+  }
+  for (const w of po.waves) {
+    for (const a of w.actions) {
+      extTotal++;
+      if (a.status === "done" || a.status === "skipped") extDone++;
+      if (isOverdue(a, today)) overdue++;
+    }
+    // Batch-scope rows (Delivery + per-batch external copies) drive
+    // the per-batch chips, but for the tree summary we surface them
+    // through the wave totals to avoid double-counting.
+  }
+  return {
+    internal: { done: intDone, total: intTotal },
+    external: { done: extDone, total: extTotal },
+    overdue,
+  };
 }
 
 type DrawerView = "internal" | "vin";
@@ -707,11 +733,45 @@ function DealerTree({
                           </div>
                           <div className="text-[0.65rem] text-ink-500 mt-0.5 tabular-nums">
                             {p.totalCars} cars · {p.waves.length} window{p.waves.length === 1 ? "" : "s"}
-                            {counts.total > 0 && (
-                              <> · {counts.done}/{counts.total} done</>
-                            )}
                             {p.closedAt && <span className="ml-1 text-green-dark">· closed</span>}
                           </div>
+                          {/* Phase-broken progress lines: Internal +
+                              External shown separately so ops can
+                              tell at a glance which side is dragging.
+                              Each phase that has at least one row
+                              shows its own line; we omit when total=0
+                              to keep the tree compact for newly-
+                              created POs. */}
+                          {(counts.internal.total > 0 || counts.external.total > 0) && (
+                            <div className="mt-0.5 space-y-0.5 leading-tight">
+                              {counts.internal.total > 0 && (
+                                <div className="text-[0.65rem] tabular-nums">
+                                  <span className="text-ink-500">Internal phase </span>
+                                  <span className={cn(
+                                    "font-medium",
+                                    counts.internal.done === counts.internal.total
+                                      ? "text-green-dark"
+                                      : "text-midnight",
+                                  )}>
+                                    {counts.internal.done}/{counts.internal.total} done
+                                  </span>
+                                </div>
+                              )}
+                              {counts.external.total > 0 && (
+                                <div className="text-[0.65rem] tabular-nums">
+                                  <span className="text-ink-500">External phase </span>
+                                  <span className={cn(
+                                    "font-medium",
+                                    counts.external.done === counts.external.total
+                                      ? "text-green-dark"
+                                      : "text-midnight",
+                                  )}>
+                                    {counts.external.done}/{counts.external.total} done
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </button>
                       </li>
                     );
