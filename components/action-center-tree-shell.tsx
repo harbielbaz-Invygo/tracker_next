@@ -554,8 +554,11 @@ function DealerTree({
   onSelectPo: (id: number) => void;
   onSelectMine: () => void;
 }) {
+  // Dealers start collapsed — fewer rows on first paint, ops opens
+  // the dealer they're working on. Persisted in-memory for the
+  // session; refresh resets to fully-collapsed.
   const [expandedDealers, setExpandedDealers] = useState<Set<number>>(
-    () => new Set(tree.dealers.map((d) => d.id)),
+    () => new Set(),
   );
   // Free-text filter (PO #, dealer, batch code substring) + sort
   // toggle. Both are local UI state — no need to persist for now.
@@ -753,7 +756,7 @@ function DealerTree({
                                       ? "text-green-dark"
                                       : "text-midnight",
                                   )}>
-                                    {counts.internal.done}/{counts.internal.total} done
+                                    {counts.internal.done}/{counts.internal.total}
                                   </span>
                                 </div>
                               )}
@@ -766,7 +769,7 @@ function DealerTree({
                                       ? "text-green-dark"
                                       : "text-midnight",
                                   )}>
-                                    {counts.external.done}/{counts.external.total} done
+                                    {counts.external.done}/{counts.external.total}
                                   </span>
                                 </div>
                               )}
