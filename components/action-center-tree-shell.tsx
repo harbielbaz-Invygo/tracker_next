@@ -2803,6 +2803,9 @@ function BatchRow({
               ...(payload.legConfirmations
                 ? { legConfirmations: payload.legConfirmations }
                 : {}),
+              ...(payload.createRemainderBatch
+                ? { createRemainderBatch: true }
+                : {}),
             });
             onCloseInlineForm();
           }}
@@ -3266,6 +3269,7 @@ function DeliverForm({
   onSubmit: (payload: {
     deliveredQuantity: number;
     legConfirmations?: { id: number; deliveredQuantity: number }[];
+    createRemainderBatch?: boolean;
   }) => void;
   onCancel: () => void;
 }) {
@@ -3283,6 +3287,10 @@ function DeliverForm({
   });
 
   const [scalarQty, setScalarQty] = useState<string>(String(batchCap));
+  // Defaults ON: partial delivery almost always implies the dealer
+  // will ship the leftover later. Ops can untick when they're closing
+  // out the batch entirely (e.g. the missing units were cancelled).
+  const [createRemainder, setCreateRemainder] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
   const total = multiLeg
@@ -3291,6 +3299,8 @@ function DeliverForm({
         return sum + (Number.isFinite(n) && n >= 0 ? n : 0);
       }, 0)
     : Math.max(0, parseInt(scalarQty, 10) || 0);
+  const undelivered = Math.max(0, b.requestedQuantity - total);
+  const isPartial = total > 0 && total < b.requestedQuantity;
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -3312,7 +3322,11 @@ function DeliverForm({
         setError("Record at least one delivered car across the cities.");
         return;
       }
-      onSubmit({ deliveredQuantity: total, legConfirmations });
+      onSubmit({
+        deliveredQuantity: total,
+        legConfirmations,
+        ...(isPartial && createRemainder ? { createRemainderBatch: true } : {}),
+      });
       return;
     }
     const n = parseInt(scalarQty, 10);
@@ -3324,7 +3338,10 @@ function DeliverForm({
       setError(`Capped at VINs received (${batchCap}). Record more VINs first if needed.`);
       return;
     }
-    onSubmit({ deliveredQuantity: n });
+    onSubmit({
+      deliveredQuantity: n,
+      ...(isPartial && createRemainder ? { createRemainderBatch: true } : {}),
+    });
   }
 
   return (
@@ -3386,6 +3403,22 @@ function DeliverForm({
             / {batchCap} VINs · {b.requestedQuantity} cars
           </span>
         </div>
+      )}
+      {/* Remainder toggle — only relevant when the input is partial.
+          Defaults ON: most partial deliveries are "rest is coming
+          later", and the remainder batch costs nothing to create. */}
+      {isPartial && (
+        <label className="flex items-baseline gap-1.5 text-[0.7rem] text-ink-700 pt-1 border-t border-ink-200">
+          <input
+            type="checkbox"
+            checked={createRemainder}
+            onChange={(e) => setCreateRemainder(e.target.checked)}
+            className="accent-brand cursor-pointer"
+          />
+          <span>
+            Create a remainder batch for the <span className="font-medium tabular-nums">{undelivered}</span> undelivered car{undelivered === 1 ? "" : "s"} (dealer may ship later)
+          </span>
+        </label>
       )}
       {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
       <div className="flex justify-end gap-1.5">
