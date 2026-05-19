@@ -2599,13 +2599,46 @@ function BatchRow({
 
   const formActive = showShiftForm || showCancelForm || showVinsForm || showDeliverForm || showDateForm;
 
+  // Remainder batches carry a `-R{n}` suffix that the close endpoint
+  // assigns when ops splits off the undelivered cars from a partial
+  // delivery. Detect via regex so we don't need a schema change to
+  // light up the visual treatment — the suffix is stable.
+  const remainderMatch = /^(.+)-R(\d+)$/.exec(b.batchCode);
+  const isRemainder = remainderMatch != null;
+  const remainderOf = remainderMatch ? remainderMatch[1] : null;
+  const remainderIndex = remainderMatch ? parseInt(remainderMatch[2], 10) : null;
+
   return (
     <li className={cn(
-      "border-2 border-ink-200 rounded-lg overflow-hidden shadow-sm",
-      closed
-        ? (b.closureReason === "delivered" ? "bg-green-pale/30" : "bg-flame-pale/20")
-        : "bg-white",
+      "border-2 rounded-lg overflow-hidden shadow-sm",
+      // Remainder batches get a distinct gold-tinted border + dotted
+      // pattern so they read as "leftover from another batch" at a
+      // glance — separate visual category from delivered / cancelled
+      // / open batches.
+      isRemainder
+        ? "border-gold border-dashed bg-gold-pale/20"
+        : closed
+          ? (b.closureReason === "delivered" ? "bg-green-pale/30 border-ink-200" : "bg-flame-pale/20 border-ink-200")
+          : "bg-white border-ink-200",
     )}>
+      {/* Remainder banner — only on remainder batches. Spans the
+          full width above the two-column layout so ops sees the
+          provenance before the action controls. */}
+      {isRemainder && (
+        <div className="px-3 py-1.5 bg-gold/15 border-b border-gold/40 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[0.7rem]">
+          <span className="text-[0.6rem] font-bold uppercase tracking-wide bg-gold text-white rounded-full px-2 py-0.5">
+            🔄 Remaining cars
+          </span>
+          <span className="text-gold-dark font-medium tabular-nums">
+            {b.requestedQuantity} car{b.requestedQuantity === 1 ? "" : "s"} from{" "}
+            <code className="font-mono">{remainderOf}</code>
+            {remainderIndex != null && remainderIndex > 1 ? ` (split #${remainderIndex})` : ""}
+          </span>
+          <span className="text-ink-500 italic">
+            — dealer to deliver these later. Only External-Phase work applies.
+          </span>
+        </div>
+      )}
       {/* Two-column rectangular box: information on the left, actions
           stacked on the right. Stacks to a single column at narrow
           widths so the right rail doesn't squeeze the identity row
