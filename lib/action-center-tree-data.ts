@@ -57,6 +57,13 @@ export interface BatchNode {
   city:               string;
   requestedQuantity:  number;
   deliveredQuantity:  number;
+  /**
+   * VINs the dealer has actually shared for this batch (0..requested).
+   * Captured when ops marks the batch-scope VIN External-Phase chip
+   * done. Caps Mark-as-delivered quantity at close. Defaults to 0 on
+   * legacy batches that pre-date the column.
+   */
+  vinsReceivedQuantity: number;
   closedAt:           string | null;
   closureReason:      "delivered" | "cancelled" | null;
   appListedAt:        string | null;
@@ -466,6 +473,11 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           city:               b.dealerReceivingCity ?? "—",
           requestedQuantity:  b.requestedQuantity,
           deliveredQuantity:  b.deliveredQuantity ?? 0,
+          // Defensive — `vinsReceivedQuantity` is a newer column; some
+          // pre-migration DB snapshots may still be missing it and
+          // Drizzle's select returns undefined in that case. Treat as 0
+          // until /api/admin/ensure-vins-received-column has run.
+          vinsReceivedQuantity: (b as { vinsReceivedQuantity?: number | null }).vinsReceivedQuantity ?? 0,
           closedAt:           b.closedAt ?? null,
           closureReason:      (b.closureReason ?? null) as BatchNode["closureReason"],
           appListedAt:        b.appListedAt ?? null,
