@@ -22,6 +22,7 @@ export const ALL_VIEWS = [
   "Forecast",
   "Intake",
   "Action Center",
+  "Action Center 3",
   "Reports",
   "Settings",
   "Guide",
@@ -38,6 +39,9 @@ export const ACCESS: Record<ViewName, Role[] | "public"> = {
   "Forecast":      ["ops", "admin"],
   "Intake":        ["ops", "admin"],
   "Action Center": ["ops", "admin"],
+  // Test surface — redesigned External-Phase view. Same audience as
+  // the main Action Center while it's being evaluated.
+  "Action Center 3": ["ops", "admin"],
   "Reports":       ["ops", "admin"],
   "Settings":      ["admin"],
   // Public — pages overview, workflow, roles, glossary, tech stack.
@@ -52,6 +56,7 @@ export const VIEW_LABELS: Record<ViewName, string> = {
   "Forecast":      "Forecast",
   "Intake":        "Intake",
   "Action Center": "Action Center",
+  "Action Center 3": "Action Center 3",
   "Reports":       "Reports",
   "Settings":      "Settings",
   "Guide":         "Guide",

@@ -135,6 +135,9 @@ const ICONS: Record<ViewName, (p: IconProps) => React.ReactElement> = {
   "Forecast":      ForecastIcon,
   "Intake":        IntakeIcon,
   "Action Center": ActionCenterIcon,
+  // Test surface — reuse the Action Center glyph so the two share a
+  // visual lineage in the sidebar.
+  "Action Center 3": ActionCenterIcon,
   "Reports":       ReportsIcon,
   "Settings":      SettingsIcon,
   "Guide":         GuideIcon,

@@ -30,6 +30,7 @@ const VIEW_TO_PATH: Record<ViewName, string> = {
   "Forecast":      "/forecast",
   "Intake":        "/intake",
   "Action Center": "/action-center",
+  "Action Center 3": "/action-center-3",
   "Reports":       "/reports",
   "Settings":      "/settings",
   "Guide":         "/guide",
