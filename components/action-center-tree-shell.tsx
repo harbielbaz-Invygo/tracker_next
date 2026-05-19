@@ -1629,6 +1629,11 @@ function WaveSection({
 
       {expanded && (
         <div className="p-2 space-y-3">
+          {/* SHIFT HISTORY — rendered OUTSIDE the WindowActionBar so
+              the audit trail stays visible even when ops keeps the
+              window controls collapsed (their default state). */}
+          <ShiftHistoryBlock wave={wave} />
+
           {/* WINDOW-LEVEL ACTION BAR
               Left: closure controls applied across every batch in the
                     window (Shift all / Cancel all / Mark all delivered).
@@ -1807,12 +1812,6 @@ function WindowActionBar({
 
       {expanded && (
       <>
-      {/* SHIFT HISTORY — sourced from batch_date_revisions per batch.
-          Lists each shift that brought a batch into this window in
-          chronological order so ops can see the date-change audit
-          trail without leaving the page. Batches with no shifts get
-          a single "Promised <date> (no shifts)" line. */}
-      <ShiftHistoryBlock wave={wave} />
 
 
       {/* Row 1: bulk closure cluster — single horizontal line, three
@@ -1975,10 +1974,14 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
     return n + (s[(v - 20) % 10] || s[v] || s[0]);
   }
 
+  // Stand-alone block now (was previously nested inside the
+  // brand-tinted WindowActionBar card). Keeps its own border + soft
+  // gold tint so the date-audit theme reads as informational without
+  // competing with the WINDOW-level brand color or batch boxes.
   return (
-    <div className="px-3 py-2 border-t border-brand/30 bg-white/60 text-[0.7rem]">
-      <p className="text-[0.6rem] font-bold uppercase tracking-wide text-brand-dark mb-1">
-        Shift history
+    <div className="px-3 py-2 border border-gold/40 rounded-md bg-gold-pale/20 text-[0.7rem]">
+      <p className="text-[0.6rem] font-bold uppercase tracking-wide text-gold-dark mb-1">
+        📅 Shift history
       </p>
       <div className="space-y-1.5">
         {wave.batches.map((b) => {
