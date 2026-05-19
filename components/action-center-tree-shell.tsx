@@ -157,12 +157,12 @@ export default function ActionCenterTreeShell({ tree }: Props) {
    * keeps focus, prevents accidental edits to other batches.
    */
   const [inlineForm, setInlineForm] = useState<
-    | { batchId: number; kind: "shift" | "cancel" | "vins" | "deliver"; actionId?: number }
+    | { batchId: number; kind: "shift" | "cancel" | "vins" | "deliver" | "date"; actionId?: number }
     | null
   >(null);
   function openInlineForm(
     batchId: number,
-    kind: "shift" | "cancel" | "vins" | "deliver",
+    kind: "shift" | "cancel" | "vins" | "deliver" | "date",
     actionId?: number,
   ) {
     setInlineForm({ batchId, kind, actionId });
@@ -541,8 +541,8 @@ interface BatchOpProps {
 interface UiStateProps {
   expandedWaveIds: Set<number>;
   onToggleWave: (id: number) => void;
-  inlineForm: { batchId: number; kind: "shift" | "cancel" | "vins" | "deliver"; actionId?: number } | null;
-  onOpenInlineForm:  (batchId: number, kind: "shift" | "cancel" | "vins" | "deliver", actionId?: number) => void;
+  inlineForm: { batchId: number; kind: "shift" | "cancel" | "vins" | "deliver" | "date"; actionId?: number } | null;
+  onOpenInlineForm:  (batchId: number, kind: "shift" | "cancel" | "vins" | "deliver" | "date", actionId?: number) => void;
   onCloseInlineForm: () => void;
 }
 
@@ -2101,7 +2101,7 @@ function WindowActionBar({
  * pending parents list.
  */
 function ActionChip({
-  action, busy, onChangeStatus, vinsBadge, onClickOverride,
+  action, busy, onChangeStatus, vinsBadge, onClickOverride, onEditDate,
 }: {
   action: ScopedActionDetail;
   busy: boolean;
@@ -2112,6 +2112,9 @@ function ActionChip({
   /** When provided, intercepts the click instead of flipping status.
    *  Used by the batch-scope VIN chip to open the qty form. */
   onClickOverride?: (() => void) | null;
+  /** When provided, renders a tiny 📅 button after the label that
+   *  opens the date-edit form for this action. Hidden when null. */
+  onEditDate?: (() => void) | null;
 }) {
   // Synthetic rows (negative id) shouldn't expose interactive chips —
   // they're read-only summaries.
@@ -2159,30 +2162,50 @@ function ActionChip({
       : null,
   ].filter(Boolean) as string[];
 
+  // Wrap the chip's main click target + the optional date-edit
+  // trigger in a single bordered shell so they read as one chip
+  // visually. Two separate <button>s under the shell (rather than a
+  // nested button) keeps the HTML valid.
   return (
-    <button
-      type="button"
-      onClick={() => onClickOverride
-        ? onClickOverride()
-        : onChangeStatus(action.id, nextStatus)}
-      disabled={busy}
-      title={vinsBadge
-        ? `${tooltipBits.join(" · ")} · ${vinsBadge} VINs received`
-        : tooltipBits.join(" · ")}
+    <span
       className={cn(
-        "text-[0.7rem] px-2 py-0.5 rounded border transition-colors inline-flex items-center gap-1",
+        "text-[0.7rem] rounded border transition-colors inline-flex items-stretch overflow-hidden",
         toneCls,
         busy && "opacity-50 cursor-wait",
       )}
     >
-      <span aria-hidden>{icon}</span>
-      <span className="font-medium truncate max-w-[10rem]">{label}</span>
-      {vinsBadge && (
-        <span className="tabular-nums text-[0.65rem] ml-0.5 text-ink-500">
-          {vinsBadge}
-        </span>
+      <button
+        type="button"
+        onClick={() => onClickOverride
+          ? onClickOverride()
+          : onChangeStatus(action.id, nextStatus)}
+        disabled={busy}
+        title={vinsBadge
+          ? `${tooltipBits.join(" · ")} · ${vinsBadge} VINs received`
+          : tooltipBits.join(" · ")}
+        className="px-2 py-0.5 inline-flex items-center gap-1 flex-1 min-w-0 text-left hover:bg-black/5"
+      >
+        <span aria-hidden>{icon}</span>
+        <span className="font-medium truncate max-w-[10rem]">{label}</span>
+        {vinsBadge && (
+          <span className="tabular-nums text-[0.65rem] ml-0.5 text-ink-500">
+            {vinsBadge}
+          </span>
+        )}
+      </button>
+      {onEditDate && (
+        <button
+          type="button"
+          onClick={onEditDate}
+          disabled={busy}
+          title="Edit expected / completion date"
+          aria-label="Edit dates"
+          className="px-1.5 border-l border-current/40 hover:bg-black/10 text-[0.7rem]"
+        >
+          📅
+        </button>
       )}
-    </button>
+    </span>
   );
 }
 
@@ -2487,6 +2510,8 @@ function BatchRow({
   const showCancelForm  = inlineForm?.batchId === b.id && inlineForm.kind === "cancel";
   const showVinsForm    = inlineForm?.batchId === b.id && inlineForm.kind === "vins";
   const showDeliverForm = inlineForm?.batchId === b.id && inlineForm.kind === "deliver";
+  const showDateForm    = inlineForm?.batchId === b.id && inlineForm.kind === "date";
+  const dateFormActionId = showDateForm ? inlineForm?.actionId ?? null : null;
 
   // Identify the batch-scope VIN action (if any). We pass it to the
   // VIN qty form so the inline submit can flip the chip in the same
@@ -2596,7 +2621,7 @@ function BatchRow({
       {/* PER-BATCH ACTION BAR — closure cluster row above the
           External-Phase chip row, both edge-to-edge so the chip
           columns align with the WINDOW bar above. */}
-      {!closed && !showShiftForm && !showCancelForm && !showVinsForm && !showDeliverForm && (
+      {!closed && !showShiftForm && !showCancelForm && !showVinsForm && !showDeliverForm && !showDateForm && (
         <>
           <div className="px-3 py-1.5 border-t border-ink-200 bg-ink-50/40 flex flex-wrap gap-1.5">
             <BatchOpBtn
@@ -2611,20 +2636,11 @@ function BatchRow({
               busy={batchBusy}
               onClick={() => onOpenInlineForm(b.id, "cancel")}
             />
-            {/* 🔑 Set VINs — opens the qty form. Shown even when no
-                batch-scope VIN action exists (legacy batches): the
-                form still updates batches.vinsReceivedQuantity, just
-                without flipping a chip. Label reflects current state. */}
-            <BatchOpBtn
-              label={
-                vinsReceived === 0
-                  ? "🔑 Set VINs"
-                  : `🔑 VINs ${vinsReceived}/${b.requestedQuantity}`
-              }
-              tone={vinsAllIn ? "ink" : "brand"}
-              busy={batchBusy}
-              onClick={() => onOpenInlineForm(b.id, "vins", vinAction?.id)}
-            />
+            {/* The 🔑 VIN received chip in the External-Phase row
+                below is the single entry point for recording VINs —
+                a standalone "Set VINs" button here was a confusing
+                duplicate. The identity-strip badge (🔑 n/N VINs)
+                still surfaces the current count at a glance. */}
             {delivery && (
               <button
                 type="button"
@@ -2680,6 +2696,7 @@ function BatchRow({
                       onClickOverride={isBatchScopeVin
                         ? () => onOpenInlineForm(b.id, "vins", a.id)
                         : null}
+                      onEditDate={() => onOpenInlineForm(b.id, "date", a.id)}
                     />
                   );
                 })}
@@ -2743,6 +2760,36 @@ function BatchRow({
           onCancel={onCloseInlineForm}
         />
       )}
+      {showDateForm && dateFormActionId != null && (() => {
+        // Lookup the action across this batch's batch-scope rows AND
+        // the wave's wave-scope rows — both render chips in this row
+        // so the date trigger can target either layer.
+        const action = batchScopeExternal.find((a) => a.id === dateFormActionId)
+          ?? wave.actions.find((a) => a.id === dateFormActionId)
+          ?? null;
+        if (!action) {
+          // Stale state (action no longer exists) — close defensively.
+          onCloseInlineForm();
+          return null;
+        }
+        return (
+          <ActionDateForm
+            action={action}
+            busy={busyActionId === action.id}
+            onSubmit={(payload) => {
+              onBatchOp(b.id, "/api/scope-action/date", {
+                actionId:     action.id,
+                expectedDate: payload.expectedDate,
+                ...(payload.completedAt !== undefined
+                  ? { completedAt: payload.completedAt }
+                  : {}),
+              });
+              onCloseInlineForm();
+            }}
+            onCancel={onCloseInlineForm}
+          />
+        );
+      })()}
     </li>
   );
 }
@@ -2905,6 +2952,100 @@ function CancelBatchForm({
           )}
         >
           {busy ? "…" : "🚫 Confirm cancel"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * Inline form for editing an action's expectedDate and (when done)
+ * its completedAt. Triggered by the 📅 button on each ActionChip.
+ *
+ * expectedDate is editable on any status; completedAt is only
+ * editable when status === "done" (the API enforces this too).
+ * Clearing the date input + submit nulls out the field.
+ */
+function ActionDateForm({
+  action, busy, onSubmit, onCancel,
+}: {
+  action: ScopedActionDetail;
+  busy: boolean;
+  onSubmit: (payload: { expectedDate: string | null; completedAt?: string | null }) => void;
+  onCancel: () => void;
+}) {
+  const label = action.doneLabel || action.waitingLabel;
+  const isDone = action.status === "done";
+
+  const [expected, setExpected] = useState<string>(action.expectedDate ?? "");
+  // completedAt comes in as full ISO datetime; the date input needs yyyy-mm-dd.
+  const initialCompleted = action.completedAt ? action.completedAt.slice(0, 10) : "";
+  const [completed, setCompleted] = useState<string>(initialCompleted);
+  const [error, setError] = useState<string | null>(null);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (expected && !/^\d{4}-\d{2}-\d{2}$/.test(expected)) {
+      setError("Expected date must be yyyy-mm-dd or empty.");
+      return;
+    }
+    if (isDone && completed && !/^\d{4}-\d{2}-\d{2}$/.test(completed)) {
+      setError("Completed date must be yyyy-mm-dd or empty.");
+      return;
+    }
+    onSubmit({
+      expectedDate: expected ? expected : null,
+      ...(isDone ? { completedAt: completed ? completed : null } : {}),
+    });
+  }
+
+  return (
+    <form onSubmit={submit} className="mt-2 p-2 border border-ink-300 rounded-md bg-ink-50 space-y-2">
+      <p className="text-[0.7rem] font-medium text-midnight">
+        📅 Edit dates — {label}
+      </p>
+      <p className="text-[0.65rem] text-ink-600 leading-snug">
+        Override the auto-computed dates for this action.
+        {isDone ? " Completed date is editable since the action is done." : " Mark the action done first to backdate its completion."}
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <label className="text-[0.65rem] text-ink-600 flex flex-col">
+          Expected
+          <input
+            type="date"
+            value={expected}
+            onChange={(e) => { setExpected(e.target.value); setError(null); }}
+            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5"
+            autoFocus
+          />
+        </label>
+        <label className="text-[0.65rem] text-ink-600 flex flex-col">
+          Completed{!isDone && <span className="text-ink-400"> · done-only</span>}
+          <input
+            type="date"
+            value={completed}
+            onChange={(e) => { setCompleted(e.target.value); setError(null); }}
+            disabled={!isDone}
+            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5 disabled:bg-ink-100 disabled:text-ink-400"
+          />
+        </label>
+      </div>
+      {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
+      <div className="flex justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel"
+        >
+          {busy ? "…" : "✓ Save dates"}
         </button>
       </div>
     </form>
