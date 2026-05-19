@@ -2601,18 +2601,18 @@ function BatchRow({
 
   return (
     <li className={cn(
-      "border border-ink-200 rounded-md overflow-hidden",
+      "border-2 border-ink-200 rounded-lg overflow-hidden shadow-sm",
       closed
         ? (b.closureReason === "delivered" ? "bg-green-pale/30" : "bg-flame-pale/20")
         : "bg-white",
     )}>
-      {/* Two-column layout: information on the left, actions stacked
-          on the right. Stacks to a single column at narrow widths so
-          the right rail doesn't squeeze the identity unreadable.
-          Inline forms (shift/cancel/vins/deliver/date) take over the
-          full width below when active. */}
+      {/* Two-column rectangular box: information on the left, actions
+          stacked on the right. Stacks to a single column at narrow
+          widths so the right rail doesn't squeeze the identity row
+          unreadable. Inline forms (shift/cancel/vins/deliver/date)
+          take over the full width below when active. */}
       {!formActive && (
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_min(260px,40%)] min-h-[7.5rem]">
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_min(280px,42%)] min-h-[10rem]">
           {/* LEFT — identity + meta. No colors line (intentionally
               dropped from this view — the modal at intake captures it
               and the dashboard surfaces it; here it crowded the row). */}
