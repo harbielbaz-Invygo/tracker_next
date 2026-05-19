@@ -834,14 +834,34 @@ function PoDrawer({
           <span className="font-medium text-midnight">🏢 {dealerName}</span>
           <span className="text-ink-300 mx-1.5">·</span>
           <span className="tabular-nums">{po.totalCars} cars</span>
-          {po.totalValueSar != null && (
-            <>
-              <span className="text-ink-300 mx-1.5">·</span>
-              <span className="tabular-nums" title="Estimated PO value (cars × unit price, SAR)">
-                💰 {po.totalValueSar.toLocaleString()} SAR
-              </span>
-            </>
-          )}
+          {(() => {
+            // Per-model breakdown derived client-side from the
+            // batches under this PO. Renders inline as
+            // "🚗 Accent 50 · Elantra 30 · Sonata 30" when there are
+            // multiple distinct models, or just the model + count
+            // when the PO is single-model.
+            const byModel = new Map<string, number>();
+            for (const w of po.waves) {
+              for (const b of w.batches) {
+                if (!b.modelYear || b.modelYear === "—") continue;
+                byModel.set(
+                  b.modelYear,
+                  (byModel.get(b.modelYear) ?? 0) + b.requestedQuantity,
+                );
+              }
+            }
+            const entries = Array.from(byModel.entries())
+              .sort((a, b) => b[1] - a[1]); // largest qty first
+            if (entries.length === 0) return null;
+            return (
+              <>
+                <span className="text-ink-300 mx-1.5">·</span>
+                <span className="tabular-nums" title="Per-model car counts under this PO">
+                  🚗 {entries.map(([m, n]) => `${m} ${n}`).join(" · ")}
+                </span>
+              </>
+            );
+          })()}
           <span className="text-ink-300 mx-1.5">·</span>
           <span className="tabular-nums">{po.waves.length} delivery window{po.waves.length === 1 ? "" : "s"}</span>
           {po.nextAvailability && (() => {
