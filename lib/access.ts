@@ -23,6 +23,7 @@ export const ALL_VIEWS = [
   "Intake",
   "Action Center",
   "Action Center 3",
+  "Action Center Fluent",
   "Reports",
   "Settings",
   "Guide",
@@ -42,6 +43,9 @@ export const ACCESS: Record<ViewName, Role[] | "public"> = {
   // Test surface — redesigned External-Phase view. Same audience as
   // the main Action Center while it's being evaluated.
   "Action Center 3": ["ops", "admin"],
+  // Fluent UI v9 take on the Action Center surface — separate test
+  // surface so the design-system pick is testable in isolation.
+  "Action Center Fluent": ["ops", "admin"],
   "Reports":       ["ops", "admin"],
   "Settings":      ["admin"],
   // Public — pages overview, workflow, roles, glossary, tech stack.
@@ -57,6 +61,7 @@ export const VIEW_LABELS: Record<ViewName, string> = {
   "Intake":        "Intake",
   "Action Center": "Action Center",
   "Action Center 3": "Action Center 3",
+  "Action Center Fluent": "Action Center · Fluent",
   "Reports":       "Reports",
   "Settings":      "Settings",
   "Guide":         "Guide",
