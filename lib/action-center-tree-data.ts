@@ -19,6 +19,62 @@ import {
   batchDateRevisions, batchDeliveryLegs,
 } from "@/lib/db/schema";
 
+type BatchRow = typeof batches.$inferSelect;
+
+/**
+ * Fetch the batches table — tolerant of pre-migration DBs that may
+ * still be missing newer columns. The standard
+ * `db.select().from(batches)` generates a SELECT that requests every
+ * column declared in the Drizzle schema; if a column hasn't been
+ * applied to prod yet, the whole query 500s and the Action Center
+ * page goes dark.
+ *
+ * Pattern: try the Drizzle-typed select first; on "no such column"
+ * error, fall back to a raw `SELECT *` (libsql returns whatever
+ * columns exist) and patch the missing field on each row with a 0
+ * default. The page stays up; ops just doesn't see the new column's
+ * data until the admin migration endpoint runs.
+ */
+async function fetchBatchesTolerant(): Promise<BatchRow[]> {
+  try {
+    return await db.select().from(batches);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such column/i.test(msg)) throw err;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[action-center-tree-data] batches has a missing column — falling back to a projection that omits known-newer columns. ` +
+      `Run the matching /api/admin/ensure-* endpoint to migrate. (${msg})`,
+    );
+    // Project only the columns the data layer actually consumes,
+    // skipping `vinsReceivedQuantity` (the newest addition). Drizzle's
+    // .select({...}) still maps snake_case → camelCase per the schema,
+    // so consumers get the BatchRow shape they expect with `vins
+    // ReceivedQuantity` filled in as 0 at the call site.
+    const rows = await db.select({
+      id:                            batches.id,
+      batchCode:                     batches.batchCode,
+      model:                         batches.model,
+      year:                          batches.year,
+      requestedQuantity:             batches.requestedQuantity,
+      deliveredQuantity:             batches.deliveredQuantity,
+      closedAt:                      batches.closedAt,
+      closureReason:                 batches.closureReason,
+      appListedAt:                   batches.appListedAt,
+      dealerPromisedDeliveryDate:    batches.dealerPromisedDeliveryDate,
+      currentProjectedDeliveryDate:  batches.currentProjectedDeliveryDate,
+      colorSummary:                  batches.colorSummary,
+      unitPriceSar:                  batches.unitPriceSar,
+      dealerReceivingCity:           batches.dealerReceivingCity,
+      waveId:                        batches.waveId,
+    }).from(batches);
+    return rows.map((r) => ({
+      ...r,
+      vinsReceivedQuantity: 0,
+    })) as unknown as BatchRow[];
+  }
+}
+
 export type ScopedActionStatus = "waiting" | "blocked" | "done" | "skipped";
 
 export interface ScopedActionDetail {
@@ -195,7 +251,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
   const [posRows, wavesRows, batchesRows, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
-    db.select().from(batches),
+    fetchBatchesTolerant(),
     db
       .select({
         id:              actionsTable.id,
