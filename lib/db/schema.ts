@@ -483,9 +483,17 @@ export const alertRules = sqliteTable("alert_rules", {
    *  no_vin_before_avail         — VIN action not done, ≤ thresholdDays to availability date
    *  action_overdue              — any waiting/blocked action is past its expectedDate
    *  action_pending_before_avail — a specific actionTypeId not done, ≤ thresholdDays to availability date
+   *  listing_overdue             — post_po batch submitted ≥ thresholdDays ago AND not yet
+   *                                app-listed. Surfaces stalled Internal Phase work — the
+   *                                primary "PO → Listed" KPI alert.
    */
   triggerType:   text("trigger_type", {
-                   enum: ["no_vin_before_avail", "action_overdue", "action_pending_before_avail"],
+                   enum: [
+                     "no_vin_before_avail",
+                     "action_overdue",
+                     "action_pending_before_avail",
+                     "listing_overdue",
+                   ],
                  }).notNull(),
   /** Days before availability date (or days overdue) at which to fire. */
   thresholdDays: integer("threshold_days").notNull().default(7),

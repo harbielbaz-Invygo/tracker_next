@@ -817,6 +817,34 @@ function DealerTree({
                               )}
                             </div>
                           )}
+                          {/* Listing-speed KPI badge (Review #2 R9).
+                              Lights up on every live PO so the primary
+                              "PO → App Listed" metric is visible on the
+                              operator surface. Three states:
+                                - listed + fully delivered: "📱 Listed in Nd"
+                                - listed but not all batches: same chip
+                                - open + unlisted: "📱 Day N unlisted"
+                                  (gold past 7d, flame past 14d)
+                             Pre-PO and POs without a submission date
+                             are intentionally omitted (no clock yet). */}
+                          {!p.isPrePo && p.daysSinceSubmission != null && (
+                            p.daysToListed != null ? (
+                              <div className="mt-0.5 text-[0.65rem] tabular-nums text-green-dark">
+                                📱 Listed in {p.daysToListed}d
+                              </div>
+                            ) : (
+                              <div className={cn(
+                                "mt-0.5 text-[0.65rem] tabular-nums",
+                                p.daysSinceSubmission >= 14
+                                  ? "text-flame-dark font-medium"
+                                  : p.daysSinceSubmission >= 7
+                                    ? "text-gold-dark"
+                                    : "text-ink-500",
+                              )}>
+                                📱 Day {p.daysSinceSubmission} unlisted
+                              </div>
+                            )
+                          )}
                           {/* Pre-PO follow-up progress — surfaces the
                               Pre-PO App Listing chip's status (and
                               anything else ops added under pre_po) so

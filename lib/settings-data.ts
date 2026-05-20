@@ -20,7 +20,7 @@ import { getAllRules } from "@/lib/rules";
 export interface AlertRuleSetting {
   id: number;
   name: string;
-  triggerType: "no_vin_before_avail" | "action_overdue" | "action_pending_before_avail";
+  triggerType: "no_vin_before_avail" | "action_overdue" | "action_pending_before_avail" | "listing_overdue";
   thresholdDays: number;
   actionTypeId: number | null;
   /** Name of the actionType, resolved for display. */

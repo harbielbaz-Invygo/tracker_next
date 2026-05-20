@@ -248,6 +248,32 @@ export async function runAlertEngine(): Promise<AlertsByBatch> {
           }
         }
       }
+
+      // ── C. Listing overdue — Internal Phase stagnation ───────────────────
+      // Fires when a post_po batch has been submitted ≥ thresholdDays ago
+      // and is still not app-listed. The primary "PO → Listed" KPI alert.
+      // Pre-PO batches are excluded — they live under a separate listing
+      // flow (Pre-PO App Listing action) measured elsewhere.
+      if (rule.triggerType === "listing_overdue") {
+        if (batch.lifecycleState !== "post_po") continue;
+        if (batch.appListedAt != null) continue;
+        if (!batch.requestedAt) continue;
+
+        const ageDays = daysOverdue(batch.requestedAt);
+        if (ageDays < rule.thresholdDays) continue;
+
+        const fingerprint = fp(rule.id, batch.id);
+        conditionMet.add(fingerprint);
+        if (!activeByFp.has(fingerprint)) {
+          toCreate.push({
+            batchId:     batch.id,
+            fingerprint,
+            severity:    rule.severity as ActiveAlert["severity"],
+            alertType:   "listing_overdue",
+            message:     `Not listed — ${ageDays} day${ageDays !== 1 ? "s" : ""} since PO submission (${batch.requestedAt})`,
+          });
+        }
+      }
     }
   }
 

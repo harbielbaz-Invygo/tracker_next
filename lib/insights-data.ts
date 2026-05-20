@@ -32,6 +32,18 @@ export interface InsightsHero {
   cancelled: number;
   /** Sum of revision counts across affected batches — trust erosion signal. */
   rePromisesIssued: number;
+  /**
+   * Median days from PO submission → app listing across batches that
+   * were listed in the period. Null until at least one batch in the
+   * cohort has been listed. Primary "PO → Listed" KPI.
+   */
+  medianDaysToListed: number | null;
+  /**
+   * Count of post_po batches still unlisted whose submission is older
+   * than 14 days. The actionable companion to medianDaysToListed —
+   * "how many are over the line today?".
+   */
+  unlistedOverThreshold: number;
 }
 
 /**
@@ -313,6 +325,91 @@ async function getForecastReliability(period: ReportPeriod): Promise<ForecastRel
     .sort((x, y) => y.submitted - x.submitted);
 }
 
+/**
+ * Listing-speed KPI aggregate (Review #2 R1).
+ *
+ *   - medianDaysToListed: median of (appListedAt − requestedAt) across
+ *     post_po batches whose `appListedAt` falls in the period. Null
+ *     when no batch has been listed in the period.
+ *   - unlistedOverThreshold: count of open post_po batches whose
+ *     submission was ≥ 14 days ago and that aren't listed yet.
+ *
+ * Both signals come from existing columns — no schema migration.
+ * Period filters use `appListedAt` for the median (the cohort is
+ * "batches listed in the window") and ignore the period for the
+ * overdue count (which is inherently a "right now" measurement).
+ */
+async function getListingSpeed(period: ReportPeriod): Promise<{
+  medianDaysToListed: number | null;
+  unlistedOverThreshold: number;
+}> {
+  const fromIso = fromIsoForPeriod(period);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const THRESHOLD_DAYS = 14;
+
+  // Defensive: the columns we need (requestedAt, appListedAt,
+  // lifecycleState, closedAt) are all old enough that this query
+  // shouldn't fail. Wrapped anyway to match the pattern used by
+  // sibling aggregations.
+  let rows: { requestedAt: string | null; appListedAt: string | null;
+              lifecycleState: "pre_po" | "post_po"; closedAt: string | null }[];
+  try {
+    rows = await db.select({
+      requestedAt:    batches.requestedAt,
+      appListedAt:    batches.appListedAt,
+      lifecycleState: batches.lifecycleState,
+      closedAt:       batches.closedAt,
+    }).from(batches);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table|no such column/i.test(msg)) {
+      // eslint-disable-next-line no-console
+      console.warn("[insights-data] listing speed skipped — schema not migrated.");
+      return { medianDaysToListed: null, unlistedOverThreshold: 0 };
+    }
+    throw err;
+  }
+
+  // Median computation: collect days between submission and listing
+  // for post_po batches that have been listed within the period (or
+  // ever, when period === "all").
+  const daysSamples: number[] = [];
+  let unlistedOver = 0;
+  for (const r of rows) {
+    if (r.lifecycleState !== "post_po") continue;
+    if (!r.requestedAt) continue;
+
+    if (r.appListedAt) {
+      const listedOn = r.appListedAt.slice(0, 10);
+      if (fromIso && listedOn < fromIso) continue; // out of window
+      const days = Math.round(
+        (new Date(listedOn).getTime() - new Date(r.requestedAt).getTime())
+          / (24 * 60 * 60 * 1000),
+      );
+      if (days >= 0) daysSamples.push(days);
+    } else if (r.closedAt == null) {
+      // Open + unlisted — count toward the "overdue" companion.
+      const ageDays = Math.round(
+        (new Date(todayStr).getTime() - new Date(r.requestedAt).getTime())
+          / (24 * 60 * 60 * 1000),
+      );
+      if (ageDays >= THRESHOLD_DAYS) unlistedOver++;
+    }
+  }
+
+  const medianDaysToListed = daysSamples.length === 0
+    ? null
+    : (() => {
+        const sorted = daysSamples.slice().sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 === 0
+          ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+          : sorted[mid];
+      })();
+
+  return { medianDaysToListed, unlistedOverThreshold: unlistedOver };
+}
+
 export async function getInsightsData(period: ReportPeriod = "all"): Promise<InsightsData> {
   // Both functions hit the DB; run them in parallel.
   // Same period filter is threaded into both — Insights is just the
@@ -340,6 +437,11 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     ? Math.round((report.totals.deliveredOnTime / totalDelivered) * 100)
     : null;
 
+  // Listing-speed KPI (Review #2 R1). Median days PO → Listed across
+  // batches that have already been listed; companion count of open
+  // post_po batches still unlisted past the 14-day threshold.
+  const listingSpeed = await getListingSpeed(period);
+
   const hero: InsightsHero = {
     customerDaysLost: report.customerImpact.totals.customerDaysLost,
     activeBatches:    report.totals.open,
@@ -347,6 +449,8 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     onTimeRate,
     cancelled:        report.totals.cancelled,
     rePromisesIssued: report.customerImpact.totals.totalRePromises,
+    medianDaysToListed:    listingSpeed.medianDaysToListed,
+    unlistedOverThreshold: listingSpeed.unlistedOverThreshold,
   };
 
   return {

@@ -106,7 +106,7 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
   return (
     <section
       aria-label="Health summary"
-      className="grid grid-cols-2 md:grid-cols-6 gap-3"
+      className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3"
     >
       <HeroTile
         label="Customer-days lost"
@@ -148,6 +148,25 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
         value={hero.cancelled.toLocaleString()}
         accent={hero.cancelled > 0 ? "flame" : "neutral"}
         sub="batches the dealer pulled"
+      />
+      {/* Listing-speed KPI (Review #2). Pairs the headline median
+          with the count of overdue (>14d unlisted) so a healthy
+          median can't hide a backlog growing in the open queue. */}
+      <HeroTile
+        label="📱 Days PO → Listed"
+        value={hero.medianDaysToListed === null
+          ? "—"
+          : `${hero.medianDaysToListed}d`}
+        accent={hero.medianDaysToListed === null
+          ? "neutral"
+          : hero.medianDaysToListed <= 7
+            ? "green"
+            : hero.medianDaysToListed <= 14
+              ? "gold"
+              : "flame"}
+        sub={hero.unlistedOverThreshold > 0
+          ? `median · ${hero.unlistedOverThreshold} unlisted > 14d`
+          : "median across listed batches"}
       />
     </section>
   );
