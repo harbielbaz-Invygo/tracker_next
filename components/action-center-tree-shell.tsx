@@ -3130,9 +3130,18 @@ function BatchRow({
           {!closed && (
             <div className="px-3 py-2 bg-ink-50/40 flex flex-col gap-1.5">
               <div className="flex flex-col gap-1">
+                {/* Same form, label morphs on lock state. First click
+                    on a batch with no ops projection becomes the
+                    "Set Ops expected date" entry — the API stamps
+                    `opsProjectedDeliveryDateAtLock` atomically.
+                    Subsequent clicks read as the usual Shift Date.
+                    Note: action-level backdate (mark-done with custom
+                    date) is independent — never touches this date. */}
                 <BatchOpBtn
-                  label="📅 Shift date"
-                  tone="gold"
+                  label={b.opsProjectedDeliveryDateAtLock == null
+                    ? "📌 Set Ops expected date"
+                    : "📅 Shift date"}
+                  tone={b.opsProjectedDeliveryDateAtLock == null ? "brand" : "gold"}
                   busy={batchBusy}
                   onClick={() => onOpenInlineForm(b.id, "shift")}
                 />

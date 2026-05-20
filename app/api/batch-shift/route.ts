@@ -84,6 +84,7 @@ export async function POST(req: NextRequest) {
       closedAt:        batches.closedAt,
       waveId:          batches.waveId,
       poNumber:        batches.poNumber,
+      opsAtLock:       batches.opsProjectedDeliveryDateAtLock,
     })
     .from(batches)
     .where(eq(batches.id, body.batchId))
@@ -98,6 +99,13 @@ export async function POST(req: NextRequest) {
   // set one yet (first shift after intake).
   const previous = current.previous ?? current.promised;
   const delayDays = daysBetween(body.newProjectedDate, previous);
+  // First-time ops projection lock — capture the FIRST date ops
+  // commits to so accuracy (initial vs final) can be measured. Lock
+  // is one-way: once set, future shifts only move `current_projected_*`
+  // and the at-lock snapshot stays untouched. Read independently from
+  // the action-level "backdate completion" feature — that edits a
+  // batch_action's completedAt and never touches this field.
+  const lockOpsProjection = current.opsAtLock == null;
 
   // No-op shifts (newDate === previous) are still recorded so the
   // bookings + reason fields capture intent, but with delayDays=0.
@@ -130,10 +138,18 @@ export async function POST(req: NextRequest) {
     // We move the canonical "what date is this batch tracking" by
     // updating BOTH projection and promise — the wave's date IS the
     // batch's commitment date in the new model.
+    //
+    // On the first shift for this batch we also stamp
+    // `ops_projected_delivery_date_at_lock` — the locked snapshot
+    // captures the FIRST ops commitment so accuracy is measurable
+    // against the operator's initial bet, not their final revision.
     await tx.update(batches).set({
       currentProjectedDeliveryDate: body.newProjectedDate,
       dealerPromisedDeliveryDate:   body.newProjectedDate,
       deliveryDateRevisionCount: sql`${batches.deliveryDateRevisionCount} + 1`,
+      ...(lockOpsProjection
+        ? { opsProjectedDeliveryDateAtLock: body.newProjectedDate }
+        : {}),
       updatedAt: new Date().toISOString(),
     }).where(eq(batches.id, body.batchId));
 
