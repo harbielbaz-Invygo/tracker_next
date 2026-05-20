@@ -280,15 +280,19 @@ export default function IntakeForm({ options, initialForecastBatchId = null }: P
             quantity: s.quantity,
             city: s.city,
             date: s.date,
-            // Default Ops's ETA to max(dealer date, today + lead time)
-            // so the field always satisfies the operational floor.
-            opsExpectedDate: defaultOpsDate(s.date, options.leadTimeDays),
+            // Ops doesn't project at Intake any more — no signal yet
+            // (no VIN, no dealer confirmation). The field stays in
+            // shape for API back-compat but mirrors the PO date so
+            // currentProjectedDeliveryDate lands equal to promised
+            // and the at-lock column stays null until ops sets it
+            // for the first time in the Action Center.
+            opsExpectedDate: s.date,
           }))
         : [{
             quantity: it.quantity ?? 1,
             city: parsed.deliveryAddress?.split("\n")[0]?.trim() ?? "",
             date: parsed.deliveryDate ?? "",
-            opsExpectedDate: defaultOpsDate(parsed.deliveryDate ?? "", options.leadTimeDays),
+            opsExpectedDate: parsed.deliveryDate ?? "",
           }],
     })));
   }, [parsed, options.dealers]);
@@ -318,7 +322,8 @@ export default function IntakeForm({ options, initialForecastBatchId = null }: P
           quantity: 1,
           city: "",
           date: inheritedAvail,
-          opsExpectedDate: defaultOpsDate(inheritedAvail, options.leadTimeDays),
+          // Mirror the PO date — ops projects later in the Action Center.
+          opsExpectedDate: inheritedAvail,
         }],
       };
     }));
@@ -960,13 +965,19 @@ function ItemEditor({
           <span>Qty</span>
           <span>City</span>
           <span>PO Availability date</span>
-          <span>Ops expected delivery</span>
           <span></span>
         </div>
         <div className="space-y-3">
           {item.splits.map((s, j) => (
             <div key={j}>
-              <div className="grid grid-cols-1 md:grid-cols-[5rem,1fr,9rem,9rem,5rem] gap-2">
+              {/* Intake intentionally does NOT capture an Ops-expected
+                  delivery date — at this point ops has no signal
+                  (no VIN, no dealer confirmation) to base a real
+                  projection on. Ops sets it once via the
+                  "Set Ops expected date" CTA in the Action Center
+                  → External Phase, where it locks into
+                  ops_projected_delivery_date_at_lock. */}
+              <div className="grid grid-cols-1 md:grid-cols-[5rem,1fr,9rem,5rem] gap-2">
                 <input type="number" className="input" placeholder="Qty" value={s.quantity}
                        aria-label="Quantity"
                        onChange={(e) => onSplitChange(j, { quantity: parseInt(e.target.value, 10) || 0 })} />
@@ -979,28 +990,8 @@ function ItemEditor({
                   value={s.date}
                   aria-label="PO Availability date"
                   title="PO Availability date — dealer-promised date from the PO. Editable so manual entries / new items can be filled in."
-                  onChange={(e) => {
-                    const nextDate = e.target.value;
-                    // When the PO date moves, the Ops-expected default
-                    // should move with it — but only when the operator
-                    // hasn't manually adjusted Ops-expected to something
-                    // different. Heuristic: if current Ops-expected
-                    // equals the previous PO date (i.e. they were in
-                    // sync), recompute. Otherwise leave Ops-expected
-                    // untouched.
-                    const inSync = s.opsExpectedDate === s.date
-                      || s.opsExpectedDate === "";
-                    onSplitChange(j, {
-                      date: nextDate,
-                      opsExpectedDate: inSync
-                        ? defaultOpsDate(nextDate, leadTimeDays)
-                        : s.opsExpectedDate,
-                    });
-                  }}
+                  onChange={(e) => onSplitChange(j, { date: e.target.value })}
                 />
-                <input type="date" className="input" value={s.opsExpectedDate}
-                       aria-label="Ops expected delivery date"
-                       onChange={(e) => onSplitChange(j, { opsExpectedDate: e.target.value })} />
                 <button type="button" onClick={() => onRemoveSplit(j)}
                         disabled={item.splits.length === 1}
                         className="btn text-xs">Remove</button>

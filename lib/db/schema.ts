@@ -137,6 +137,25 @@ export const batches = sqliteTable("batches", {
   actualPoDate:               text("actual_po_date"),
   contractSignedAt:           text("contract_signed_at"),
   currentProjectedDeliveryDate: text("current_projected_delivery_date"),
+  /**
+   * Snapshot of the FIRST ops-projected delivery date entered after
+   * intake. Set once via the "Set Ops expected date" CTA on the
+   * Action Center → External Phase batch row, then never overwritten
+   * — subsequent shifts move only `current_projected_delivery_date`.
+   *
+   * The lock is the operations equivalent of
+   * `partnership_confidence_at_lock`: it captures "what did Ops
+   * commit to once they had real visibility?" so accuracy can be
+   * measured (initial-commitment vs. realised closure date).
+   *
+   * Null until ops sets it for the first time — at intake we
+   * deliberately leave it null because ops has no signal yet.
+   *
+   * Independent of the action-level "backdate completion" feature:
+   * marking an action done with a custom `completedAt` does not
+   * touch this field.
+   */
+  opsProjectedDeliveryDateAtLock: text("ops_projected_delivery_date_at_lock"),
   deliveryDateRevisionCount:  integer("delivery_date_revision_count").default(0),
 
   // Cities

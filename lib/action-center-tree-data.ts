@@ -128,10 +128,21 @@ export interface BatchNode {
   promisedDate:       string;
   /**
    * Ops's current projected delivery date for THIS batch — may have
-   * shifted from the original promise via /api/batch-shift. Null until
-   * ops has set one (rare in practice; defaulted at Intake).
+   * shifted from the original promise via /api/batch-shift. Defaults
+   * to the dealer-promised date at intake (ops doesn't project yet).
    */
   currentProjectedDeliveryDate: string | null;
+  /**
+   * Snapshot of the FIRST ops projection ops committed to via the
+   * "Set Ops expected date" CTA (or any first shift). Null until the
+   * first shift, then frozen. Drives the initial-commitment vs.
+   * realised accuracy metric.
+   *
+   * Note: independent from action-level backdating — the
+   * mark-done-with-custom-date affordance edits an action's
+   * completedAt, never this field.
+   */
+  opsProjectedDeliveryDateAtLock: string | null;
   /** Free-text colour summary captured at Intake. */
   colorSummary:       string | null;
   /** SAR unit price from the batch's commercial terms. Null when
@@ -607,6 +618,11 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           appListedAt:        b.appListedAt ?? null,
           promisedDate:                  b.dealerPromisedDeliveryDate,
           currentProjectedDeliveryDate:  b.currentProjectedDeliveryDate ?? null,
+          // Defensive read — the column was added later and may be
+          // missing on pre-migration DB snapshots.
+          opsProjectedDeliveryDateAtLock:
+            (b as { opsProjectedDeliveryDateAtLock?: string | null })
+              .opsProjectedDeliveryDateAtLock ?? null,
           colorSummary:                  b.colorSummary ?? null,
           unitPriceSar:                  b.unitPriceSar ?? null,
           totalValueSar,
