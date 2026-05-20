@@ -25,6 +25,7 @@ import {
   actions as actionsTable,
 } from "@/lib/db/schema";
 import { requireAuth, apiError } from "@/lib/api-auth";
+import { cascadeBatchClosureUp } from "@/lib/closure-cascade";
 
 export const runtime = "nodejs";
 
@@ -78,6 +79,9 @@ export async function POST(req: NextRequest) {
       : new Date().toISOString().slice(0, 10);
 
   let remainderBatchId: number | null = null;
+  // Cascade result — set inside the transaction, read after.
+  let waveClosedFromCascade = false;
+  let poClosedFromCascade   = false;
 
   await db.transaction(async (tx) => {
     // 1. Close the batch.
@@ -330,6 +334,29 @@ export async function POST(req: NextRequest) {
         }
       }
     }
+
+    // 5. Closure cascade — propagate this batch's closure up to its
+    //    wave and PO when every sibling is closed. Mirrors the
+    //    re-open path (handled by /api/scope-action on Delivery
+    //    action flips). Same transaction so a half-cascaded state
+    //    is impossible.
+    waveClosedFromCascade = false;
+    poClosedFromCascade = false;
+    try {
+      const cascade = await cascadeBatchClosureUp(tx, body.batchId, new Date().toISOString());
+      waveClosedFromCascade = cascade.waveClosed;
+      poClosedFromCascade = cascade.poClosed;
+    } catch (err) {
+      // The cascade is best-effort: a missing waves/pos row (legacy
+      // batch with no wave linkage, or a corrupt FK) shouldn't fail
+      // the closure that already succeeded. Log and continue.
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[batch-close] closure cascade failed for batch",
+        body.batchId,
+        err instanceof Error ? err.message : err,
+      );
+    }
   });
 
   return NextResponse.json({
@@ -337,6 +364,8 @@ export async function POST(req: NextRequest) {
     batchId: body.batchId,
     closedAt,
     closureReason: body.reason,
+    waveClosed: waveClosedFromCascade,
+    poClosed:   poClosedFromCascade,
     ...(remainderBatchId != null ? { remainderBatchId } : {}),
   });
 }
