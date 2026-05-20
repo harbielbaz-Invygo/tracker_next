@@ -817,6 +817,21 @@ function DealerTree({
                               )}
                             </div>
                           )}
+                          {/* PO Reliability badge (Review #4 R5).
+                              Only lights up on fully-closed POs —
+                              reliability is null until every batch
+                              has a realised outcome. Tone band:
+                              80+ green, 60-79 gold, < 60 flame. */}
+                          {!p.isPrePo && p.reliabilityScore != null && (
+                            <div className={cn(
+                              "mt-0.5 text-[0.65rem] tabular-nums font-medium",
+                              p.reliabilityScore >= 80 ? "text-green-dark" :
+                              p.reliabilityScore >= 60 ? "text-gold-dark" :
+                              "text-flame-dark",
+                            )}>
+                              🎯 {p.reliabilityScore}% reliable
+                            </div>
+                          )}
                           {/* Listing-speed KPI badge (Review #2 R9).
                               Lights up on every live PO so the primary
                               "PO → App Listed" metric is visible on the

@@ -19,6 +19,7 @@ import {
   batchDateRevisions, batchDeliveryLegs,
   batchForecasts, users,
 } from "@/lib/db/schema";
+import { computePoReliability, type ReliabilityBatch } from "@/lib/po-reliability";
 
 type BatchRow = typeof batches.$inferSelect;
 
@@ -249,6 +250,13 @@ export interface PoNode {
    */
   daysSinceSubmission: number | null;
   daysToListed:        number | null;
+  /**
+   * Composite PO Reliability Score (0-100) — null until every batch
+   * under the PO is closed. Drives the per-PO tree badge. Computed
+   * via lib/po-reliability from the same anchors the Insights → PO
+   * Reliability tab uses.
+   */
+  reliabilityScore:    number | null;
   /**
    * True when this node is a virtual stand-in for a Pre-PO (Forecast)
    * batch — no real PO exists yet, so the drawer hides the Internal /
@@ -712,6 +720,36 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         ))
       : null;
 
+    // Review #4 R1+R2 — tree-badge reliability score. Computed only
+    // when every batch under the PO is closed (matches the Insights
+    // tab's "fullyClosed" gate). Color component is left empty here
+    // (treated as 100%) because the action-center data layer doesn't
+    // load batch_color_matrix; the full per-component breakdown
+    // remains canonical on the Insights → PO Reliability tab.
+    const reliabilityScore = (() => {
+      const allBatchesClosed = rawBatchesUnderPo.length > 0
+        && rawBatchesUnderPo.every((b) => b.closedAt != null);
+      if (!allBatchesClosed) return null;
+      const shaped: ReliabilityBatch[] = rawBatchesUnderPo.map((b) => ({
+        batchCode:                       b.batchCode,
+        requestedQuantity:               b.requestedQuantity,
+        deliveredQuantity:               b.deliveredQuantity ?? 0,
+        closedAt:                        b.closedAt ?? null,
+        closureReason:                   (b.closureReason ?? null) as
+                                           "delivered" | "cancelled" | null,
+        poExpectedDateAtLock:
+          (b as { poExpectedDateAtLock?: string | null }).poExpectedDateAtLock ?? null,
+        opsProjectedDeliveryDateAtLock:
+          (b as { opsProjectedDeliveryDateAtLock?: string | null })
+            .opsProjectedDeliveryDateAtLock ?? null,
+        dealerPromisedDeliveryDate:      b.dealerPromisedDeliveryDate,
+        currentProjectedDeliveryDate:    b.currentProjectedDeliveryDate ?? null,
+        shiftCount:                      b.deliveryDateRevisionCount ?? 0,
+        colors:                          [],
+      }));
+      return computePoReliability(shaped).po.composite;
+    })();
+
     const node: PoNode = {
       id:                   p.id,
       poNumber:             p.poNumber,
@@ -734,6 +772,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       internalPhaseDone,
       daysSinceSubmission,
       daysToListed,
+      reliabilityScore,
       isPrePo:      false,
       prePoBatchId: null,
       prePoSummary: null,
@@ -810,10 +849,12 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         completedAt: null,
       },
       internalPhaseDone:   false,
-      // Listing-speed KPI doesn't apply to Pre-PO — the PO doesn't
-      // exist yet, so "PO → Listed" has no clock.
+      // Listing-speed KPI + PO reliability don't apply to Pre-PO —
+      // the PO doesn't exist yet, so "PO → Listed" has no clock and
+      // reliability has no realised outcome to score.
       daysSinceSubmission: null,
       daysToListed:        null,
+      reliabilityScore:    null,
       isPrePo:             true,
       prePoBatchId:        b.id,
       prePoSummary: {
