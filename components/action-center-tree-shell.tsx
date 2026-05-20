@@ -2546,9 +2546,25 @@ function ActionCardDateButton({
 }
 
 /**
- * Compact date popover anchored under an ActionChip when no parent
- * handler is wired. Mirrors the longer ActionDateForm in spirit but
- * fits the chip's small footprint — single input + two buttons.
+ * datetime-local <-> ISO helpers. The input value is in local time
+ * (no tz suffix); we keep it that way through state and convert to
+ * UTC ISO only at submit time. Going the other way (existing
+ * completedAt back into the input) we render in the operator's
+ * local time so the value they see matches what they entered.
+ */
+function isoToDatetimeLocal(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function datetimeLocalNow(): string {
+  return isoToDatetimeLocal(new Date().toISOString());
+}
+
+/**
+ * Compact date+time popover anchored under an ActionChip when no
+ * parent handler is wired. Single datetime-local input + Cancel/✓.
  */
 function ActionChipDatePopover({
   action, busy, onSubmit, onCancel,
@@ -2559,18 +2575,24 @@ function ActionChipDatePopover({
   onCancel: () => void;
 }) {
   const isDone = action.status === "done";
-  const todayDefault = new Date().toISOString().slice(0, 10);
-  const initial = action.completedAt ? action.completedAt.slice(0, 10) : todayDefault;
-  const [date, setDate] = useState<string>(initial);
+  const initial = action.completedAt
+    ? isoToDatetimeLocal(action.completedAt)
+    : datetimeLocalNow();
+  const [local, setLocal] = useState<string>(initial);
   const [error, setError] = useState<string | null>(null);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      setError("Pick a date.");
+    if (!local) {
+      setError("Pick a date and time.");
       return;
     }
-    onSubmit(`${date}T12:00:00Z`);
+    const d = new Date(local);
+    if (Number.isNaN(d.getTime())) {
+      setError("Invalid date/time.");
+      return;
+    }
+    onSubmit(d.toISOString());
   }
 
   return (
@@ -2580,12 +2602,12 @@ function ActionChipDatePopover({
       onClick={(e) => e.stopPropagation()}
     >
       <span className="text-brand-dark font-medium">
-        {isDone ? "📅 Backdate" : "✓ Mark done on"}
+        {isDone ? "📅 Backdate" : "✓ Mark done at"}
       </span>
       <input
-        type="date"
-        value={date}
-        onChange={(e) => { setDate(e.target.value); setError(null); }}
+        type="datetime-local"
+        value={local}
+        onChange={(e) => { setLocal(e.target.value); setError(null); }}
         className="text-[0.65rem] px-1.5 py-0.5 border border-ink-300 rounded tabular-nums"
         autoFocus
       />
@@ -3229,17 +3251,12 @@ function BatchRow({
             action={action}
             busy={busyActionId === action.id}
             onSubmit={(payload) => {
+              // payload.completedAt is already a full ISO timestamp
+              // built from the datetime-local input (or null when
+              // ops cleared it on a done chip).
               if (payload.markDone) {
-                // Flip the chip done with a custom completion date.
-                // Single PATCH /api/scope-action call handles status +
-                // completedAt + cascade in one transaction.
-                const isoTs = payload.completedAt
-                  ? `${payload.completedAt}T12:00:00Z`
-                  : undefined;
-                onChangeStatus(action.id, "done", isoTs);
+                onChangeStatus(action.id, "done", payload.completedAt ?? undefined);
               } else {
-                // Action is already done — backdate via the date route.
-                // expectedDate preserved (the route writes it back).
                 onBatchOp(b.id, "/api/scope-action/date", {
                   actionId:     action.id,
                   expectedDate: action.expectedDate,
@@ -3443,14 +3460,12 @@ function ActionDateForm({
   const label = action.doneLabel || action.waitingLabel;
   const isDone = action.status === "done";
 
-  // Default the date to today when the chip isn't done yet (the most
-  // common case is "I'm marking this done right now"). When it's
-  // already done, pre-fill the existing completion date so ops can
-  // tweak rather than re-enter.
-  const todayDefault = new Date().toISOString().slice(0, 10);
+  // Default the input to now (local time) when the chip isn't done
+  // yet. When it's already done, pre-fill the existing completion
+  // timestamp so ops can tweak rather than re-enter.
   const initial = action.completedAt
-    ? action.completedAt.slice(0, 10)
-    : todayDefault;
+    ? isoToDatetimeLocal(action.completedAt)
+    : datetimeLocalNow();
   const [completed, setCompleted] = useState<string>(initial);
   const [error, setError] = useState<string | null>(null);
 
@@ -3458,39 +3473,44 @@ function ActionDateForm({
     e.preventDefault();
     // Empty input is only meaningful when the chip is already done
     // (= "clear the backdate, fall back to auto-stamped value").
-    // For waiting/blocked chips we require a date — "mark done"
+    // For waiting/blocked chips we require a date+time — "mark done"
     // without a moment to attach to doesn't make sense.
     if (!completed && !isDone) {
-      setError("Pick a completion date.");
+      setError("Pick a completion date and time.");
       return;
     }
-    if (completed && !/^\d{4}-\d{2}-\d{2}$/.test(completed)) {
-      setError("Date must be yyyy-mm-dd.");
-      return;
+    if (completed) {
+      const d = new Date(completed);
+      if (Number.isNaN(d.getTime())) {
+        setError("Invalid date/time.");
+        return;
+      }
+      onSubmit({
+        completedAt: d.toISOString(),
+        markDone:    !isDone,
+      });
+    } else {
+      onSubmit({ completedAt: null, markDone: !isDone });
     }
-    onSubmit({
-      completedAt: completed ? completed : null,
-      markDone:    !isDone,
-    });
   }
 
   return (
     <form onSubmit={submit} className="mt-2 p-2 border border-brand rounded-md bg-brand-pastel/20 space-y-2">
       <p className="text-[0.7rem] font-medium text-midnight">
         {isDone
-          ? `📅 Completion date — ${label}`
+          ? `📅 Completion date / time — ${label}`
           : `✓ Mark done — ${label}`}
       </p>
       <p className="text-[0.65rem] text-ink-600 leading-snug">
         {isDone
           ? "When did this action actually complete? Clear the field to revert to the auto-stamped value."
-          : "Pick the date this action completed. Submitting flips the chip done and stamps the completion at noon UTC on the chosen day."}
+          : "Pick the date + time this action completed. Submitting flips the chip done and stamps the completion at the chosen moment."}
       </p>
       <div className="flex items-baseline gap-2">
         <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
-          {isDone ? "Completed" : "Completion date"}
+          {isDone ? "Completed at" : "Completion time"}
           <input
-            type="date"
+            type="datetime-local"
             value={completed}
             onChange={(e) => { setCompleted(e.target.value); setError(null); }}
             className="text-xs px-2 py-1 border border-ink-300 rounded tabular-nums"
