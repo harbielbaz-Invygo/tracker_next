@@ -20,7 +20,14 @@ import {
   // Phase 5c — single-source from the scope-aware `actions` table.
   // batch_actions reads are gone (table itself is dropped in phase 5d).
   waves, actions as actionsTable,
+  // Review #4 R1 — per-PO reliability needs the pos table for PO-level
+  // identity (poNumber → pos.id lookup) and to attribute back to a PO row.
+  pos,
 } from "@/lib/db/schema";
+import {
+  computePoReliability,
+  type ReliabilityBatch,
+} from "@/lib/po-reliability";
 import { daysBetween } from "@/lib/expected-date";
 
 export interface DepartmentRow {
@@ -252,6 +259,61 @@ export interface PerformanceReport {
    * consistent width).
    */
   onTimeRateWeekly: { weekStart: string; rate: number | null; deliveredCount: number }[];
+  /**
+   * Per-PO composite reliability (Review #4 R1+R2+R3+R6). One row
+   * per PO with the 5-component composite plus a sibling Ops
+   * Reliability score using the locked Ops projection. Drives the
+   * Insights → PO Reliability tab + Action Center tree badges.
+   */
+  poReliability: PoReliabilityRowFull[];
+}
+
+export interface PoReliabilityRowFull {
+  poId:          number;
+  poNumber:      string;
+  dealerId:      number;
+  dealerName:    string;
+  poDate:        string | null;
+  /** When the PO closed (max closedAt across its batches). */
+  closedAt:      string | null;
+  /** True when every batch under the PO has closedAt set. */
+  fullyClosed:   boolean;
+  totalBatches:  number;
+  closedBatches: number;
+  /** PO Reliability — anchor: poExpectedDateAtLock. */
+  po: {
+    composite:        number;
+    components: {
+      date:         number;
+      qty:          number;
+      color:        number;
+      cancellation: number;
+      stability:    number;
+    };
+    dateVarianceDays: number | null;
+  };
+  /** Ops Reliability — anchor: opsProjectedDeliveryDateAtLock. */
+  ops: {
+    composite:        number;
+    components: {
+      date:         number;
+      qty:          number;
+      color:        number;
+      cancellation: number;
+      stability:    number;
+    };
+    dateVarianceDays: number | null;
+  };
+  /** opsAddedValue = ops.composite − po.composite. Positive means
+   *  ops's locked bet was closer to reality than the original PO. */
+  opsAddedValue: number;
+  raw: {
+    requestedCars:    number;
+    deliveredCars:    number;
+    cancelledCars:    number;
+    cancelledBatches: number;
+    shiftCount:       number;
+  };
 }
 
 /**
@@ -570,6 +632,11 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       requestedQty:  batches.requestedQuantity,
       deliveredQty:  batches.deliveredQuantity,
       revisionCount: batches.deliveryDateRevisionCount,
+      // Review #4 R1+R6 — PO identity + the two at-lock anchors so
+      // per-PO composite reliability can be computed below.
+      poNumber:                       batches.poNumber,
+      poExpectedDateAtLock:           batches.poExpectedDateAtLock,
+      opsProjectedDeliveryDateAtLock: batches.opsProjectedDeliveryDateAtLock,
     })
     .from(batches)
     .leftJoin(dealers, eq(batches.dealerId, dealers.id))
@@ -580,18 +647,44 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     const q = db.select({
       batchId:           batchColorMatrix.batchId,
       dealerId:          batches.dealerId,
+      color:             batchColorMatrix.color,
       requestedQuantity: batchColorMatrix.requestedQuantity,
       confirmedQuantity: batchColorMatrix.confirmedQuantity,
+      // Review #4 R7 — once a PO is closed, prefer deliveredQuantity
+      // over confirmedQuantity (delivery is the truth; confirmation
+      // is the earlier proxy). Pulled here so the reliability scorer
+      // can pick the right field per batch state.
+      deliveredQuantity: batchColorMatrix.deliveredQuantity,
     })
     .from(batchColorMatrix)
     .innerJoin(batches, eq(batchColorMatrix.batchId, batches.id))
     .$dynamic();
     return batchInPeriod ? q.where(batchInPeriod) : q;
   })();
-  const [allBatches, allDealers, colorMatrixRows] = await Promise.all([
+  // pos rows — needed for the per-PO reliability row's poId identity.
+  // Wrapped defensively so legacy DBs without the table don't 500
+  // the whole report.
+  const posQuery = (async () => {
+    try {
+      return await db.select({
+        id:       pos.id,
+        poNumber: pos.poNumber,
+        poDate:   pos.poDate,
+        dealerId: pos.dealerId,
+        closedAt: pos.closedAt,
+      }).from(pos);
+    } catch {
+      return [] as {
+        id: number; poNumber: string; poDate: string | null;
+        dealerId: number; closedAt: string | null;
+      }[];
+    }
+  })();
+  const [allBatches, allDealers, colorMatrixRows, posRows] = await Promise.all([
     allBatchesQuery,
     db.select().from(dealers).orderBy(asc(dealers.name)),
     colorMatrixQuery,
+    posQuery,
   ]);
 
   // Phase H: fetch every shift event (batch_date_revisions) so the
@@ -1000,6 +1093,108 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     },
   };
 
+  // ── Review #4 R1+R2+R3+R6 — Per-PO Reliability Score ────────────
+  // Group batches by poNumber (the natural PO identity — pos.id
+  // exists too but isn't FK'd from batches), then shape each PO's
+  // batches into the ReliabilityBatch contract `lib/po-reliability`
+  // expects. Excludes Pre-PO and PO-less rows.
+  const colorByBatch = new Map<number, {
+    color: string; requested: number; confirmed: number; delivered: number;
+  }[]>();
+  for (const c of colorMatrixRows) {
+    const arr = colorByBatch.get(c.batchId) ?? [];
+    arr.push({
+      color:     c.color,
+      requested: c.requestedQuantity ?? 0,
+      confirmed: c.confirmedQuantity ?? 0,
+      delivered: c.deliveredQuantity ?? 0,
+    });
+    colorByBatch.set(c.batchId, arr);
+  }
+
+  const batchesByPo = new Map<string, typeof allBatches>();
+  for (const b of allBatches) {
+    if (!b.poNumber) continue;
+    const arr = batchesByPo.get(b.poNumber) ?? [];
+    arr.push(b);
+    batchesByPo.set(b.poNumber, arr);
+  }
+
+  const poRowByNumber = new Map<string, (typeof posRows)[number]>();
+  for (const p of posRows) poRowByNumber.set(p.poNumber, p);
+
+  const dealerById = new Map<number, typeof allDealers[number]>();
+  for (const d of allDealers) dealerById.set(d.id, d);
+
+  const poReliability: PoReliabilityRowFull[] = [];
+  for (const [poNumber, batchesForPo] of batchesByPo.entries()) {
+    // Skip POs with zero closed batches — reliability is meaningful
+    // only against realised closures.
+    const closedCount = batchesForPo.filter((b) => b.closedAt != null).length;
+    if (closedCount === 0) continue;
+
+    const poRow = poRowByNumber.get(poNumber) ?? null;
+    const firstBatch = batchesForPo[0];
+    const dealerId = firstBatch.dealerId;
+    const dealerName = dealerById.get(dealerId)?.name ?? firstBatch.dealerName ?? "—";
+
+    // Shape into the pure scorer's input.
+    const shaped: ReliabilityBatch[] = batchesForPo.map((b) => ({
+      batchCode:                       b.batchCode,
+      requestedQuantity:               b.requestedQty,
+      deliveredQuantity:               b.deliveredQty ?? 0,
+      closedAt:                        b.closedAt,
+      closureReason:                   (b.closureReason ?? null) as
+                                         "delivered" | "cancelled" | null,
+      poExpectedDateAtLock:            b.poExpectedDateAtLock,
+      opsProjectedDeliveryDateAtLock:  b.opsProjectedDeliveryDateAtLock,
+      dealerPromisedDeliveryDate:      b.promisedDate,
+      currentProjectedDeliveryDate:    b.projectedDate,
+      shiftCount:                      b.revisionCount ?? 0,
+      colors:                          colorByBatch.get(b.id) ?? [],
+    }));
+    const scored = computePoReliability(shaped);
+
+    const latestClose = batchesForPo
+      .map((b) => b.closedAt)
+      .filter((d): d is string => !!d)
+      .sort()
+      .at(-1) ?? null;
+
+    poReliability.push({
+      poId:          poRow?.id ?? 0,
+      poNumber,
+      dealerId,
+      dealerName,
+      poDate:        poRow?.poDate ?? null,
+      closedAt:      latestClose,
+      fullyClosed:   closedCount === batchesForPo.length,
+      totalBatches:  batchesForPo.length,
+      closedBatches: closedCount,
+      po:  {
+        composite:        scored.po.composite,
+        components:       scored.po.components,
+        dateVarianceDays: scored.po.dateVarianceDays,
+      },
+      ops: {
+        composite:        scored.ops.composite,
+        components:       scored.ops.components,
+        dateVarianceDays: scored.ops.dateVarianceDays,
+      },
+      opsAddedValue: scored.opsAddedValue,
+      raw: {
+        requestedCars:    scored.po.raw.requestedCars,
+        deliveredCars:    scored.po.raw.deliveredCars,
+        cancelledCars:    scored.po.raw.cancelledCars,
+        cancelledBatches: scored.po.raw.cancelledBatches,
+        shiftCount:       scored.po.raw.shiftCount,
+      },
+    });
+  }
+  // Sort: lowest composite first (problematic POs surface to the
+  // top — same pattern as the customer impact table).
+  poReliability.sort((a, b) => a.po.composite - b.po.composite);
+
   return {
     generatedAt: new Date().toISOString(),
     period,
@@ -1016,5 +1211,6 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     customerImpact,
     cityReliability,
     onTimeRateWeekly,
+    poReliability,
   };
 }

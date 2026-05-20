@@ -20,6 +20,7 @@ import type {
 import type {
   DepartmentRow, StakeholderRow, DealerReliabilityRow, CityReliabilityRow,
   CustomerImpactReport, CustomerImpactBatch,
+  PoReliabilityRowFull,
 } from "@/lib/reports-data";
 import type { DashboardRow, TimelineData, StatusBucket } from "@/lib/dashboard-data";
 import BatchTable from "./batch-table";
@@ -45,7 +46,7 @@ interface Props {
   period: ReportPeriod;
 }
 
-type TrustTab = "dealer" | "ops" | "cities" | "forecast" | "risk";
+type TrustTab = "dealer" | "ops" | "cities" | "forecast" | "po" | "risk";
 
 export default function InsightsShell({ data, period }: Props) {
   const [trustTab, setTrustTab] = useState<TrustTab>("dealer");
@@ -449,6 +450,7 @@ function TrustPanel({
           <Tab value="ops">Ops Performance</Tab>
           <Tab value="cities">Cities</Tab>
           <Tab value="forecast">Forecast Reliability</Tab>
+          <Tab value="po">PO Reliability</Tab>
           <Tab value="risk">Risk Engine</Tab>
         </TabList>
       </div>
@@ -458,6 +460,7 @@ function TrustPanel({
         {active === "ops"      && <OpsTab depts={report.departments} stakeholders={report.stakeholders} />}
         {active === "cities"   && <CitiesTab rows={report.cityReliability} />}
         {active === "forecast" && <ForecastReliabilityTab rows={forecastReliability} />}
+        {active === "po"       && <PoReliabilityTab rows={report.poReliability} />}
         {active === "risk"     && <RiskTab report={report} />}
       </div>
     </section>
@@ -710,6 +713,144 @@ function DelayValue({ days, bold = false }: { days: number | null; bold?: boolea
   const cls = days > 0 ? "text-flame-dark" : "text-green-dark";
   const text = days > 0 ? `+${days}d` : `${days}d`;
   return <span className={cn(cls, bold && "font-semibold")}>{text}</span>;
+}
+
+/**
+ * Tab — PO Reliability (Review #4 R1+R2+R3+R6).
+ *
+ * Per-PO composite 0–100 score with 5 components, plus a sibling
+ * Ops Reliability score using the locked Ops projection anchor.
+ * `opsAddedValue = ops − po` quantifies "did ops's first projection
+ * land closer to reality than the original PO commitment?".
+ *
+ * Sorted ascending by PO score so the most problematic POs surface
+ * to the top — same triage pattern as the Customer Impact tab.
+ */
+function PoReliabilityTab({ rows }: { rows: PoReliabilityRowFull[] }) {
+  if (rows.length === 0) {
+    return (
+      <p className="text-sm text-ink-500 italic px-2 py-4">
+        No closed POs yet. PO Reliability becomes computable once at
+        least one PO has reached a closed state.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-ink-600">
+        Per-PO 0–100 composite score across <em>Date · Qty · Color ·
+        Cancellation · Stability</em>. Two parallel scores:{" "}
+        <span className="text-brand-dark font-medium">PO</span> uses
+        the original partnership-dealer commitment;{" "}
+        <span className="text-gold-dark font-medium">Ops</span> uses
+        ops&apos;s first locked projection. The{" "}
+        <span className="text-ink-500">+ value</span> column =
+        Ops − PO (positive means ops knew earlier than the PO
+        suggested).
+      </p>
+      <div className="overflow-x-auto border border-ink-200 rounded-md">
+        <table className="w-full text-xs">
+          <thead className="bg-ink-50 text-[0.65rem] text-ink-500 uppercase tracking-wide">
+            <tr>
+              <th className="text-left px-3 py-2">PO</th>
+              <th className="text-left px-3 py-2">Dealer</th>
+              <th className="text-right px-3 py-2" title="PO Reliability composite (0-100)">PO Score</th>
+              <th className="text-right px-3 py-2" title="Ops Reliability composite (0-100)">Ops Score</th>
+              <th className="text-right px-3 py-2" title="Ops − PO. Positive = ops projected earlier than PO suggested.">Δ</th>
+              <th className="text-right px-3 py-2">Date</th>
+              <th className="text-right px-3 py-2">Qty</th>
+              <th className="text-right px-3 py-2">Color</th>
+              <th className="text-right px-3 py-2">Cancel</th>
+              <th className="text-right px-3 py-2">Stability</th>
+              <th className="text-right px-3 py-2">Closed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={`${r.poNumber}:${r.poId}`} className="border-t border-ink-200/60">
+                <td className="px-3 py-2 font-mono text-[0.7rem] text-midnight">
+                  {r.poNumber}
+                  {!r.fullyClosed && (
+                    <span className="ml-1 text-[0.6rem] text-gold-dark italic">
+                      partial
+                    </span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-midnight">{r.dealerName}</td>
+                <td className="px-3 py-2 text-right">
+                  <ScoreCell value={r.po.composite} />
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <ScoreCell value={r.ops.composite} tone="gold" />
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums">
+                  <span className={cn(
+                    "font-medium",
+                    r.opsAddedValue > 0 ? "text-green-dark" :
+                    r.opsAddedValue < 0 ? "text-flame-dark" :
+                    "text-ink-500",
+                  )}>
+                    {r.opsAddedValue > 0 ? `+${r.opsAddedValue}` : r.opsAddedValue}
+                  </span>
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-600">
+                  {Math.round(r.po.components.date)}
+                  {r.po.dateVarianceDays != null && (
+                    <span className="text-[0.6rem] text-ink-400 ml-0.5">
+                      ({r.po.dateVarianceDays > 0 ? "+" : ""}{r.po.dateVarianceDays}d)
+                    </span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-600">
+                  {Math.round(r.po.components.qty)}
+                  <span className="text-[0.6rem] text-ink-400 ml-0.5">
+                    ({r.raw.deliveredCars}/{r.raw.requestedCars})
+                  </span>
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-600">
+                  {Math.round(r.po.components.color)}
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-600">
+                  {Math.round(r.po.components.cancellation)}
+                  {r.raw.cancelledCars > 0 && (
+                    <span className="text-[0.6rem] text-flame-dark ml-0.5">
+                      ({r.raw.cancelledCars} cars)
+                    </span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-600">
+                  {Math.round(r.po.components.stability)}
+                  {r.raw.shiftCount > 0 && (
+                    <span className="text-[0.6rem] text-gold-dark ml-0.5">
+                      ({r.raw.shiftCount} shifts)
+                    </span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-500">
+                  {r.closedAt ?? "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/** Compact 0-100 score cell with tone-by-band coloring. */
+function ScoreCell({ value, tone = "brand" }: { value: number; tone?: "brand" | "gold" }) {
+  const cls =
+    value >= 80 ? "text-green-dark font-bold" :
+    value >= 60 ? (tone === "gold" ? "text-gold-dark font-semibold" : "text-brand-dark font-semibold") :
+    value >= 40 ? "text-gold-dark font-medium" :
+    "text-flame-dark font-bold";
+  return (
+    <span className={cn("tabular-nums", cls)}>
+      {value}
+    </span>
+  );
 }
 
 // Tab 3 — Cities (Phase δ): per-city delivery reliability.
