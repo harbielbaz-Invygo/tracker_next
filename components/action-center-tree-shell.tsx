@@ -2066,15 +2066,30 @@ function WaveSection({
         <span aria-hidden className="text-ink-400 text-xs">
           {expanded ? "▾" : "▸"}
         </span>
-        <span className="text-sm font-semibold text-midnight">📅 Delivery Window · {wave.availabilityDate}</span>
+        {/* Headline date = ops's current projection when set; the PO
+            promise hangs off the side as the original commitment. Ops
+            takes over once they've re-projected — "when is this
+            actually landing?" is the operator's running question. */}
+        {(() => {
+          const opsDate = wave.opsExpectedDate ?? null;
+          const headline = opsDate ?? wave.availabilityDate;
+          const slipped = opsDate != null && opsDate !== wave.availabilityDate;
+          return (
+            <>
+              <span className="text-sm font-semibold text-midnight">
+                📅 Delivery Window · {headline}
+              </span>
+              {slipped && (
+                <span className="text-xs text-ink-500 tabular-nums">
+                  · PO promise {wave.availabilityDate}
+                </span>
+              )}
+            </>
+          );
+        })()}
         <span className="text-xs text-ink-500 tabular-nums">
           {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
         </span>
-        {wave.opsExpectedDate && wave.opsExpectedDate !== wave.availabilityDate && (
-          <span className="text-xs text-gold-dark tabular-nums">
-            · ops projecting {wave.opsExpectedDate}
-          </span>
-        )}
         {wave.actions.length > 0 && (
           <span className="text-[0.65rem] text-ink-500 tabular-nums">
             · {doneCount}/{wave.actions.length} done
