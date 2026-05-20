@@ -33,6 +33,7 @@ import {
 import { requireAuth, apiError } from "@/lib/api-auth";
 import { unblockDependents, cascadeRevertDependents } from "@/lib/scope-cascade";
 import { cascadeBatchClosureUp } from "@/lib/closure-cascade";
+import { checkBatchDeliveryGate } from "@/lib/closure-gates";
 
 export const runtime = "nodejs";
 
@@ -72,6 +73,22 @@ export async function PATCH(req: NextRequest) {
     .limit(1);
 
   if (!current) return apiError("Action not found", 404);
+
+  // Server-side gate (G3): when ops flips the batch-scope Delivery
+  // action to done, enforce the same 5 checks /api/batch-close
+  // applies. The Delivery flip auto-closes the batch downstream
+  // (see line ~95), so the gates have to be identical or one path
+  // bypasses the other. Re-opening (any non-done status) is ungated.
+  if (
+    current.scope === "batch"
+    && current.actionTypeName === "Delivery"
+    && status === "done"
+  ) {
+    const gate = await checkBatchDeliveryGate(db, current.scopeId);
+    if (!gate.ok) {
+      return apiError(`Cannot mark Delivery done: ${gate.reason}`, 409);
+    }
+  }
 
   const nowIso = new Date().toISOString();
   const completedAt = status === "done"

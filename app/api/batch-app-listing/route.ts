@@ -17,11 +17,12 @@
  *
  * Auth: ops + admin (same gate as /api/batch-action).
  */
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { batches } from "@/lib/db/schema";
 import { requireAuth } from "@/lib/api-auth";
+import { checkBatchListingGate } from "@/lib/closure-gates";
 
 export const runtime = "nodejs";
 
@@ -47,6 +48,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: "appListedAt must be an ISO datetime string or null" },
         { status: 400 },
+      );
+    }
+  }
+
+  // Server-side gate (G2): when SETTING appListedAt, require every
+  // Internal-Phase action on the parent PO to be done or skipped.
+  // Un-listing (null) bypasses — that's a corrective action ops
+  // needs to be able to fire regardless of state.
+  if (body.appListedAt) {
+    const gate = await checkBatchListingGate(db, batchId);
+    if (!gate.ok) {
+      return NextResponse.json(
+        { error: `Cannot mark as listed: ${gate.reason}` },
+        { status: 409 },
       );
     }
   }
