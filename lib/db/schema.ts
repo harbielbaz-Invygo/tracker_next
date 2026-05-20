@@ -47,6 +47,13 @@ export const users = sqliteTable("users", {
   email:        text("email"),
   role:         text("role", { enum: ["admin", "ops"] }).notNull(),
   passwordHash: text("password_hash").notNull(),
+  /**
+   * Department membership — drives feature gating like "only Partnership
+   * users can submit a Forecast". Nullable: admins or users created
+   * before the column landed don't carry one. Cleared (not deleted)
+   * when the referenced department is removed so the user row survives.
+   */
+  departmentId: integer("department_id"),
   createdAt:    text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
 });
 

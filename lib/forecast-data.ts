@@ -12,9 +12,11 @@
  *                     stays for accuracy tracking.
  *   - "cancelled"   — Ops cancelled the Forecast (counts as a miss).
  */
-import { eq, asc, desc, isNull, and } from "drizzle-orm";
+import { eq, asc, desc } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { batches, batchForecasts, dealers, users } from "@/lib/db/schema";
+import { batches, batchForecasts, dealers, users, departments } from "@/lib/db/schema";
+
+const PARTNERSHIP_DEPARTMENT_NAME = "Partnership";
 
 export type ForecastStatus = "open" | "fulfilled" | "superseded" | "cancelled";
 
@@ -116,16 +118,58 @@ function statusFromRow(r: {
   return "open";
 }
 
-/** Dealers + users for the Forecast form dropdowns. */
+/** Dealers + Partnership-department users for the Forecast form. */
 export async function getForecastFormOptions(): Promise<ForecastFormOptions> {
-  const [dealerRows, userRows] = await Promise.all([
-    db.select({ id: dealers.id, name: dealers.name }).from(dealers).orderBy(asc(dealers.name)),
-    db.select({
-      id: users.id,
-      name: users.name,
-      username: users.username,
-    }).from(users).orderBy(asc(users.username)),
-  ]);
+  const dealerRows = await db
+    .select({ id: dealers.id, name: dealers.name })
+    .from(dealers)
+    .orderBy(asc(dealers.name));
+
+  // Resolve the Partnership department's id so we can filter users.
+  // Wrapped in try/catch so a missing `users.department_id` column
+  // doesn't 500 the page; admin runs
+  // /api/admin/ensure-user-department-column to enable the filter.
+  let partnershipDeptId: number | null = null;
+  try {
+    const rows = await db
+      .select({ id: departments.id })
+      .from(departments)
+      .where(eq(departments.name, PARTNERSHIP_DEPARTMENT_NAME))
+      .limit(1);
+    partnershipDeptId = rows[0]?.id ?? null;
+  } catch {
+    partnershipDeptId = null;
+  }
+
+  let userRows: { id: number; name: string | null; username: string }[];
+  try {
+    if (partnershipDeptId != null) {
+      userRows = await db
+        .select({
+          id: users.id,
+          name: users.name,
+          username: users.username,
+        })
+        .from(users)
+        .where(eq(users.departmentId, partnershipDeptId))
+        .orderBy(asc(users.username));
+    } else {
+      userRows = await db
+        .select({ id: users.id, name: users.name, username: users.username })
+        .from(users)
+        .orderBy(asc(users.username));
+    }
+  } catch (err) {
+    // Pre-migration DB: department_id column missing on users. Fall
+    // back to the unfiltered list so the form keeps working.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such column/i.test(msg)) throw err;
+    userRows = await db
+      .select({ id: users.id, name: users.name, username: users.username })
+      .from(users)
+      .orderBy(asc(users.username));
+  }
+
   return {
     dealers: dealerRows,
     users: userRows.map((u) => ({

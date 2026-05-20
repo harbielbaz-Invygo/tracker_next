@@ -3,16 +3,13 @@
 /**
  * Forecast shell — submission form + list of existing Forecasts.
  *
- * Form fields (kept minimal per the design discussion):
- *   - Dealer (required, dropdown)
- *   - Quantity (required, integer)
- *   - City (required, text)
- *   - Expected Delivery Date (required, ISO yyyy-mm-dd)
- *   - Submitting user (Partnership team member, required)
- *
- * Submitter is picked from the standard `users` table. We don't track
- * a separate "Partnership" role today — Q&A decision was to reuse
- * `ops` and have ops manually pick the right person in the dropdown.
+ * Form fields (v2):
+ *   - Dealer: pick existing OR add new (auto-creates a dealer row)
+ *   - Items: city + quantity (≥ 1 row, "Add another item" extends)
+ *   - Expected Delivery Date
+ *   - Expected PO Signing Date (optional)
+ *   - Submitting user: filtered to Partnership-department members
+ *     (falls back to all users when the migration hasn't run).
  *
  * After a successful submit we router.refresh() so the new row shows
  * up in the list below.
@@ -27,40 +24,96 @@ interface Props {
   options: ForecastFormOptions;
 }
 
+interface ItemDraft {
+  city: string;
+  quantity: number | "";
+}
+
 export default function ForecastShell({ rows, options }: Props) {
   const router = useRouter();
 
-  // Form state
-  const [dealerId,    setDealerId]    = useState<number | "">("");
-  const [quantity,    setQuantity]    = useState<number | "">("");
-  const [city,        setCity]        = useState<string>("");
-  const [expectedDate, setExpectedDate] = useState<string>("");
+  // Dealer mode — pick existing or type a new name.
+  const [dealerMode, setDealerMode] = useState<"existing" | "new">("existing");
+  const [dealerId,   setDealerId]   = useState<number | "">("");
+  const [dealerName, setDealerName] = useState<string>("");
+
+  // Items
+  const [items, setItems] = useState<ItemDraft[]>([{ city: "", quantity: "" }]);
+
+  // Dates
+  const [expectedDeliveryDate,  setExpectedDeliveryDate]  = useState<string>("");
+  const [expectedPoSigningDate, setExpectedPoSigningDate] = useState<string>("");
+
+  // Submitter
   const [submitterId, setSubmitterId] = useState<number | "">("");
+
   const [submitting,  setSubmitting]  = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   function resetForm() {
+    setDealerMode("existing");
     setDealerId("");
-    setQuantity("");
-    setCity("");
-    setExpectedDate("");
+    setDealerName("");
+    setItems([{ city: "", quantity: "" }]);
+    setExpectedDeliveryDate("");
+    setExpectedPoSigningDate("");
     setSubmitterId("");
+  }
+
+  function addItem() {
+    setItems((prev) => [...prev, { city: "", quantity: "" }]);
+  }
+  function removeItem(idx: number) {
+    setItems((prev) => prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx));
+  }
+  function updateItem(idx: number, patch: Partial<ItemDraft>) {
+    setItems((prev) => prev.map((it, i) => i === idx ? { ...it, ...patch } : it));
   }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitError(null);
-    if (dealerId === "" || quantity === "" || !city.trim() || !expectedDate || submitterId === "") {
-      setSubmitError("All fields are required.");
+
+    // Dealer validation
+    if (dealerMode === "existing" && dealerId === "") {
+      setSubmitError("Pick a dealer or switch to 'Add new'.");
       return;
     }
+    if (dealerMode === "new" && !dealerName.trim()) {
+      setSubmitError("Enter the new dealer's name.");
+      return;
+    }
+    // Items validation — every row needs city + qty.
+    const cleanedItems: { city: string; quantity: number }[] = [];
+    for (const [i, it] of items.entries()) {
+      const c = it.city.trim();
+      const q = it.quantity;
+      if (!c || q === "" || !Number.isFinite(q) || (q as number) <= 0) {
+        setSubmitError(`Item ${i + 1}: enter a city and a positive quantity.`);
+        return;
+      }
+      cleanedItems.push({ city: c, quantity: q as number });
+    }
+    if (!expectedDeliveryDate) {
+      setSubmitError("Expected delivery date is required.");
+      return;
+    }
+    if (submitterId === "") {
+      setSubmitError("Pick the submitting user.");
+      return;
+    }
+
     setSubmitting(true);
     try {
       const res = await fetch("/api/forecast/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          dealerId, quantity, city: city.trim(), expectedDate, submittedByUserId: submitterId,
+          ...(dealerMode === "existing" ? { dealerId } : { dealerName: dealerName.trim() }),
+          items:                 cleanedItems,
+          expectedDeliveryDate,
+          expectedPoSigningDate: expectedPoSigningDate || null,
+          submittedByUserId:     submitterId,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -88,62 +141,147 @@ export default function ForecastShell({ rows, options }: Props) {
     }
   }
 
+  const totalQty = items.reduce(
+    (sum, it) => sum + (typeof it.quantity === "number" ? it.quantity : 0),
+    0,
+  );
+
   return (
     <div className="space-y-6">
       <section className="card">
         <h2 className="text-base font-bold text-midnight mb-3">Submit a Forecast</h2>
-        <form onSubmit={onSubmit} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          <Field label="Dealer" required>
-            <select
-              className="input"
-              value={dealerId}
-              onChange={(e) => setDealerId(e.target.value === "" ? "" : Number(e.target.value))}
+        <form onSubmit={onSubmit} className="space-y-4">
+          {/* Dealer — picker with mode toggle for new dealer entry. */}
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
+            <Field label="Dealer" required>
+              {dealerMode === "existing" ? (
+                <select
+                  className="input"
+                  value={dealerId}
+                  onChange={(e) => setDealerId(e.target.value === "" ? "" : Number(e.target.value))}
+                  disabled={submitting}
+                  required
+                >
+                  <option value="">Pick a dealer…</option>
+                  {options.dealers.map((d) => (
+                    <option key={d.id} value={d.id}>{d.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="New dealer name (e.g. Hyundai of Riyadh)"
+                  value={dealerName}
+                  onChange={(e) => setDealerName(e.target.value)}
+                  disabled={submitting}
+                  required
+                />
+              )}
+            </Field>
+            <button
+              type="button"
+              onClick={() => {
+                setDealerMode((m) => m === "existing" ? "new" : "existing");
+                setDealerId("");
+                setDealerName("");
+              }}
               disabled={submitting}
-              required
+              className="text-xs px-3 py-2 rounded-md border border-brand text-brand-dark hover:bg-brand-pastel/40 whitespace-nowrap"
             >
-              <option value="">Pick a dealer…</option>
-              {options.dealers.map((d) => (
-                <option key={d.id} value={d.id}>{d.name}</option>
+              {dealerMode === "existing" ? "+ Add new dealer" : "← Pick existing"}
+            </button>
+          </div>
+
+          {/* Items — city × quantity, ≥ 1 row. */}
+          <div>
+            <div className="flex items-baseline justify-between mb-1.5">
+              <span className="block text-xs font-medium text-midnight">
+                Cities &amp; quantities<span className="text-flame-dark"> *</span>
+              </span>
+              <span className="text-[0.7rem] text-ink-500 tabular-nums">
+                Total: <span className="text-midnight font-medium">{totalQty}</span> car{totalQty === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {items.map((it, idx) => (
+                <div key={idx} className="grid grid-cols-[auto_1fr_8rem_auto] items-baseline gap-2">
+                  <span className="text-[0.7rem] text-ink-500 tabular-nums w-[3.5rem]">
+                    Item {idx + 1}
+                  </span>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="City (e.g. Riyadh)"
+                    value={it.city}
+                    onChange={(e) => updateItem(idx, { city: e.target.value })}
+                    disabled={submitting}
+                    required
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    className="input tabular-nums"
+                    placeholder="Qty"
+                    value={it.quantity}
+                    onChange={(e) => updateItem(idx, {
+                      quantity: e.target.value === "" ? "" : Number(e.target.value),
+                    })}
+                    disabled={submitting}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeItem(idx)}
+                    disabled={submitting || items.length <= 1}
+                    title={items.length <= 1 ? "At least one item required." : "Remove this item"}
+                    className={cn(
+                      "text-[0.7rem] px-2 py-1 rounded border",
+                      items.length <= 1
+                        ? "border-ink-200 text-ink-300 cursor-not-allowed"
+                        : "border-flame text-flame-dark hover:bg-flame-pale",
+                    )}
+                  >
+                    ✕
+                  </button>
+                </div>
               ))}
-            </select>
-          </Field>
-
-          <Field label="Quantity" required>
-            <input
-              type="number"
-              min={1}
-              step={1}
-              className="input tabular-nums"
-              value={quantity}
-              onChange={(e) => setQuantity(e.target.value === "" ? "" : Number(e.target.value))}
+            </div>
+            <button
+              type="button"
+              onClick={addItem}
               disabled={submitting}
-              required
-            />
-          </Field>
+              className="mt-2 text-[0.7rem] px-2 py-1 rounded border border-brand text-brand-dark hover:bg-brand-pastel/40"
+            >
+              + Add another item
+            </button>
+          </div>
 
-          <Field label="City" required>
-            <input
-              type="text"
-              className="input"
-              placeholder="e.g. Riyadh"
-              value={city}
-              onChange={(e) => setCity(e.target.value)}
-              disabled={submitting}
-              required
-            />
-          </Field>
+          {/* Dates */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Expected delivery date" required>
+              <input
+                type="date"
+                className="input tabular-nums"
+                value={expectedDeliveryDate}
+                onChange={(e) => setExpectedDeliveryDate(e.target.value)}
+                disabled={submitting}
+                required
+              />
+            </Field>
+            <Field label="Expected PO signing date">
+              <input
+                type="date"
+                className="input tabular-nums"
+                value={expectedPoSigningDate}
+                onChange={(e) => setExpectedPoSigningDate(e.target.value)}
+                disabled={submitting}
+              />
+            </Field>
+          </div>
 
-          <Field label="Expected delivery date" required>
-            <input
-              type="date"
-              className="input tabular-nums"
-              value={expectedDate}
-              onChange={(e) => setExpectedDate(e.target.value)}
-              disabled={submitting}
-              required
-            />
-          </Field>
-
+          {/* Submitter */}
           <Field label="Submitting user" required>
             <select
               className="input"
@@ -157,11 +295,16 @@ export default function ForecastShell({ rows, options }: Props) {
                 <option key={u.id} value={u.id}>{u.label}</option>
               ))}
             </select>
+            {options.users.length === 0 && (
+              <p className="mt-1 text-[0.7rem] text-flame-dark">
+                No Partnership members configured. Assign users to the Partnership department in Settings.
+              </p>
+            )}
           </Field>
 
-          <div className="md:col-span-2 lg:col-span-3 flex items-center justify-between gap-3">
+          <div className="flex items-center justify-between gap-3 pt-1">
             <p className="text-xs text-ink-500">
-              A "Pre-PO App Listing" action is created automatically — you can mark it done in the Action Center as soon as cars go live in the app.
+              A &quot;Pre-PO App Listing&quot; action is created automatically — you can mark it done in the Action Center as soon as cars go live in the app.
             </p>
             <button
               type="submit"
@@ -175,7 +318,7 @@ export default function ForecastShell({ rows, options }: Props) {
             </button>
           </div>
           {submitError && (
-            <p role="alert" className="md:col-span-2 lg:col-span-3 text-sm text-flame-dark">
+            <p role="alert" className="text-sm text-flame-dark">
               {submitError}
             </p>
           )}
