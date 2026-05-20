@@ -2380,13 +2380,21 @@ function ActionChip({
   /** When provided, intercepts the click instead of flipping status.
    *  Used by the batch-scope VIN chip to open the qty form. */
   onClickOverride?: (() => void) | null;
-  /** When provided, renders a tiny 📅 button after the label that
-   *  opens the date-edit form for this action. Hidden when null. */
+  /** When provided, the 📅 button delegates to this handler (BatchRow
+   *  opens its full-width inline date form this way). When omitted,
+   *  the chip renders its own inline date popover below itself. */
   onEditDate?: (() => void) | null;
 }) {
   // Synthetic rows (negative id) shouldn't expose interactive chips —
   // they're read-only summaries.
   if (action.id < 0) return null;
+
+  // Local popover state — only used when no external onEditDate
+  // handler is supplied (i.e. the caller doesn't manage its own
+  // inline form). Lets every chip in the tree get a date picker
+  // without per-call plumbing.
+  const [dateOpen, setDateOpen] = useState<boolean>(false);
+  const usesLocalPopover = !onEditDate && action.status !== "skipped";
 
   const today = todayIso();
   const overdue = isOverdue(action, today);
@@ -2435,45 +2443,176 @@ function ActionChip({
   // visually. Two separate <button>s under the shell (rather than a
   // nested button) keeps the HTML valid.
   return (
-    <span
-      className={cn(
-        "text-[0.7rem] rounded border transition-colors inline-flex items-stretch overflow-hidden",
-        toneCls,
-        busy && "opacity-50 cursor-wait",
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => onClickOverride
-          ? onClickOverride()
-          : onChangeStatus(action.id, nextStatus)}
-        disabled={busy}
-        title={vinsBadge
-          ? `${tooltipBits.join(" · ")} · ${vinsBadge} VINs received`
-          : tooltipBits.join(" · ")}
-        className="px-2 py-0.5 inline-flex items-center gap-1 flex-1 min-w-0 text-left hover:bg-black/5"
-      >
-        <span aria-hidden>{icon}</span>
-        <span className="font-medium truncate max-w-[10rem]">{label}</span>
-        {vinsBadge && (
-          <span className="tabular-nums text-[0.65rem] ml-0.5 text-ink-500">
-            {vinsBadge}
-          </span>
+    <span className="inline-flex flex-col items-stretch">
+      <span
+        className={cn(
+          "text-[0.7rem] rounded border transition-colors inline-flex items-stretch overflow-hidden",
+          toneCls,
+          busy && "opacity-50 cursor-wait",
         )}
-      </button>
-      {onEditDate && (
+      >
         <button
           type="button"
-          onClick={onEditDate}
+          onClick={() => onClickOverride
+            ? onClickOverride()
+            : onChangeStatus(action.id, nextStatus)}
           disabled={busy}
-          title="Edit expected / completion date"
-          aria-label="Edit dates"
-          className="px-1.5 border-l border-current/40 hover:bg-black/10 text-[0.7rem]"
+          title={vinsBadge
+            ? `${tooltipBits.join(" · ")} · ${vinsBadge} VINs received`
+            : tooltipBits.join(" · ")}
+          className="px-2 py-0.5 inline-flex items-center gap-1 flex-1 min-w-0 text-left hover:bg-black/5"
         >
-          📅
+          <span aria-hidden>{icon}</span>
+          <span className="font-medium truncate max-w-[10rem]">{label}</span>
+          {vinsBadge && (
+            <span className="tabular-nums text-[0.65rem] ml-0.5 text-ink-500">
+              {vinsBadge}
+            </span>
+          )}
         </button>
+        {/* 📅 always visible (except on skipped). Delegates to the
+            external handler when one's wired up (BatchRow row-wide
+            form); otherwise opens a local popover below the chip. */}
+        {(onEditDate || usesLocalPopover) && (
+          <button
+            type="button"
+            onClick={() => onEditDate ? onEditDate() : setDateOpen((v) => !v)}
+            disabled={busy}
+            title={action.status === "done"
+              ? "Edit completion date"
+              : "Mark done with a custom date"}
+            aria-label="Set completion date"
+            className="px-1.5 border-l border-current/40 hover:bg-black/10 text-[0.7rem]"
+          >
+            📅
+          </button>
+        )}
+      </span>
+      {/* Local date popover for chips without an external handler.
+          Renders below the chip and unhooks on submit/cancel. */}
+      {usesLocalPopover && dateOpen && (
+        <ActionChipDatePopover
+          action={action}
+          busy={busy}
+          onSubmit={(iso) => {
+            onChangeStatus(action.id, "done", iso);
+            setDateOpen(false);
+          }}
+          onCancel={() => setDateOpen(false)}
+        />
       )}
     </span>
+  );
+}
+
+/**
+ * Date button + inline popover for ActionCard (Internal Phase rows).
+ * Sits next to "Mark done" / "Re-open" in the card's status bar.
+ * Label flips based on the current status so the affordance reads
+ * the same way as the chip's tooltip.
+ */
+function ActionCardDateButton({
+  action, busy, onChangeStatus,
+}: {
+  action: ScopedActionDetail;
+  busy: boolean;
+  onChangeStatus: (actionId: number, status: Status, completedAt?: string) => void;
+}) {
+  const [open, setOpen] = useState<boolean>(false);
+  const isDone = action.status === "done";
+  return (
+    <>
+      <StatusBtn
+        label={isDone ? "📅 Backdate" : "📅 Mark done on…"}
+        tone="ink"
+        busy={busy}
+        onClick={() => setOpen((v) => !v)}
+      />
+      {open && (
+        <div className="w-full">
+          <ActionChipDatePopover
+            action={action}
+            busy={busy}
+            onSubmit={(iso) => {
+              onChangeStatus(action.id, "done", iso);
+              setOpen(false);
+            }}
+            onCancel={() => setOpen(false)}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Compact date popover anchored under an ActionChip when no parent
+ * handler is wired. Mirrors the longer ActionDateForm in spirit but
+ * fits the chip's small footprint — single input + two buttons.
+ */
+function ActionChipDatePopover({
+  action, busy, onSubmit, onCancel,
+}: {
+  action: ScopedActionDetail;
+  busy: boolean;
+  onSubmit: (completedAtIso: string) => void;
+  onCancel: () => void;
+}) {
+  const isDone = action.status === "done";
+  const todayDefault = new Date().toISOString().slice(0, 10);
+  const initial = action.completedAt ? action.completedAt.slice(0, 10) : todayDefault;
+  const [date, setDate] = useState<string>(initial);
+  const [error, setError] = useState<string | null>(null);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      setError("Pick a date.");
+      return;
+    }
+    onSubmit(`${date}T12:00:00Z`);
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      className="mt-1 p-1.5 border border-brand rounded-md bg-brand-pastel/30 inline-flex flex-col gap-1 text-[0.65rem]"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span className="text-brand-dark font-medium">
+        {isDone ? "📅 Backdate" : "✓ Mark done on"}
+      </span>
+      <input
+        type="date"
+        value={date}
+        onChange={(e) => { setDate(e.target.value); setError(null); }}
+        className="text-[0.65rem] px-1.5 py-0.5 border border-ink-300 rounded tabular-nums"
+        autoFocus
+      />
+      {error && <span className="text-flame-dark">{error}</span>}
+      <div className="flex gap-1 justify-end">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="px-1.5 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy}
+          className={cn(
+            "px-1.5 py-0.5 rounded border",
+            isDone
+              ? "border-brand text-brand-dark hover:bg-brand-pastel"
+              : "border-green text-green-dark hover:bg-green-pale",
+          )}
+        >
+          {busy ? "…" : "✓"}
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -3885,6 +4024,12 @@ function ActionCard({
             busy={busy}
             onClick={() => onChangeStatus(action.id, "done")}
           />
+        )}
+        {/* Mark-done-with-date / backdate. Open the same compact
+            date popover the chip surfaces in the External Phase,
+            so Internal Phase rows pick up the same affordance. */}
+        {action.status !== "skipped" && (
+          <ActionCardDateButton action={action} busy={busy} onChangeStatus={onChangeStatus} />
         )}
         {action.status !== "skipped" && action.status !== "done" && (
           <StatusBtn
