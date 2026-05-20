@@ -234,10 +234,14 @@ export async function POST(req: NextRequest) {
           const newId = insertedRemainder[0].id;
           remainderBatchId = newId;
 
-          // Per-leg remainders: leftover = parent_leg.requested - leg.delivered.
-          // If legConfirmations were sent, use them; otherwise pro-rate
-          // by stripping fully-delivered legs (defensive — most callers
-          // pass legConfirmations for multi-leg batches).
+          // Per-leg remainders. Two cases:
+          //  - Multi-leg batches: ops sent legConfirmations[] in the
+          //    DeliverForm; use those for per-city accounting.
+          //  - Single-leg batches: legConfirmations is empty (the form
+          //    only collects a scalar qty); treat the scalar
+          //    deliveredQuantity as the single leg's delivered count.
+          // Without the single-leg fallback the remainder leg inherited
+          // the parent's full quantity — Jeddah 15 instead of Jeddah 5.
           try {
             const parentLegs = await tx.select()
               .from(batchDeliveryLegs)
@@ -245,6 +249,14 @@ export async function POST(req: NextRequest) {
             const deliveredByLeg = new Map<number, number>();
             for (const lc of body.legConfirmations ?? []) {
               deliveredByLeg.set(lc.id, Math.max(0, Math.floor(lc.deliveredQuantity)));
+            }
+            // Single-leg + no legConfirmations: scalar delivery → leg.
+            if (
+              parentLegs.length === 1
+              && deliveredByLeg.size === 0
+              && Number.isFinite(body.deliveredQuantity)
+            ) {
+              deliveredByLeg.set(parentLegs[0].id, delivered);
             }
             for (const leg of parentLegs) {
               const deliv = deliveredByLeg.get(leg.id) ?? (leg.deliveredQuantity ?? 0);
