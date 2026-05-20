@@ -37,6 +37,23 @@ interface Body {
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * Accepts either a yyyy-mm-dd date (legacy) OR a full ISO datetime
+ * string (new datetime-local-driven UI). Returns the canonical ISO
+ * timestamp to persist, or null on a clear, or false on invalid.
+ */
+function normaliseCompletedAt(raw: string | null): string | null | false {
+  if (raw === null) return null;
+  if (ISO_DATE.test(raw)) {
+    // Legacy date-only — stamp at noon UTC so day-comparisons stay
+    // stable across timezones.
+    return `${raw}T12:00:00.000Z`;
+  }
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return false;
+  return d.toISOString();
+}
+
 export async function PATCH(req: NextRequest) {
   const gate = await requireAuth(["ops", "admin"]);
   if (!gate.ok) return gate.response;
@@ -55,10 +72,16 @@ export async function PATCH(req: NextRequest) {
   if (body.expectedDate !== null && (typeof body.expectedDate !== "string" || !ISO_DATE.test(body.expectedDate))) {
     return apiError("expectedDate must be yyyy-mm-dd or null", 400);
   }
-  if (body.completedAt !== undefined
-      && body.completedAt !== null
-      && (typeof body.completedAt !== "string" || !ISO_DATE.test(body.completedAt))) {
-    return apiError("completedAt must be yyyy-mm-dd or null", 400);
+  let normalisedCompletedAt: string | null | undefined = undefined;
+  if (body.completedAt !== undefined) {
+    if (body.completedAt !== null && typeof body.completedAt !== "string") {
+      return apiError("completedAt must be a string or null", 400);
+    }
+    const result = normaliseCompletedAt(body.completedAt);
+    if (result === false) {
+      return apiError("completedAt must be yyyy-mm-dd, full ISO timestamp, or null", 400);
+    }
+    normalisedCompletedAt = result;
   }
 
   const [current] = await db
@@ -74,7 +97,7 @@ export async function PATCH(req: NextRequest) {
 
   // Backdating completedAt only makes sense for done rows. Reject on
   // non-done so a stale UI can't silently corrupt the timeline.
-  if (body.completedAt !== undefined && current.status !== "done") {
+  if (normalisedCompletedAt !== undefined && current.status !== "done") {
     return apiError("completedAt only editable when status='done'", 400);
   }
 
@@ -83,11 +106,8 @@ export async function PATCH(req: NextRequest) {
     expectedDate: body.expectedDate,
     updatedAt:    nowIso,
   };
-  if (body.completedAt !== undefined) {
-    // Stamp at noon UTC so day-comparisons are stable across TZs.
-    updateSet.completedAt = body.completedAt
-      ? `${body.completedAt}T12:00:00Z`
-      : null;
+  if (normalisedCompletedAt !== undefined) {
+    updateSet.completedAt = normalisedCompletedAt;
   }
 
   await db.update(actionsTable).set(updateSet).where(eq(actionsTable.id, actionId));
@@ -96,8 +116,8 @@ export async function PATCH(req: NextRequest) {
     ok: true,
     actionId,
     expectedDate: body.expectedDate,
-    ...(body.completedAt !== undefined
-      ? { completedAt: updateSet.completedAt as string | null }
+    ...(normalisedCompletedAt !== undefined
+      ? { completedAt: normalisedCompletedAt }
       : {}),
   });
 }
