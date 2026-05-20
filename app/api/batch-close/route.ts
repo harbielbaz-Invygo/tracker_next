@@ -26,6 +26,7 @@ import {
 } from "@/lib/db/schema";
 import { requireAuth, apiError } from "@/lib/api-auth";
 import { cascadeBatchClosureUp } from "@/lib/closure-cascade";
+import { checkBatchDeliveryGate } from "@/lib/closure-gates";
 
 export const runtime = "nodejs";
 
@@ -77,6 +78,16 @@ export async function POST(req: NextRequest) {
     body.closedAt && /^\d{4}-\d{2}-\d{2}$/.test(body.closedAt)
       ? body.closedAt
       : new Date().toISOString().slice(0, 10);
+
+  // Server-side gate (G3): when closing as 'delivered', enforce the
+  // same 5 checks the client tooltip shows. Cancellation skips this
+  // — cancellation is a corrective action and must remain ungated.
+  if (body.reason === "delivered") {
+    const gate = await checkBatchDeliveryGate(db, body.batchId);
+    if (!gate.ok) {
+      return apiError(`Cannot mark as delivered: ${gate.reason}`, 409);
+    }
+  }
 
   let remainderBatchId: number | null = null;
   // Cascade result — set inside the transaction, read after.
