@@ -32,6 +32,7 @@ import {
 } from "@/lib/db/schema";
 import { requireAuth, apiError } from "@/lib/api-auth";
 import { unblockDependents, cascadeRevertDependents } from "@/lib/scope-cascade";
+import { cascadeBatchClosureUp } from "@/lib/closure-cascade";
 
 export const runtime = "nodejs";
 
@@ -86,6 +87,7 @@ export async function PATCH(req: NextRequest) {
 
     // Auto-close: Delivery action on a batch → close the batch.
     // Re-open Delivery → re-open the batch.
+    let batchClosureMutated = false;
     if (current.scope === "batch" && current.actionTypeName === "Delivery") {
       if (status === "done") {
         const closedDate = (completedAt ?? nowIso).slice(0, 10);
@@ -94,6 +96,7 @@ export async function PATCH(req: NextRequest) {
           closureReason: "delivered",
           updatedAt:     nowIso,
         }).where(eq(batches.id, current.scopeId));
+        batchClosureMutated = true;
       } else {
         // Any non-done status on Delivery un-closes the batch (only
         // if it was closed as 'delivered' — don't touch 'cancelled').
@@ -102,6 +105,23 @@ export async function PATCH(req: NextRequest) {
           closureReason: null,
           updatedAt:     nowIso,
         }).where(eq(batches.id, current.scopeId));
+        batchClosureMutated = true;
+      }
+    }
+    // After the batch's closedAt changed, propagate to wave + PO.
+    // Same transaction so a half-cascaded state is impossible.
+    if (batchClosureMutated) {
+      try {
+        await cascadeBatchClosureUp(tx, current.scopeId, nowIso);
+      } catch (err) {
+        // Best-effort — don't fail the status flip if the cascade
+        // can't reach a parent (orphan batch / corrupt FK).
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[scope-action] closure cascade failed for batch",
+          current.scopeId,
+          err instanceof Error ? err.message : err,
+        );
       }
     }
 
