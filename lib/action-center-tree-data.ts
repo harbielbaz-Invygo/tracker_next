@@ -124,8 +124,18 @@ export interface BatchNode {
   closedAt:           string | null;
   closureReason:      "delivered" | "cancelled" | null;
   appListedAt:        string | null;
-  /** Dealer-promised availability date (the original PO promise). */
+  /**
+   * Current PO Expected Date — the live partnership-dealer
+   * commitment. Mutates if the dealer renegotiates (via Shift).
+   * Used for "today's commitment" displays.
+   */
   promisedDate:       string;
+  /**
+   * Locked snapshot of the FIRST PO Expected Date — the original
+   * agreement captured at intake. Foundation for PO Reliability
+   * scoring. Null on legacy batches until the admin migration runs.
+   */
+  poExpectedDateAtLock: string | null;
   /**
    * Ops's current projected delivery date for THIS batch — may have
    * shifted from the original promise via /api/batch-shift. Defaults
@@ -618,11 +628,14 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           appListedAt:        b.appListedAt ?? null,
           promisedDate:                  b.dealerPromisedDeliveryDate,
           currentProjectedDeliveryDate:  b.currentProjectedDeliveryDate ?? null,
-          // Defensive read — the column was added later and may be
-          // missing on pre-migration DB snapshots.
+          // Defensive reads — both *AtLock columns were added later
+          // and may be missing on pre-migration DB snapshots.
           opsProjectedDeliveryDateAtLock:
             (b as { opsProjectedDeliveryDateAtLock?: string | null })
               .opsProjectedDeliveryDateAtLock ?? null,
+          poExpectedDateAtLock:
+            (b as { poExpectedDateAtLock?: string | null })
+              .poExpectedDateAtLock ?? null,
           colorSummary:                  b.colorSummary ?? null,
           unitPriceSar:                  b.unitPriceSar ?? null,
           totalValueSar,
