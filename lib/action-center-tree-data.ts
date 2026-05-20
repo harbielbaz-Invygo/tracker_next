@@ -17,6 +17,7 @@ import {
   pos, waves, batches, dealers,
   actions as actionsTable, actionTypes, actionDependencies, departments, stakeholders,
   batchDateRevisions, batchDeliveryLegs,
+  batchForecasts, users,
 } from "@/lib/db/schema";
 
 type BatchRow = typeof batches.$inferSelect;
@@ -216,6 +217,32 @@ export interface PoNode {
    * should fire while internal-phase work is still in flight.
    */
   internalPhaseDone: boolean;
+  /**
+   * True when this node is a virtual stand-in for a Pre-PO (Forecast)
+   * batch — no real PO exists yet, so the drawer hides the Internal /
+   * External Phase tabs and shows only the Pre-PO follow-up view.
+   * When false this is a real PO row backed by a `pos` table entry.
+   */
+  isPrePo: boolean;
+  /**
+   * For Pre-PO virtual nodes, the underlying `batches.id` of the
+   * pre_po batch. Lets the Pre-PO follow-up view deep-link to Intake
+   * with `?linkForecast={prePoBatchId}` so the partnership commitment
+   * carries forward when the real PO arrives. Null on real PO nodes.
+   */
+  prePoBatchId: number | null;
+  /**
+   * Pre-PO batch identity surfaced in the drawer header (city,
+   * promised date, submitter). Null on real PO nodes. Synth'd by the
+   * data layer from the underlying batch + batch_forecasts rows.
+   */
+  prePoSummary: {
+    city: string;
+    expectedDeliveryDate: string;
+    expectedPoSigningDate: string | null;
+    submittedAt: string;
+    submittedByName: string | null;
+  } | null;
 }
 
 export interface DealerNode {
@@ -638,11 +665,100 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         completedAt: allListed ? latestListedAt : null,
       },
       internalPhaseDone,
+      isPrePo:      false,
+      prePoBatchId: null,
+      prePoSummary: null,
     };
 
     const arr = posByDealer.get(p.dealerId) ?? [];
     arr.push(node);
     posByDealer.set(p.dealerId, arr);
+  }
+
+  // ── Pre-PO virtual PoNodes ────────────────────────────────────
+  // Pre-PO batches (lifecycleState='pre_po') don't have a real PO
+  // entry in the `pos` table or a wave linkage yet — they're
+  // Partnership commitments captured by the Forecast page. We surface
+  // them in the Action Center tree as virtual PoNodes under their
+  // dealer so ops can chase the Pre-PO App Listing (and any other
+  // pre_po actions) from the same drawer they use for live POs. When
+  // the real PO arrives via Intake the virtual node disappears (the
+  // batch flips to post_po and re-emerges under a real PO).
+  const prePoBatches = batchesRows.filter(
+    (b) => b.lifecycleState === "pre_po" && b.closedAt == null,
+  );
+  let prePoForecastIndex: Map<
+    number,
+    { submittedAt: string; submittedByName: string | null; expectedPoDate: string | null }
+  >;
+  try {
+    const forecastRows = await db
+      .select({
+        batchId:       batchForecasts.batchId,
+        submittedAt:   batchForecasts.submittedAt,
+        userName:      users.name,
+        userUsername:  users.username,
+      })
+      .from(batchForecasts)
+      .leftJoin(users, eq(batchForecasts.submittedByUserId, users.id));
+    prePoForecastIndex = new Map(
+      forecastRows.map((r) => [
+        r.batchId,
+        {
+          submittedAt: r.submittedAt,
+          submittedByName: r.userName ?? r.userUsername ?? null,
+          expectedPoDate: null,
+        },
+      ]),
+    );
+  } catch {
+    // batch_forecasts missing — tree still works without summaries.
+    prePoForecastIndex = new Map();
+  }
+
+  for (const b of prePoBatches) {
+    const batchActions = actionsByKey.get(`batch:${b.id}`) ?? [];
+    const summary = prePoForecastIndex.get(b.id) ?? null;
+    const virtualPoNode: PoNode = {
+      // Use a negative id derived from the batch id so it can never
+      // collide with a real `pos.id` (autoincrement is always > 0).
+      id:                   -b.id,
+      poNumber:             `Pre-PO · ${b.batchCode}`,
+      poDate:               null,
+      poReference:          null,
+      contractLengthMonths: null,
+      buyBackRate:          null,
+      unitPriceSar:         null,
+      closedAt:             null,
+      totalCars:            b.requestedQuantity,
+      totalValueSar:        null,
+      nextAvailability:     b.dealerPromisedDeliveryDate,
+      actions:              [],  // No PO-scope actions on pre_po batches.
+      waves:                [],  // No waves yet — that's the whole point.
+      appListingSummary: {
+        listed:      0,
+        total:       0,
+        completedAt: null,
+      },
+      internalPhaseDone: false,
+      isPrePo:           true,
+      prePoBatchId:      b.id,
+      prePoSummary: {
+        city:                  b.dealerReceivingCity ?? "—",
+        expectedDeliveryDate:  b.dealerPromisedDeliveryDate,
+        expectedPoSigningDate: (b as { expectedPoDate?: string | null }).expectedPoDate ?? null,
+        submittedAt:           summary?.submittedAt ?? "—",
+        submittedByName:       summary?.submittedByName ?? null,
+      },
+    };
+    // Stash the pre_po batch's actions on the virtualPoNode for the
+    // drawer to render in the Pre-PO follow-up tab. We hijack the
+    // `actions` field but mark `isPrePo` so the existing Internal
+    // Phase view doesn't render them as PO-scope actions.
+    virtualPoNode.actions = batchActions;
+    const arr = posByDealer.get(b.dealerId) ?? [];
+    arr.push(virtualPoNode);
+    posByDealer.set(b.dealerId, arr);
   }
 
   // Build dealer nodes. Only include dealers that have at least one PO

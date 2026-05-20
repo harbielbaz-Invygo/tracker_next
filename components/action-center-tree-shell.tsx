@@ -17,6 +17,7 @@
  */
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import type {
   ActionCenterTree, PoNode, WaveNode, BatchNode, ScopedActionDetail,
   DepartmentCatalog,
@@ -102,7 +103,7 @@ function rollupPoCounts(po: PoNode, today: string): {
   };
 }
 
-type DrawerView = "internal" | "vin";
+type DrawerView = "internal" | "vin" | "prepo";
 const DRAWER_VIEW_KEY = "action-center-v2-drawer-view";
 
 interface Props {
@@ -320,7 +321,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(DRAWER_VIEW_KEY);
-      if (stored === "internal" || stored === "vin") setView(stored);
+      if (stored === "internal" || stored === "vin" || stored === "prepo") setView(stored);
     } catch { /* private mode */ }
   }, []);
   useEffect(() => {
@@ -400,6 +401,14 @@ export default function ActionCenterTreeShell({ tree }: Props) {
     const poId = selection.poId;
     return tree.dealers.find((d) => d.pos.some((p) => p.id === poId)) ?? null;
   }, [tree, selection]);
+
+  // Auto-snap the drawer view when the selected node is a Pre-PO —
+  // Internal/External tabs don't exist for those, and the view state
+  // would otherwise stay on whatever the previous selection was on.
+  useEffect(() => {
+    if (selectedPo?.isPrePo && view !== "prepo") setView("prepo");
+    if (selectedPo && !selectedPo.isPrePo && view === "prepo") setView("internal");
+  }, [selectedPo, view]);
 
   return (
     <ShellContext.Provider value={{
@@ -716,8 +725,12 @@ function DealerTree({
                             "w-full text-left px-3 py-2 pl-8 text-xs",
                             "border-l-2",
                             p.id === selectedPoId
-                              ? "bg-brand-pastel border-l-brand text-brand-dark"
-                              : "border-l-transparent hover:bg-ink-50 text-ink-700",
+                              ? (p.isPrePo
+                                  ? "bg-gold-pale border-l-gold text-gold-dark"
+                                  : "bg-brand-pastel border-l-brand text-brand-dark")
+                              : p.isPrePo
+                                ? "border-l-gold/40 hover:bg-gold-pale/40 text-midnight"
+                                : "border-l-transparent hover:bg-ink-50 text-ink-700",
                             // Closed POs are dimmed but still selectable —
                             // ops occasionally needs to see post-delivery
                             // detail.
@@ -725,7 +738,17 @@ function DealerTree({
                           )}
                         >
                           <div className="font-mono font-medium flex items-baseline gap-1.5">
-                            <span className="truncate">{p.poNumber}</span>
+                            {p.isPrePo && (
+                              <span
+                                aria-hidden
+                                className="font-sans text-[0.6rem] font-bold uppercase tracking-wide bg-gold text-white rounded-full px-1.5 py-0.5"
+                              >
+                                Pre-PO
+                              </span>
+                            )}
+                            <span className="truncate">
+                              {p.isPrePo ? p.poNumber.replace(/^Pre-PO · /, "") : p.poNumber}
+                            </span>
                             {counts.overdue > 0 && (
                               <span
                                 title={`${counts.overdue} overdue`}
@@ -736,7 +759,19 @@ function DealerTree({
                             )}
                           </div>
                           <div className="text-[0.65rem] text-ink-500 mt-0.5 tabular-nums">
-                            {p.totalCars} cars · {p.waves.length} window{p.waves.length === 1 ? "" : "s"}
+                            {p.totalCars} cars
+                            {!p.isPrePo && (
+                              <>
+                                {" · "}
+                                {p.waves.length} window{p.waves.length === 1 ? "" : "s"}
+                              </>
+                            )}
+                            {p.isPrePo && p.prePoSummary && (
+                              <>
+                                {" · "}
+                                <span className="text-gold-dark">awaiting PO</span>
+                              </>
+                            )}
                             {p.closedAt && <span className="ml-1 text-green-dark">· closed</span>}
                           </div>
                           {/* Phase-broken progress lines: Internal +
@@ -745,8 +780,10 @@ function DealerTree({
                               Each phase that has at least one row
                               shows its own line; we omit when total=0
                               to keep the tree compact for newly-
-                              created POs. */}
-                          {(counts.internal.total > 0 || counts.external.total > 0) && (
+                              created POs. Pre-PO nodes skip this
+                              entirely — they have no Internal /
+                              External phases, only Pre-PO follow-up. */}
+                          {!p.isPrePo && (counts.internal.total > 0 || counts.external.total > 0) && (
                             <div className="mt-0.5 space-y-0.5 leading-tight">
                               {counts.internal.total > 0 && (
                                 <div className="text-[0.65rem] tabular-nums">
@@ -776,6 +813,29 @@ function DealerTree({
                               )}
                             </div>
                           )}
+                          {/* Pre-PO follow-up progress — surfaces the
+                              Pre-PO App Listing chip's status (and
+                              anything else ops added under pre_po) so
+                              the tree row carries the same signal
+                              live POs do for Internal/External. */}
+                          {p.isPrePo && p.actions.length > 0 && (() => {
+                            const done = p.actions.filter(
+                              (a) => a.status === "done" || a.status === "skipped",
+                            ).length;
+                            return (
+                              <div className="mt-0.5 text-[0.65rem] tabular-nums">
+                                <span className="text-ink-500">Pre-PO follow-up </span>
+                                <span className={cn(
+                                  "font-medium",
+                                  done === p.actions.length
+                                    ? "text-green-dark"
+                                    : "text-midnight",
+                                )}>
+                                  {done}/{p.actions.length}
+                                </span>
+                              </div>
+                            );
+                          })()}
                         </button>
                       </li>
                     );
@@ -901,11 +961,20 @@ function PoDrawer({
         <PoHeaderTimeline po={po} />
       </header>
 
-      {/* View toggle */}
+      {/* View toggle. Pre-PO nodes only surface the "Pre-PO follow-up"
+          tab — Internal/External Phase don't exist until a real PO
+          arrives. Live POs keep the two-tab toggle and never expose
+          the Pre-PO follow-up control. */}
       <div className="px-4 py-2 border-b border-ink-200 shrink-0 bg-white">
         <div role="tablist" className="inline-flex items-center bg-ink-100 rounded-md p-0.5">
-          <ToggleBtn active={view === "internal"} onClick={() => onChangeView("internal")} label="Internal Phase" />
-          <ToggleBtn active={view === "vin"}      onClick={() => onChangeView("vin")}      label="External Phase" />
+          {po.isPrePo ? (
+            <ToggleBtn active={view === "prepo"}    onClick={() => onChangeView("prepo")}    label="Pre-PO follow-up" />
+          ) : (
+            <>
+              <ToggleBtn active={view === "internal"} onClick={() => onChangeView("internal")} label="Internal Phase" />
+              <ToggleBtn active={view === "vin"}      onClick={() => onChangeView("vin")}      label="External Phase" />
+            </>
+          )}
         </div>
       </div>
 
@@ -978,7 +1047,13 @@ function PoDrawer({
             </div>
           );
         })()}
-        {view === "internal" ? (
+        {po.isPrePo ? (
+          <PrePoFollowUpView
+            po={po}
+            busyActionId={busyActionId}
+            onChangeStatus={onChangeStatus}
+          />
+        ) : view === "internal" ? (
           <InternalPhaseView po={po} busyActionId={busyActionId} onChangeStatus={onChangeStatus} />
         ) : (
           <VinChaseView
@@ -1793,6 +1868,115 @@ function Column({
 // External Phase — per-window sections with window-scope actions
 // + the batches landing in that window
 // ─────────────────────────────────────────────────────────────
+
+/**
+ * Pre-PO follow-up view — drawer body shown when the selected node is
+ * a virtual Pre-PO entry (Forecast commitment with no real PO yet).
+ *
+ * Layout:
+ *   - Identity card: dealer + city + qty + dates + submitter
+ *   - Pre-PO action chips (typically just "Pre-PO App Listing", but
+ *     ops can add more action_types whose scope='batch' apply here)
+ *   - Big "Link this Pre-PO to a new PO" CTA that deep-links to
+ *     /intake?linkForecast={prePoBatchId}. When the real PO PDF
+ *     arrives ops drops it on Intake and the same batch flips to
+ *     post_po — accuracy metrics survive.
+ */
+function PrePoFollowUpView({
+  po, busyActionId, onChangeStatus,
+}: { po: PoNode }
+  & Pick<MutationProps, "busyActionId" | "onChangeStatus">
+) {
+  const summary = po.prePoSummary;
+  const actions = po.actions;
+  return (
+    <div className="space-y-4">
+      {/* Identity card — replaces the standard PO meta strip because
+          a Pre-PO has no PO number / signing date / contract terms. */}
+      <section className="border border-gold/40 rounded-md bg-gold-pale/20 p-3 space-y-1.5">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="inline-block text-[0.6rem] font-bold uppercase tracking-wide bg-gold text-white rounded-full px-2 py-0.5">
+            🔮 Pre-PO
+          </span>
+          <span className="text-sm font-semibold text-midnight">
+            Partnership commitment · {po.totalCars} car{po.totalCars === 1 ? "" : "s"}
+          </span>
+        </div>
+        {summary && (
+          <div className="text-[0.7rem] text-ink-600 flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+            <span>📍 <span className="text-midnight">{summary.city}</span></span>
+            <span className="tabular-nums">
+              🚚 Expected delivery <span className="text-midnight">{summary.expectedDeliveryDate}</span>
+            </span>
+            {summary.expectedPoSigningDate && (
+              <span className="tabular-nums">
+                📝 Expected PO signing <span className="text-midnight">{summary.expectedPoSigningDate}</span>
+              </span>
+            )}
+            <span className="tabular-nums">
+              📅 Submitted <span className="text-midnight">{summary.submittedAt}</span>
+            </span>
+            {summary.submittedByName && (
+              <span>by <span className="text-brand-dark">@{summary.submittedByName}</span></span>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* Pre-PO action chips. Same chip styling as External Phase so
+          the interaction model carries over (click flips status, 📅
+          opens the backdate form on done chips). */}
+      <section className="space-y-2">
+        <p className="text-[0.7rem] font-medium uppercase tracking-wide text-ink-500">
+          Pre-PO actions
+        </p>
+        {actions.length === 0 ? (
+          <p className="text-[0.75rem] text-ink-500 italic">
+            No actions configured for this Pre-PO yet.
+          </p>
+        ) : (
+          <div className="grid gap-1.5 grid-cols-[repeat(auto-fit,minmax(180px,1fr))]">
+            {actions
+              .slice()
+              .sort((a, b) => a.sortOrder - b.sortOrder)
+              .map((a) => (
+                <ActionChip
+                  key={a.id}
+                  action={a}
+                  busy={busyActionId === a.id}
+                  onChangeStatus={onChangeStatus}
+                />
+              ))}
+          </div>
+        )}
+      </section>
+
+      {/* Link-to-Intake CTA. When the real PO arrives, ops drops the
+          PDF here — the Intake page reads the query string and
+          pre-binds the new PO to this Pre-PO so all the partnership
+          metadata + actions carry forward. */}
+      {po.prePoBatchId != null && (
+        <section className="border-2 border-dashed border-brand rounded-md bg-brand-pastel/20 p-4 text-center space-y-2">
+          <p className="text-sm font-semibold text-brand-dark">
+            ↪ Link to a real PO
+          </p>
+          <p className="text-[0.7rem] text-ink-600 max-w-md mx-auto">
+            Drop the real PO PDF on Intake to convert this Pre-PO into a
+            full PO. The same record flips from <code>pre_po</code> to{" "}
+            <code>post_po</code> and Internal / External Phase actions
+            become available.
+          </p>
+          <Link
+            href={`/intake?linkForecast=${po.prePoBatchId}`}
+            className="btn btn-primary inline-flex"
+          >
+            🧾 Open Intake with this Pre-PO linked
+          </Link>
+        </section>
+      )}
+    </div>
+  );
+}
 
 function VinChaseView({
   po, busyActionId, busyBatchId, onChangeStatus, onBulkSetStatus, onBatchOp,

@@ -23,15 +23,27 @@ import { getIntakeOptions } from "@/lib/intake-data";
 
 export const dynamic = "force-dynamic";
 
-export default async function IntakePage() {
+export default async function IntakePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ linkForecast?: string }>;
+}) {
   const options = await getIntakeOptions();
+  // Optional deep-link from the Action Center's Pre-PO follow-up tab.
+  // `?linkForecast={batchId}` pre-selects the Forecast picker so ops
+  // doesn't have to hunt for the right Pre-PO when converting it.
+  const sp = await searchParams;
+  const rawId = sp.linkForecast;
+  const initialForecastBatchId = rawId && /^\d+$/.test(rawId)
+    ? parseInt(rawId, 10)
+    : null;
   return (
     <div>
       <PageHeader
         view="Intake"
         subtitle={<>Drop a signed PO PDF. Fields below auto-fill so Ops doesn&apos;t retype anything. Pick the actions this batch needs and assign each to a department.</>}
       />
-      <IntakeForm options={options} />
+      <IntakeForm options={options} initialForecastBatchId={initialForecastBatchId} />
     </div>
   );
 }
