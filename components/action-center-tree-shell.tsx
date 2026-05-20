@@ -2529,6 +2529,13 @@ function BatchRow({
   const alreadyDelivered = b.closedAt != null && b.closureReason === "delivered";
   const cancelled        = b.closedAt != null && b.closureReason === "cancelled";
   const closed = alreadyDelivered || cancelled;
+  // Partly delivered: closed as delivered but deliveredQuantity is
+  // less than what was requested. Distinct from a full delivery
+  // because the operator usually spun off a remainder batch and
+  // wants to see at a glance "this row didn't fulfil completely".
+  const partlyDelivered = alreadyDelivered
+    && b.deliveredQuantity > 0
+    && b.deliveredQuantity < b.requestedQuantity;
   const isListed = b.appListedAt != null;
 
   // Derive External-Phase gate status from THIS batch's batch-scope
@@ -2614,11 +2621,17 @@ function BatchRow({
       // Remainder batches get a distinct gold-tinted border + dotted
       // pattern so they read as "leftover from another batch" at a
       // glance — separate visual category from delivered / cancelled
-      // / open batches.
+      // / open batches. Partly-delivered (closed-as-delivered with
+      // qty < requested) also tints gold so ops sees it's not a
+      // clean ✓ — the rest is tracked in a sibling remainder.
       isRemainder
         ? "border-gold border-dashed bg-gold-pale/20"
         : closed
-          ? (b.closureReason === "delivered" ? "bg-green-pale/30 border-ink-200" : "bg-flame-pale/20 border-ink-200")
+          ? (partlyDelivered
+              ? "bg-gold-pale/25 border-ink-200"
+              : b.closureReason === "delivered"
+                ? "bg-green-pale/30 border-ink-200"
+                : "bg-flame-pale/20 border-ink-200")
           : "bg-white border-ink-200",
     )}>
       {/* Remainder banner — only on remainder batches. Spans the
@@ -2668,11 +2681,18 @@ function BatchRow({
               {b.closedAt && (
                 <span className={cn(
                   "ml-auto text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
-                  b.closureReason === "delivered"
-                    ? "text-green-dark bg-green-pale"
-                    : "text-flame-dark bg-flame-pale",
+                  partlyDelivered
+                    ? "text-gold-dark bg-gold-pale"
+                    : b.closureReason === "delivered"
+                      ? "text-green-dark bg-green-pale"
+                      : "text-flame-dark bg-flame-pale",
                 )}>
-                  {b.closureReason === "delivered" ? "✓ delivered" : "🚫 cancelled"} {b.closedAt}
+                  {b.closureReason === "delivered"
+                    ? (partlyDelivered
+                        ? `⚠ partly delivered ${b.deliveredQuantity}/${b.requestedQuantity}`
+                        : "✓ delivered")
+                    : "🚫 cancelled"}
+                  {" "}{b.closedAt}
                 </span>
               )}
             </div>
