@@ -23,6 +23,10 @@ import { cn } from "@/lib/utils";
 
 interface Props {
   options: IntakeOptions;
+  /** When set (deep-link from Action Center Pre-PO → Intake), the
+   *  Forecast picker pre-selects this batch id so ops doesn't have
+   *  to hunt for the right Pre-PO. */
+  initialForecastBatchId?: number | null;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -94,7 +98,7 @@ interface SubmitSummary {
 // Component
 // ──────────────────────────────────────────────────────────────────
 
-export default function IntakeForm({ options }: Props) {
+export default function IntakeForm({ options, initialForecastBatchId = null }: Props) {
   const router = useRouter();
 
   // ── PDF state
@@ -122,7 +126,11 @@ export default function IntakeForm({ options }: Props) {
   // route flips that pre_po batch to post_po (1:1) or marks it
   // superseded and creates children with `parentForecastBatchId` set
   // (split case, when the Intake produces more than one batch group).
-  const [linkedForecastBatchId, setLinkedForecastBatchId] = useState<number | null>(null);
+  // initialForecastBatchId pre-selects when ops landed here via the
+  // Action Center's Pre-PO follow-up "Link to Intake" button.
+  const [linkedForecastBatchId, setLinkedForecastBatchId] = useState<number | null>(
+    initialForecastBatchId,
+  );
 
   // Items × splits
   const [items, setItems] = useState<ItemDraft[]>([]);
