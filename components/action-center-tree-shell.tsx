@@ -1757,6 +1757,26 @@ function InternalPhaseView({
     ...(appListed ? [appListed] : []),
   ].sort((a, b) => a.sortOrder - b.sortOrder);
 
+  // App-listing target signal — the earliest wave-level Ops expected
+  // date across this PO's delivery windows. Once any wave has had
+  // its Ops Expected Date set, Internal Phase reads that date as
+  // the "list cars in the app by" target. Falls back to the PO
+  // availability date when no wave has been ops-projected yet, so
+  // the team always sees a target.
+  const appListingTarget = (() => {
+    const opsDates = po.waves
+      .map((w) => w.opsExpectedDate)
+      .filter((d): d is string => !!d && d !== "");
+    if (opsDates.length > 0) {
+      return { date: opsDates.sort()[0], source: "ops" as const };
+    }
+    const promised = po.waves
+      .map((w) => w.availabilityDate)
+      .sort()
+      .at(0) ?? null;
+    return promised ? { date: promised, source: "po" as const } : null;
+  })();
+
   if (allActions.length === 0) {
     return (
       <div className="text-sm text-ink-500 px-2 space-y-2">
@@ -1773,14 +1793,42 @@ function InternalPhaseView({
   }
 
   return (
-    <ThreeColumnActionBoard
-      title="Internal phase"
-      subtitle="Specs · Pricing · SKU — runs in parallel"
-      actions={allActions}
-      busyActionId={busyActionId}
-      onChangeStatus={onChangeStatus}
-      poForAppListing={po}
-    />
+    <div className="space-y-3">
+      {/* App-listing target banner. The signal from the wave-level
+          Ops Expected Date: Internal Phase knows when ops needs the
+          cars listed in the app by. */}
+      {appListingTarget && (
+        <div className={cn(
+          "border rounded-md px-3 py-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[0.7rem]",
+          appListingTarget.source === "ops"
+            ? "border-brand/40 bg-brand-pastel/30"
+            : "border-ink-200 bg-ink-50",
+        )}>
+          <span className={cn(
+            "font-medium",
+            appListingTarget.source === "ops" ? "text-brand-dark" : "text-ink-600",
+          )}>
+            📱 App listing target
+          </span>
+          <span className="tabular-nums text-midnight font-medium">
+            {appListingTarget.date}
+          </span>
+          <span className="text-[0.65rem] text-ink-500 italic">
+            {appListingTarget.source === "ops"
+              ? "from the earliest Ops-expected delivery date across this PO's windows"
+              : "from PO availability — set an Ops expected date on any window to override"}
+          </span>
+        </div>
+      )}
+      <ThreeColumnActionBoard
+        title="Internal phase"
+        subtitle="Specs · Pricing · SKU — runs in parallel"
+        actions={allActions}
+        busyActionId={busyActionId}
+        onChangeStatus={onChangeStatus}
+        poForAppListing={po}
+      />
+    </div>
   );
 }
 
@@ -2067,6 +2115,39 @@ function WaveSection({
   const blockedCount = wave.actions.filter((a) => a.status === "blocked").length;
   const waitingCount = wave.actions.filter((a) => a.status === "waiting").length;
 
+  // "Ops hasn't committed to a window date yet" = the wave's
+  // ops_expected_date equals the PO availability date (the intake
+  // default) OR is null. Once ops sets a real projection, the CTA
+  // hides and per-batch Shift Date takes over for adjustments.
+  const opsProjectionSet = wave.opsExpectedDate != null
+    && wave.opsExpectedDate !== wave.availabilityDate;
+  const [showOpsDateForm, setShowOpsDateForm] = useState<boolean>(false);
+  const [opsDateBusy, setOpsDateBusy] = useState<boolean>(false);
+  const [opsDateError, setOpsDateError] = useState<string | null>(null);
+  const router = useRouter();
+  async function submitWaveOpsDate(date: string, reason: string | null) {
+    setOpsDateBusy(true);
+    setOpsDateError(null);
+    try {
+      const res = await fetch("/api/wave-set-ops-projected", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          waveId: wave.id,
+          opsProjectedDate: date,
+          reason,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+      setShowOpsDateForm(false);
+    } catch (e) {
+      setOpsDateError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setOpsDateBusy(false);
+    }
+  }
+
   function handleMarkAllDone(e: React.MouseEvent) {
     // Stop the click from also toggling the wave's expanded state —
     // the button is logically nested inside the toggle row.
@@ -2147,6 +2228,59 @@ function WaveSection({
 
       {expanded && (
         <div className="p-2 space-y-3">
+          {/* Wave-level Ops Expected Date — the per-window commitment.
+              When ops hasn't committed yet (opsExpectedDate equals the
+              PO availability date), surface a prominent CTA. Once set,
+              show the value as a chip; subsequent adjustments go per-
+              batch via the Shift Date button on each row. Cascades to
+              every open batch in the wave and locks each batch's
+              `opsProjectedDeliveryDateAtLock` on the first set. */}
+          {!opsProjectionSet ? (
+            showOpsDateForm ? (
+              <WaveOpsDateForm
+                availabilityDate={wave.availabilityDate}
+                busy={opsDateBusy}
+                error={opsDateError}
+                onSubmit={submitWaveOpsDate}
+                onCancel={() => { setShowOpsDateForm(false); setOpsDateError(null); }}
+              />
+            ) : (
+              <div className="border-2 border-dashed border-brand rounded-md bg-brand-pastel/20 px-3 py-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="text-[0.7rem] font-medium text-brand-dark">
+                  📌 Ops expected date — not set yet
+                </span>
+                <span className="text-[0.65rem] text-ink-600">
+                  PO availability: <span className="text-midnight tabular-nums">{wave.availabilityDate}</span>
+                </span>
+                <span className="text-[0.65rem] text-ink-500 italic">
+                  Signals Internal Phase — App listing targets this date.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowOpsDateForm(true)}
+                  className="ml-auto text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark bg-white hover:bg-brand-pastel"
+                >
+                  Set Ops expected date →
+                </button>
+              </div>
+            )
+          ) : (
+            <div className="border border-brand/40 rounded-md bg-brand-pastel/30 px-3 py-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[0.7rem]">
+              <span className="font-medium text-brand-dark">
+                📌 Ops expected date
+              </span>
+              <span className="tabular-nums text-midnight font-medium">
+                {wave.opsExpectedDate}
+              </span>
+              <span className="text-ink-500">
+                · PO promise <span className="tabular-nums text-midnight">{wave.availabilityDate}</span>
+              </span>
+              <span className="text-ink-500 italic ml-auto">
+                Per-batch shifts adjust individual batches; this window-level commitment stays as the baseline.
+              </span>
+            </div>
+          )}
+
           {/* TWO-COLUMN HEAD ROW: WINDOW controls (left) + Shift History
               (right). Both boxes share the same outer height when
               collapsed; expanding either pushes the row taller without
@@ -3130,18 +3264,15 @@ function BatchRow({
           {!closed && (
             <div className="px-3 py-2 bg-ink-50/40 flex flex-col gap-1.5">
               <div className="flex flex-col gap-1">
-                {/* Same form, label morphs on lock state. First click
-                    on a batch with no ops projection becomes the
-                    "Set Ops expected date" entry — the API stamps
-                    `opsProjectedDeliveryDateAtLock` atomically.
-                    Subsequent clicks read as the usual Shift Date.
-                    Note: action-level backdate (mark-done with custom
-                    date) is independent — never touches this date. */}
+                {/* "Set Ops expected date" now lives at the wave
+                    (delivery window) level — see the WaveSection
+                    header. Per-batch Shift Date stays here for
+                    individual adjustments after the window-wide
+                    commitment lands. Action-level backdate is
+                    independent — never touches batch dates. */}
                 <BatchOpBtn
-                  label={b.opsProjectedDeliveryDateAtLock == null
-                    ? "📌 Set Ops expected date"
-                    : "📅 Shift date"}
-                  tone={b.opsProjectedDeliveryDateAtLock == null ? "brand" : "gold"}
+                  label="📅 Shift date"
+                  tone="gold"
                   busy={batchBusy}
                   onClick={() => onOpenInlineForm(b.id, "shift")}
                 />
@@ -3316,6 +3447,101 @@ function BatchRow({
  * form replaces the legacy three-step window.prompt chain, which
  * was unusable on a daily basis.
  */
+/**
+ * Wave-level "Set Ops expected date" form. Fires once per delivery
+ * window — the first ops commitment after intake. Cascades to every
+ * open batch under the wave (setting currentProjectedDeliveryDate
+ * and locking opsProjectedDeliveryDateAtLock per batch).
+ *
+ * After first submit the parent hides this form and shows the locked
+ * value as a read-only chip. Per-batch Shift Date handles any
+ * subsequent individual adjustments.
+ */
+function WaveOpsDateForm({
+  availabilityDate, busy, error, onSubmit, onCancel,
+}: {
+  availabilityDate: string;
+  busy: boolean;
+  error: string | null;
+  onSubmit: (date: string, reason: string | null) => void;
+  onCancel: () => void;
+}) {
+  // Default = PO availability date (the window's current target).
+  // Ops adjusts up or down depending on the signal that prompted the
+  // commitment (VIN landed early, dealer delay confirmed, etc.).
+  const [date, setDate]     = useState<string>(availabilityDate);
+  const [reason, setReason] = useState<string>("");
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      setLocalError("Pick a date.");
+      return;
+    }
+    onSubmit(date, reason.trim() || null);
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      className="border-2 border-brand rounded-md bg-brand-pastel/20 px-3 py-2 space-y-2"
+    >
+      <p className="text-[0.7rem] font-medium text-brand-dark">
+        📌 Set Ops expected delivery date for this window
+      </p>
+      <p className="text-[0.65rem] text-ink-600 leading-snug">
+        Sets the wave's commitment AND locks every batch's
+        initial-commitment snapshot. Internal Phase reads this as
+        the App-listing target.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-[1fr_2fr_auto] gap-2">
+        <label className="text-[0.65rem] text-ink-600 flex flex-col">
+          Ops expected date
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => { setDate(e.target.value); setLocalError(null); }}
+            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5"
+            autoFocus
+            required
+          />
+        </label>
+        <label className="text-[0.65rem] text-ink-600 flex flex-col">
+          Reason / context (optional)
+          <input
+            type="text"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. VIN expected next week, customs cleared"
+            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5"
+          />
+        </label>
+        <div className="flex flex-col gap-1 self-end">
+          <button
+            type="submit"
+            disabled={busy}
+            className="text-[0.7rem] px-2 py-1 rounded border border-brand text-brand-dark bg-white hover:bg-brand-pastel"
+          >
+            {busy ? "…" : "✓ Save & lock"}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+      {(localError || error) && (
+        <p className="text-[0.65rem] text-flame-dark">{localError ?? error}</p>
+      )}
+    </form>
+  );
+}
+
 function ShiftDateForm({
   batch: b, busy, onSubmit, onCancel,
 }: {
