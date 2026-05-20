@@ -845,6 +845,7 @@ const TRIGGER_LABELS: Record<AlertRuleSetting["triggerType"], string> = {
   no_vin_before_avail:          "VIN not received before availability date",
   action_overdue:               "Any action is overdue (past expected date)",
   action_pending_before_avail:  "Specific action not done before availability date",
+  listing_overdue:              "Batch not listed in the app within N days of PO submission",
 };
 
 const SEVERITY_OPTIONS: { value: AlertRuleSetting["severity"]; label: string }[] = [
@@ -936,7 +937,13 @@ function AlertRulesEditor({ data }: { data: SettingsData }) {
             </select>
           </Field>
           {creating.triggerType !== "action_overdue" && (
-            <Field label="Threshold (days before availability date)">
+            <Field
+              label={
+                creating.triggerType === "listing_overdue"
+                  ? "Threshold (days since PO submission)"
+                  : "Threshold (days before availability date)"
+              }
+            >
               <input
                 type="number"
                 min={0}

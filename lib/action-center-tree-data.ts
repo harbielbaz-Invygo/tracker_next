@@ -218,6 +218,17 @@ export interface PoNode {
    */
   internalPhaseDone: boolean;
   /**
+   * Listing-speed signals for the primary "PO → App Listed" KPI.
+   *   - daysSinceSubmission: today − earliest batch.requestedAt under the PO.
+   *     Surfaces "this PO has been open for N days" on the tree row.
+   *   - daysToListed: latest appListedAt − earliest requestedAt across the
+   *     PO's batches. Null until every batch is listed. Drives the per-PO
+   *     "Listed in Nd" badge + portfolio aggregates.
+   * Both are computed from existing columns; no schema change required.
+   */
+  daysSinceSubmission: number | null;
+  daysToListed:        number | null;
+  /**
    * True when this node is a virtual stand-in for a Pre-PO (Forecast)
    * batch — no real PO exists yet, so the drawer hides the Internal /
    * External Phase tabs and shows only the Pre-PO follow-up view.
@@ -645,6 +656,33 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           .sort()
           .at(0) ?? null;
 
+    // Listing-speed metrics (Review #2 R1/R9). Read `requestedAt` from
+    // the raw batches (it's not on BatchNode) — the earliest submission
+    // date across the PO's batches anchors the "since PO submitted"
+    // clock. `appListedAt` lives per-batch; we take the latest, which
+    // only exists when every batch is listed (the PO counts as "fully
+    // listed" only then). Both null-safe for legacy POs.
+    const todayIsoStr = new Date().toISOString().slice(0, 10);
+    const rawBatchesUnderPo = wavesForPo
+      .flatMap((w) => batchesByWave.get(w.id) ?? []);
+    const firstSubmittedAt = rawBatchesUnderPo
+      .map((b) => b.requestedAt)
+      .filter((d): d is string => !!d)
+      .sort()
+      .at(0) ?? null;
+    const daysSinceSubmission = firstSubmittedAt
+      ? Math.max(0, Math.round(
+          (new Date(todayIsoStr).getTime() - new Date(firstSubmittedAt).getTime())
+            / (24 * 60 * 60 * 1000),
+        ))
+      : null;
+    const daysToListed = (allListed && firstSubmittedAt && latestListedAt)
+      ? Math.max(0, Math.round(
+          (new Date(latestListedAt.slice(0, 10)).getTime() - new Date(firstSubmittedAt).getTime())
+            / (24 * 60 * 60 * 1000),
+        ))
+      : null;
+
     const node: PoNode = {
       id:                   p.id,
       poNumber:             p.poNumber,
@@ -665,6 +703,8 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         completedAt: allListed ? latestListedAt : null,
       },
       internalPhaseDone,
+      daysSinceSubmission,
+      daysToListed,
       isPrePo:      false,
       prePoBatchId: null,
       prePoSummary: null,
@@ -740,9 +780,13 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         total:       0,
         completedAt: null,
       },
-      internalPhaseDone: false,
-      isPrePo:           true,
-      prePoBatchId:      b.id,
+      internalPhaseDone:   false,
+      // Listing-speed KPI doesn't apply to Pre-PO — the PO doesn't
+      // exist yet, so "PO → Listed" has no clock.
+      daysSinceSubmission: null,
+      daysToListed:        null,
+      isPrePo:             true,
+      prePoBatchId:        b.id,
       prePoSummary: {
         city:                  b.dealerReceivingCity ?? "—",
         expectedDeliveryDate:  b.dealerPromisedDeliveryDate,
