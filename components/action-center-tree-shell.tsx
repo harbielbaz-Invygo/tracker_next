@@ -194,7 +194,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
     }
   }
 
-  async function setActionStatus(actionId: number, status: Status) {
+  async function setActionStatus(actionId: number, status: Status, completedAt?: string) {
     setBusyActionId(actionId);
     setMutationError(null);
     setCascadeFlash(null);
@@ -202,7 +202,11 @@ export default function ActionCenterTreeShell({ tree }: Props) {
       const res = await fetch("/api/scope-action", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actionId, status }),
+        body: JSON.stringify({
+          actionId,
+          status,
+          ...(completedAt ? { completedAt } : {}),
+        }),
       });
       if (!res.ok) throw new Error(await res.text());
       // Surface cascade activity so ops sees what changed beyond the
@@ -532,7 +536,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
 
 interface MutationProps {
   busyActionId:    number | null;
-  onChangeStatus:  (actionId: number, status: Status) => void;
+  onChangeStatus:  (actionId: number, status: Status, completedAt?: string) => void;
   onBulkSetStatus: (actionIds: number[], status: Status) => Promise<void>;
   mutationError:   string | null;
 }
@@ -2369,7 +2373,7 @@ function ActionChip({
 }: {
   action: ScopedActionDetail;
   busy: boolean;
-  onChangeStatus: (actionId: number, status: Status) => void;
+  onChangeStatus: (actionId: number, status: Status, completedAt?: string) => void;
   /** When provided (batch-scope VIN chip), appends a "n/N" count after
    *  the label so ops can see partial reception at a glance. */
   vinsBadge?: string | null;
@@ -2992,9 +2996,14 @@ function BatchRow({
                           onClickOverride={isBatchScopeVin
                             ? () => onOpenInlineForm(b.id, "vins", a.id)
                             : null}
-                          onEditDate={a.status === "done"
-                            ? () => onOpenInlineForm(b.id, "date", a.id)
-                            : null}
+                          // Every chip exposes 📅 so ops can mark
+                          // done at a custom date (or backdate when
+                          // already done). Skipped chips drop the
+                          // affordance since there's no completion
+                          // moment to record.
+                          onEditDate={a.status === "skipped"
+                            ? null
+                            : () => onOpenInlineForm(b.id, "date", a.id)}
                         />
                       );
                     })}
@@ -3081,14 +3090,23 @@ function BatchRow({
             action={action}
             busy={busyActionId === action.id}
             onSubmit={(payload) => {
-              // expectedDate is left null on the wire so the API
-              // leaves it alone (the route currently always writes
-              // expectedDate; pass the current value to preserve it).
-              onBatchOp(b.id, "/api/scope-action/date", {
-                actionId:     action.id,
-                expectedDate: action.expectedDate,
-                completedAt:  payload.completedAt,
-              });
+              if (payload.markDone) {
+                // Flip the chip done with a custom completion date.
+                // Single PATCH /api/scope-action call handles status +
+                // completedAt + cascade in one transaction.
+                const isoTs = payload.completedAt
+                  ? `${payload.completedAt}T12:00:00Z`
+                  : undefined;
+                onChangeStatus(action.id, "done", isoTs);
+              } else {
+                // Action is already done — backdate via the date route.
+                // expectedDate preserved (the route writes it back).
+                onBatchOp(b.id, "/api/scope-action/date", {
+                  actionId:     action.id,
+                  expectedDate: action.expectedDate,
+                  completedAt:  payload.completedAt,
+                });
+              }
               onCloseInlineForm();
             }}
             onCancel={onCloseInlineForm}
@@ -3275,35 +3293,63 @@ function ActionDateForm({
 }: {
   action: ScopedActionDetail;
   busy: boolean;
-  onSubmit: (payload: { completedAt: string | null }) => void;
+  /** Payload tells the parent how to route the submit:
+   *   - `markDone: true`  → action is currently waiting/blocked; the
+   *      parent should call onChangeStatus(id, "done", completedAt).
+   *   - `markDone: false` → action is already done; the parent should
+   *      PATCH /api/scope-action/date with the new completedAt. */
+  onSubmit: (payload: { completedAt: string | null; markDone: boolean }) => void;
   onCancel: () => void;
 }) {
   const label = action.doneLabel || action.waitingLabel;
-  const initial = action.completedAt ? action.completedAt.slice(0, 10) : "";
+  const isDone = action.status === "done";
+
+  // Default the date to today when the chip isn't done yet (the most
+  // common case is "I'm marking this done right now"). When it's
+  // already done, pre-fill the existing completion date so ops can
+  // tweak rather than re-enter.
+  const todayDefault = new Date().toISOString().slice(0, 10);
+  const initial = action.completedAt
+    ? action.completedAt.slice(0, 10)
+    : todayDefault;
   const [completed, setCompleted] = useState<string>(initial);
   const [error, setError] = useState<string | null>(null);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (completed && !/^\d{4}-\d{2}-\d{2}$/.test(completed)) {
-      setError("Completed date must be yyyy-mm-dd or empty.");
+    // Empty input is only meaningful when the chip is already done
+    // (= "clear the backdate, fall back to auto-stamped value").
+    // For waiting/blocked chips we require a date — "mark done"
+    // without a moment to attach to doesn't make sense.
+    if (!completed && !isDone) {
+      setError("Pick a completion date.");
       return;
     }
-    onSubmit({ completedAt: completed ? completed : null });
+    if (completed && !/^\d{4}-\d{2}-\d{2}$/.test(completed)) {
+      setError("Date must be yyyy-mm-dd.");
+      return;
+    }
+    onSubmit({
+      completedAt: completed ? completed : null,
+      markDone:    !isDone,
+    });
   }
 
   return (
-    <form onSubmit={submit} className="mt-2 p-2 border border-ink-300 rounded-md bg-ink-50 space-y-2">
+    <form onSubmit={submit} className="mt-2 p-2 border border-brand rounded-md bg-brand-pastel/20 space-y-2">
       <p className="text-[0.7rem] font-medium text-midnight">
-        📅 Completion date — {label}
+        {isDone
+          ? `📅 Completion date — ${label}`
+          : `✓ Mark done — ${label}`}
       </p>
       <p className="text-[0.65rem] text-ink-600 leading-snug">
-        When did this action actually complete? Defaults to the click
-        time when ops first marked it done. Clear to revert.
+        {isDone
+          ? "When did this action actually complete? Clear the field to revert to the auto-stamped value."
+          : "Pick the date this action completed. Submitting flips the chip done and stamps the completion at noon UTC on the chosen day."}
       </p>
       <div className="flex items-baseline gap-2">
         <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
-          Completed
+          {isDone ? "Completed" : "Completion date"}
           <input
             type="date"
             value={completed}
@@ -3326,9 +3372,18 @@ function ActionDateForm({
         <button
           type="submit"
           disabled={busy}
-          className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel"
+          className={cn(
+            "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+            isDone
+              ? "border-brand text-brand-dark hover:bg-brand-pastel"
+              : "border-green text-green-dark hover:bg-green-pale",
+          )}
         >
-          {busy ? "…" : "✓ Save"}
+          {busy
+            ? "…"
+            : isDone
+              ? "✓ Save"
+              : "✓ Mark done on this date"}
         </button>
       </div>
     </form>
@@ -3732,7 +3787,7 @@ function ActionCard({
 }: {
   action: ScopedActionDetail;
   busy: boolean;
-  onChangeStatus: (actionId: number, status: Status) => void;
+  onChangeStatus: (actionId: number, status: Status, completedAt?: string) => void;
   /** When this card is the synthetic "App listed" row in Internal
    *  Phase, the parent passes the PO so the row can offer a real
    *  bulk-listing CTA instead of being read-only. */
