@@ -126,6 +126,26 @@ export const batches = sqliteTable("batches", {
   requestedAt:                text("requested_at").notNull(),                 // ISO
   dealerPromisedDeliveryDate: text("dealer_promised_delivery_date").notNull(),// ISO
   /**
+   * Snapshot of the FIRST PO Expected Date — the original
+   * partnership-dealer agreement captured at intake. One-way lock:
+   * never overwritten by a Shift, even if the dealer renegotiates
+   * the commitment.
+   *
+   * Partnership-dealer equivalent of `ops_projected_delivery_date_at_lock`.
+   * Together the two locked snapshots give the four reference points
+   * Reliability can be measured against:
+   *
+   *   poExpectedDateAtLock        ← what PO + dealer agreed on
+   *   dealerPromisedDeliveryDate  ← current PO commitment (may shift)
+   *   opsProjectedDeliveryDateAtLock  ← ops's first bet
+   *   currentProjectedDeliveryDate    ← ops's current bet
+   *   closedAt                    ← realised outcome
+   *
+   * Filled at intake with the dealer-promised date; legacy batches
+   * (pre-this-column) backfill via the admin migration endpoint.
+   */
+  poExpectedDateAtLock:       text("po_expected_date_at_lock"),                 // ISO
+  /**
    * Dealer's commitment to share the VINs. The system uses this to
    * anchor every post-VIN action's expectedDate. When the actual VIN
    * action completes, the difference (planned vs actual) propagates

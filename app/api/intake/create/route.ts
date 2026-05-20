@@ -500,6 +500,11 @@ export async function POST(req: NextRequest) {
         requestedQuantity: totalQty,
         requestedAt,
         dealerPromisedDeliveryDate: availabilityDate,
+        // Lock the original PO Expected Date — the partnership-
+        // dealer agreement. Stays frozen forever; future shifts
+        // only move dealerPromisedDeliveryDate. PO Reliability is
+        // measured against this snapshot.
+        poExpectedDateAtLock:       availabilityDate,
         targetPoDate,
         expectedPoDate: body.po.date,
         actualPoDate:   body.po.date,

@@ -1336,18 +1336,21 @@ function InboxWindowCard({
             in flame when it's later than the PO promise so the slip
             is visible at a glance. */}
         <span className="ml-auto inline-flex items-baseline gap-2 text-[0.7rem]">
-          <span className="tabular-nums text-ink-600">
-            📅 PO <span className="text-midnight">{row.windowDate}</span>
+          <span className="tabular-nums text-ink-600" title="Current PO Expected Date — partnership-dealer commitment">
+            📅 PO Expected <span className="text-midnight">{row.windowDate}</span>
           </span>
           {row.opsDate ? (
-            <span className={cn(
-              "tabular-nums",
-              slipped ? "text-flame-dark font-medium" : "text-green-dark",
-            )}>
-              ⏰ Ops <span>{row.opsDate}</span>
+            <span
+              className={cn(
+                "tabular-nums",
+                slipped ? "text-flame-dark font-medium" : "text-green-dark",
+              )}
+              title="Current Ops Expected Date — ops projection based on real signals"
+            >
+              ⏰ Ops Expected <span>{row.opsDate}</span>
             </span>
           ) : (
-            <span className="tabular-nums text-ink-400 italic">⏰ Ops —</span>
+            <span className="tabular-nums text-ink-400 italic">⏰ Ops Expected —</span>
           )}
         </span>
       </div>
@@ -2179,10 +2182,12 @@ function WaveSection({
         <span aria-hidden className="text-ink-400 text-xs">
           {expanded ? "▾" : "▸"}
         </span>
-        {/* Headline date = ops's current projection when set; the PO
-            promise hangs off the side as the original commitment. Ops
-            takes over once they've re-projected — "when is this
-            actually landing?" is the operator's running question. */}
+        {/* Headline date = Ops Expected Date when set; PO Expected
+            Date hangs off the side as the partnership-dealer
+            commitment. Two distinct concepts — ops projection is
+            ops's read based on real signals; PO expected is the
+            original agreement (only changes if dealer renegotiates,
+            captured via Shift). */}
         {(() => {
           const opsDate = wave.opsExpectedDate ?? null;
           const headline = opsDate ?? wave.availabilityDate;
@@ -2194,7 +2199,7 @@ function WaveSection({
               </span>
               {slipped && (
                 <span className="text-xs text-ink-500 tabular-nums">
-                  · PO promise {wave.availabilityDate}
+                  · PO Expected Date {wave.availabilityDate}
                 </span>
               )}
             </>
@@ -2247,10 +2252,10 @@ function WaveSection({
             ) : (
               <div className="border-2 border-dashed border-brand rounded-md bg-brand-pastel/20 px-3 py-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
                 <span className="text-[0.7rem] font-medium text-brand-dark">
-                  📌 Ops expected date — not set yet
+                  📌 Ops Expected Date — not set yet
                 </span>
                 <span className="text-[0.65rem] text-ink-600">
-                  PO availability: <span className="text-midnight tabular-nums">{wave.availabilityDate}</span>
+                  PO Expected Date: <span className="text-midnight tabular-nums">{wave.availabilityDate}</span>
                 </span>
                 <span className="text-[0.65rem] text-ink-500 italic">
                   Signals Internal Phase — App listing targets this date.
@@ -2260,23 +2265,23 @@ function WaveSection({
                   onClick={() => setShowOpsDateForm(true)}
                   className="ml-auto text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark bg-white hover:bg-brand-pastel"
                 >
-                  Set Ops expected date →
+                  Set Ops Expected Date →
                 </button>
               </div>
             )
           ) : (
             <div className="border border-brand/40 rounded-md bg-brand-pastel/30 px-3 py-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[0.7rem]">
               <span className="font-medium text-brand-dark">
-                📌 Ops expected date
+                📌 Ops Expected Date
               </span>
               <span className="tabular-nums text-midnight font-medium">
                 {wave.opsExpectedDate}
               </span>
               <span className="text-ink-500">
-                · PO promise <span className="tabular-nums text-midnight">{wave.availabilityDate}</span>
+                · PO Expected Date <span className="tabular-nums text-midnight">{wave.availabilityDate}</span>
               </span>
               <span className="text-ink-500 italic ml-auto">
-                Per-batch shifts adjust individual batches; this window-level commitment stays as the baseline.
+                Per-batch shifts adjust individual batches; the window-level commitment is the baseline.
               </span>
             </div>
           )}
@@ -3224,12 +3229,20 @@ function BatchRow({
             </div>
 
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[0.7rem] text-ink-600">
-              <span className="tabular-nums">
-                📅 Promised <span className="text-midnight">{b.promisedDate}</span>
+              <span className="tabular-nums" title="Current PO Expected Date — partnership-dealer commitment">
+                📅 PO Expected <span className="text-midnight">{b.promisedDate}</span>
+                {b.poExpectedDateAtLock && b.poExpectedDateAtLock !== b.promisedDate && (
+                  <span
+                    className="text-[0.65rem] text-ink-400 ml-1"
+                    title={`Original PO Expected Date (locked at intake): ${b.poExpectedDateAtLock}`}
+                  >
+                    (was {b.poExpectedDateAtLock})
+                  </span>
+                )}
               </span>
               {b.currentProjectedDeliveryDate && b.currentProjectedDeliveryDate !== b.promisedDate && (
-                <span className="tabular-nums">
-                  ⏰ Ops <span className="text-midnight">{b.currentProjectedDeliveryDate}</span>
+                <span className="tabular-nums" title="Current Ops Expected Date — ops projection based on real signals">
+                  ⏰ Ops Expected <span className="text-midnight">{b.currentProjectedDeliveryDate}</span>
                 </span>
               )}
               {delayDays !== 0 && !closed && (
