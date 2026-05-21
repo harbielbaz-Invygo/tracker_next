@@ -75,6 +75,31 @@ export default function ActionFlowShell({ data }: Props) {
   const [busyActionId, setBusyActionId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Backdate: datetime-local string like "2026-05-19T14:30". When set,
+  // quick-log + form submissions stamp `contactedAt` with this value
+  // so retroactive logging matches the actual contact moment. Cleared
+  // by the user once they're back to "live" logging.
+  const [backdateAt, setBackdateAt] = useState<string>("");
+
+  // Undo: track the most recently inserted touchpoint so we can offer
+  // a 10s "Undo" affordance. Cleared on undo or timeout.
+  interface LastLog { id: number; label: string; expiresAt: number }
+  const [lastLog, setLastLog] = useState<LastLog | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
+
+  // Tick once per second while an undo offer is live so the countdown
+  // re-renders. No interval when there's nothing to count down.
+  useEffect(() => {
+    if (!lastLog) return;
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [lastLog]);
+
+  // Auto-expire the undo offer once the 10s window passes.
+  useEffect(() => {
+    if (lastLog && now >= lastLog.expiresAt) setLastLog(null);
+  }, [lastLog, now]);
+
   async function logTouchpoint(opts: {
     actionId: number;
     channel:  Channel;
@@ -83,17 +108,37 @@ export default function ActionFlowShell({ data }: Props) {
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    /** Optional override — when omitted, the shell-level `backdateAt`
+     *  bar is applied if set. Pass explicitly to opt out. */
+    contactedAt?: string | null;
+    /** Short human label for the undo banner ("📧 email logged"). */
+    undoLabel?: string;
   }): Promise<void> {
     setBusyActionId(opts.actionId);
     setError(null);
     try {
+      // Apply backdate bar unless the caller passed contactedAt itself.
+      const contactedAt = opts.contactedAt !== undefined
+        ? opts.contactedAt
+        : (backdateAt ? new Date(backdateAt).toISOString() : null);
+      const { undoLabel, ...rest } = opts;
+      const payload = { ...rest, contactedAt };
       const res = await fetch("/api/action-touchpoint", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(opts),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { ok: boolean; touchpoint?: { id: number } };
       setLastChannel(opts.channel);
+      if (data.touchpoint?.id) {
+        setLastLog({
+          id: data.touchpoint.id,
+          label: undoLabel ?? `${channelGlyph(opts.channel)} ${opts.channel} logged`,
+          expiresAt: Date.now() + 10_000,
+        });
+        setNow(Date.now());
+      }
       router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -102,32 +147,103 @@ export default function ActionFlowShell({ data }: Props) {
     }
   }
 
+  async function undoLastLog(): Promise<void> {
+    if (!lastLog) return;
+    const idToDelete = lastLog.id;
+    setLastLog(null);
+    setError(null);
+    try {
+      const res = await fetch("/api/action-touchpoint", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: idToDelete }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   return (
     <div className="space-y-4">
-      {/* PO picker */}
-      <div className="card flex flex-wrap items-baseline gap-3">
-        <label className="text-xs font-medium text-ink-700">PO</label>
-        <select
-          value={selectedPoId ?? ""}
-          onChange={(e) => setSelectedPoId(e.target.value ? parseInt(e.target.value, 10) : null)}
-          className="text-sm px-2 py-1 border border-ink-300 rounded-md bg-white min-w-[260px]"
-        >
-          {allPos.length === 0 && <option value="">No live POs</option>}
-          {allPos.map(({ po, dealerName }) => (
-            <option key={po.id} value={po.id}>
-              {po.poNumber} — {dealerName}{po.closedAt ? " (closed)" : ""}
-            </option>
-          ))}
-        </select>
-        <span className="ml-auto text-[0.65rem] text-ink-500">
-          Last channel: <span className="text-midnight font-medium">{lastChannel}</span>
-        </span>
+      {/* PO picker + backdate bar */}
+      <div className="card space-y-2">
+        <div className="flex flex-wrap items-baseline gap-3">
+          <label className="text-xs font-medium text-ink-700">PO</label>
+          <select
+            value={selectedPoId ?? ""}
+            onChange={(e) => setSelectedPoId(e.target.value ? parseInt(e.target.value, 10) : null)}
+            className="text-sm px-2 py-1 border border-ink-300 rounded-md bg-white min-w-[260px]"
+          >
+            {allPos.length === 0 && <option value="">No live POs</option>}
+            {allPos.map(({ po, dealerName }) => (
+              <option key={po.id} value={po.id}>
+                {po.poNumber} — {dealerName}{po.closedAt ? " (closed)" : ""}
+              </option>
+            ))}
+          </select>
+          <span className="ml-auto text-[0.65rem] text-ink-500">
+            Last channel: <span className="text-midnight font-medium">{lastChannel}</span>
+          </span>
+        </div>
+        {/* Backdate: when set, every subsequent log (quick or form) is
+            stamped with this exact moment instead of "now". Survives
+            across actions so you can backfill an afternoon of phone
+            calls in one sitting. */}
+        <div className={cn(
+          "flex flex-wrap items-baseline gap-2 text-[0.7rem] rounded-md px-2 py-1 border",
+          backdateAt
+            ? "bg-gold-pale/40 border-gold text-gold-dark"
+            : "bg-ink-50/60 border-ink-200 text-ink-600",
+        )}>
+          <span className="font-medium">{backdateAt ? "⏮ Backdating to" : "🕒 Live (now)"}</span>
+          <input
+            type="datetime-local"
+            value={backdateAt}
+            onChange={(e) => setBackdateAt(e.target.value)}
+            className="px-1.5 py-0.5 border border-ink-300 rounded text-[0.7rem] bg-white tabular-nums"
+          />
+          {backdateAt && (
+            <button
+              type="button"
+              onClick={() => setBackdateAt("")}
+              className="text-[0.65rem] text-ink-600 hover:text-midnight underline"
+            >
+              Clear · log live
+            </button>
+          )}
+          <span className="ml-auto text-[0.6rem] text-ink-500 italic">
+            Affects every log on this page until cleared
+          </span>
+        </div>
       </div>
 
       {error && (
         <p role="alert" className="text-xs text-flame-dark bg-flame-pale border border-flame px-3 py-2 rounded-md">
           {error}
         </p>
+      )}
+
+      {/* Undo toast — shown for 10s after each successful log. */}
+      {lastLog && now < lastLog.expiresAt && (
+        <div
+          role="status"
+          className="flex items-center gap-3 text-xs bg-green-pale border border-green px-3 py-2 rounded-md"
+        >
+          <span aria-hidden>✓</span>
+          <span className="text-midnight">{lastLog.label}</span>
+          <span className="text-ink-500 tabular-nums">
+            · undo within {Math.max(0, Math.ceil((lastLog.expiresAt - now) / 1000))}s
+          </span>
+          <button
+            type="button"
+            onClick={undoLastLog}
+            className="ml-auto text-[0.7rem] px-2 py-1 rounded border border-flame text-flame-dark hover:bg-flame-pale font-medium"
+          >
+            ↶ Undo
+          </button>
+        </div>
       )}
 
       {!selected ? (
@@ -173,6 +289,8 @@ function WaveBlock({
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    contactedAt?: string | null;
+    undoLabel?: string;
   }) => Promise<void>;
 }) {
   return (
@@ -225,6 +343,8 @@ function BatchBlock({
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    contactedAt?: string | null;
+    undoLabel?: string;
   }) => Promise<void>;
 }) {
   // External-Phase batch-scope actions on this batch — fall back to
@@ -298,6 +418,8 @@ function FlowChip({
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    contactedAt?: string | null;
+    undoLabel?: string;
   }) => Promise<void>;
 }) {
   const [showPopover, setShowPopover] = useState<boolean>(false);
@@ -340,16 +462,26 @@ function FlowChip({
         {action.status !== "done" && action.status !== "skipped" && (
           <div className="ml-auto flex flex-wrap gap-1">
             <QuickLogBtn label="📧" title="Log email" disabled={busy}
-              onClick={() => onLog({ actionId: action.id, channel: "email", outcome: "no_response", nextFollowupAt: addDays(1) })} />
+              onClick={() => onLog({ actionId: action.id, channel: "email", outcome: "no_response", nextFollowupAt: addDays(1), undoLabel: `📧 ${label} — email logged` })} />
             <QuickLogBtn label="📞" title="Log phone call" disabled={busy}
-              onClick={() => onLog({ actionId: action.id, channel: "phone", outcome: "no_response", nextFollowupAt: addDays(1) })} />
+              onClick={() => onLog({ actionId: action.id, channel: "phone", outcome: "no_response", nextFollowupAt: addDays(1), undoLabel: `📞 ${label} — phone logged` })} />
             <QuickLogBtn label="💬" title="Log WhatsApp" disabled={busy}
-              onClick={() => onLog({ actionId: action.id, channel: "whatsapp", outcome: "no_response", nextFollowupAt: addDays(1) })} />
+              onClick={() => onLog({ actionId: action.id, channel: "whatsapp", outcome: "no_response", nextFollowupAt: addDays(1), undoLabel: `💬 ${label} — WhatsApp logged` })} />
+            {/* ✅ Confirmed — dealer agreed / answered yes. Inbound +
+                outcome=confirmed, no follow-up needed. Uses lastChannel
+                so the audit trail records HOW we got the confirmation. */}
+            <QuickLogBtn label="✅" title="Mark confirmed (dealer agreed)" tone="green" disabled={busy}
+              onClick={() => onLog({
+                actionId: action.id, channel: lastChannel, direction: "inbound",
+                outcome: "confirmed", nextFollowupAt: null,
+                undoLabel: `✅ ${label} — confirmed`,
+              })} />
             <QuickLogBtn label="↗" title="Escalate" tone="flame" disabled={busy}
               onClick={() => onLog({
                 actionId: action.id, channel: lastChannel, direction: "internal",
                 outcome: "other", escalated: true, note: "Escalated",
                 nextFollowupAt: addDays(2),
+                undoLabel: `↗ ${label} — escalated`,
               })} />
             <QuickLogBtn label="🪟" title="Open details" disabled={busy}
               onClick={() => setShowPopover((v) => !v)} />
@@ -392,10 +524,12 @@ function QuickLogBtn({
   title: string;
   onClick: () => void;
   disabled: boolean;
-  tone?: "brand" | "flame";
+  tone?: "brand" | "flame" | "green";
 }) {
   const cls = tone === "flame"
     ? "border-flame text-flame-dark hover:bg-flame-pale"
+    : tone === "green"
+    ? "border-green text-green-dark hover:bg-green-pale"
     : "border-ink-300 text-ink-700 hover:bg-ink-50";
   return (
     <button
@@ -433,6 +567,8 @@ function FullPopover({
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    contactedAt?: string | null;
+    undoLabel?: string;
   }) => Promise<void>;
 }) {
   const [channel, setChannel] = useState<Channel>(lastChannel);
