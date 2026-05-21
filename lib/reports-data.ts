@@ -617,49 +617,121 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
   // dealer reliability are scoped consistently. Open batches always
   // pass (closedAt IS NULL); closed batches must have closedAt
   // within the window.
-  const allBatchesQuery = (() => {
-    const q = db.select({
-      id:            batches.id,
-      batchCode:     batches.batchCode,
-      dealerId:      batches.dealerId,
-      dealerName:    dealers.name,
-      model:         batches.model,
-      year:          batches.year,
-      closedAt:      batches.closedAt,
-      closureReason: batches.closureReason,
-      promisedDate:  batches.dealerPromisedDeliveryDate,
-      projectedDate: batches.currentProjectedDeliveryDate,
-      requestedQty:  batches.requestedQuantity,
-      deliveredQty:  batches.deliveredQuantity,
-      revisionCount: batches.deliveryDateRevisionCount,
-      // Review #4 R1+R6 — PO identity + the two at-lock anchors so
-      // per-PO composite reliability can be computed below.
-      poNumber:                       batches.poNumber,
-      poExpectedDateAtLock:           batches.poExpectedDateAtLock,
-      opsProjectedDeliveryDateAtLock: batches.opsProjectedDeliveryDateAtLock,
-    })
-    .from(batches)
-    .leftJoin(dealers, eq(batches.dealerId, dealers.id))
-    .$dynamic();
-    return batchInPeriod ? q.where(batchInPeriod) : q;
+  // Defensive: the at-lock columns + batch_color_matrix.delivered_
+  // quantity are newer additions. On a DB that hasn't run the
+  // matching ensure-* migration yet, the explicit projection 500s
+  // the entire Insights page. Two-step degradation: try the
+  // enriched projection first; on "no such column" fall back to
+  // the legacy shape and synthesize the missing fields as null/0.
+  const allBatchesQuery = (async () => {
+    const enrichedQuery = (() => {
+      const q = db.select({
+        id:            batches.id,
+        batchCode:     batches.batchCode,
+        dealerId:      batches.dealerId,
+        dealerName:    dealers.name,
+        model:         batches.model,
+        year:          batches.year,
+        closedAt:      batches.closedAt,
+        closureReason: batches.closureReason,
+        promisedDate:  batches.dealerPromisedDeliveryDate,
+        projectedDate: batches.currentProjectedDeliveryDate,
+        requestedQty:  batches.requestedQuantity,
+        deliveredQty:  batches.deliveredQuantity,
+        revisionCount: batches.deliveryDateRevisionCount,
+        // Review #4 R1+R6 — PO identity + the two at-lock anchors.
+        poNumber:                       batches.poNumber,
+        poExpectedDateAtLock:           batches.poExpectedDateAtLock,
+        opsProjectedDeliveryDateAtLock: batches.opsProjectedDeliveryDateAtLock,
+      })
+      .from(batches)
+      .leftJoin(dealers, eq(batches.dealerId, dealers.id))
+      .$dynamic();
+      return batchInPeriod ? q.where(batchInPeriod) : q;
+    })();
+    try {
+      return await enrichedQuery;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/no such column/i.test(msg)) throw err;
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[reports-data] batches at-lock columns missing — falling back to legacy projection. " +
+        "Run /api/admin/ensure-{po,ops}-*-at-lock-column to migrate.",
+      );
+      const legacyQuery = (() => {
+        const q = db.select({
+          id:            batches.id,
+          batchCode:     batches.batchCode,
+          dealerId:      batches.dealerId,
+          dealerName:    dealers.name,
+          model:         batches.model,
+          year:          batches.year,
+          closedAt:      batches.closedAt,
+          closureReason: batches.closureReason,
+          promisedDate:  batches.dealerPromisedDeliveryDate,
+          projectedDate: batches.currentProjectedDeliveryDate,
+          requestedQty:  batches.requestedQuantity,
+          deliveredQty:  batches.deliveredQuantity,
+          revisionCount: batches.deliveryDateRevisionCount,
+          poNumber:      batches.poNumber,
+        })
+        .from(batches)
+        .leftJoin(dealers, eq(batches.dealerId, dealers.id))
+        .$dynamic();
+        return batchInPeriod ? q.where(batchInPeriod) : q;
+      })();
+      const rows = await legacyQuery;
+      return rows.map((r) => ({
+        ...r,
+        poExpectedDateAtLock:           null as string | null,
+        opsProjectedDeliveryDateAtLock: null as string | null,
+      }));
+    }
   })();
-  const colorMatrixQuery = (() => {
-    const q = db.select({
-      batchId:           batchColorMatrix.batchId,
-      dealerId:          batches.dealerId,
-      color:             batchColorMatrix.color,
-      requestedQuantity: batchColorMatrix.requestedQuantity,
-      confirmedQuantity: batchColorMatrix.confirmedQuantity,
-      // Review #4 R7 — once a PO is closed, prefer deliveredQuantity
-      // over confirmedQuantity (delivery is the truth; confirmation
-      // is the earlier proxy). Pulled here so the reliability scorer
-      // can pick the right field per batch state.
-      deliveredQuantity: batchColorMatrix.deliveredQuantity,
-    })
-    .from(batchColorMatrix)
-    .innerJoin(batches, eq(batchColorMatrix.batchId, batches.id))
-    .$dynamic();
-    return batchInPeriod ? q.where(batchInPeriod) : q;
+  const colorMatrixQuery = (async () => {
+    const enrichedQuery = (() => {
+      const q = db.select({
+        batchId:           batchColorMatrix.batchId,
+        dealerId:          batches.dealerId,
+        color:             batchColorMatrix.color,
+        requestedQuantity: batchColorMatrix.requestedQuantity,
+        confirmedQuantity: batchColorMatrix.confirmedQuantity,
+        // Review #4 R7 — delivered preferred over confirmed when
+        // realised. Defensive against pre-migration DBs below.
+        deliveredQuantity: batchColorMatrix.deliveredQuantity,
+      })
+      .from(batchColorMatrix)
+      .innerJoin(batches, eq(batchColorMatrix.batchId, batches.id))
+      .$dynamic();
+      return batchInPeriod ? q.where(batchInPeriod) : q;
+    })();
+    try {
+      return await enrichedQuery;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/no such column/i.test(msg)) throw err;
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[reports-data] batch_color_matrix.delivered_quantity missing — " +
+        "falling back to confirmed-only mode.",
+      );
+      const legacyQuery = (() => {
+        const q = db.select({
+          batchId:           batchColorMatrix.batchId,
+          dealerId:          batches.dealerId,
+          color:             batchColorMatrix.color,
+          requestedQuantity: batchColorMatrix.requestedQuantity,
+          confirmedQuantity: batchColorMatrix.confirmedQuantity,
+        })
+        .from(batchColorMatrix)
+        .innerJoin(batches, eq(batchColorMatrix.batchId, batches.id))
+        .$dynamic();
+        return batchInPeriod ? q.where(batchInPeriod) : q;
+      })();
+      const rows = await legacyQuery;
+      return rows.map((r) => ({ ...r, deliveredQuantity: 0 }));
+    }
   })();
   // pos rows — needed for the per-PO reliability row's poId identity.
   // Wrapped defensively so legacy DBs without the table don't 500
