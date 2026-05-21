@@ -11,7 +11,7 @@
  * Pure server-side; types are imported below by client components via
  * `import type` so the DB client never leaks into the bundle.
  */
-import { eq, asc } from "drizzle-orm";
+import { eq, asc, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   pos, waves, batches, dealers,
@@ -37,6 +37,27 @@ type BatchRow = typeof batches.$inferSelect;
  * default. The page stays up; ops just doesn't see the new column's
  * data until the admin migration endpoint runs.
  */
+/**
+ * Read `batches.confirmed_quantity` via raw SQL so callers don't have
+ * to declare the column on the Drizzle schema (which would force
+ * EVERY db.select().from(batches) anywhere to include it, breaking
+ * every page on a pre-migration DB). Returns a Map keyed by batch.id.
+ *
+ * Tolerant: missing column / table → empty Map.
+ */
+async function fetchConfirmedQtyByBatch(): Promise<Map<number, number>> {
+  try {
+    const rows = await db.all<{ id: number; confirmed_quantity: number }>(
+      sql`SELECT id, confirmed_quantity FROM batches`,
+    );
+    return new Map(rows.map((r) => [Number(r.id), Number(r.confirmed_quantity ?? 0)]));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such (column|table)/i.test(msg)) return new Map();
+    throw err;
+  }
+}
+
 async function fetchBatchesTolerant(): Promise<BatchRow[]> {
   try {
     return await db.select().from(batches);
@@ -329,10 +350,11 @@ export interface ActionCenterTree {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     fetchBatchesTolerant(),
+    fetchConfirmedQtyByBatch(),
     db
       .select({
         id:              actionsTable.id,
@@ -640,9 +662,11 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           // Drizzle's select returns undefined in that case. Treat as 0
           // until /api/admin/ensure-vins-received-column has run.
           vinsReceivedQuantity: (b as { vinsReceivedQuantity?: number | null }).vinsReceivedQuantity ?? 0,
-          // Same story for the newer `confirmedQuantity` column —
-          // /api/admin/ensure-confirmed-quantity-column patches it in.
-          confirmedQuantity:    (b as { confirmedQuantity?: number | null }).confirmedQuantity ?? 0,
+          // `confirmedQuantity` is intentionally not on the Drizzle
+          // schema (see lib/db/schema.ts comment) — read via raw SQL
+          // through fetchConfirmedQtyByBatch above. Defaults to 0
+          // when the column hasn't been migrated yet.
+          confirmedQuantity:    confirmedQtyByBatch.get(b.id) ?? 0,
           closedAt:           b.closedAt ?? null,
           closureReason:      (b.closureReason ?? null) as BatchNode["closureReason"],
           appListedAt:        b.appListedAt ?? null,

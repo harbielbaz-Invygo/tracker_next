@@ -22,7 +22,7 @@
  *
  * Auth: ops + admin.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
@@ -98,10 +98,16 @@ export async function POST(req: NextRequest) {
 
   try {
     await db.transaction(async (tx) => {
-      await tx.update(batches).set({
-        confirmedQuantity: clamped,
-        updatedAt:         nowIso,
-      }).where(eq(batches.id, body.batchId));
+      // Raw SQL: `confirmed_quantity` isn't on the Drizzle schema
+      // (intentionally — see comment in lib/db/schema.ts). Using
+      // tx.update(batches).set({ confirmedQuantity }) would 500
+      // every Drizzle-typed query elsewhere in the app.
+      await tx.run(sql`
+        UPDATE batches
+        SET confirmed_quantity = ${clamped},
+            updated_at         = ${nowIso}
+        WHERE id = ${body.batchId}
+      `);
 
       if (confirmationAction) {
         await tx.update(actionsTable).set({

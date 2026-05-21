@@ -111,17 +111,14 @@ export const batches = sqliteTable("batches", {
   requestedQuantity:   integer("requested_quantity").notNull(),
   allocatedQuantity:   integer("allocated_quantity").default(0),
   deliveredQuantity:   integer("delivered_quantity").default(0),
-  /**
-   * Cars the dealer has *confirmed* they can supply against the
-   * batch's `requestedQuantity`. Captured when ops marks the batch-
-   * scope "Send Dealer Confirmation Email" External-Phase chip done.
-   * Drives the upper bound on `vinsReceivedQuantity` (you can't have
-   * VINs for cars the dealer never confirmed). 0 = no confirmation
-   * captured yet. Partial confirmations (5 of 10) are normal — they
-   * surface "the dealer said they only have 5" as data instead of
-   * losing it in a touchpoint note.
-   */
-  confirmedQuantity:    integer("confirmed_quantity").notNull().default(0),
+  // `confirmed_quantity` lives in the DB once
+  // /api/admin/ensure-confirmed-quantity-column has been run, but we
+  // *intentionally* don't declare it on the Drizzle schema yet — doing
+  // so makes db.select().from(batches) include it in EVERY query, and
+  // any caller that fires before the migration runs returns 500
+  // (LibsqlError: no such column). The few callers that need it
+  // (action-center-tree-data, /api/batch-confirmation) read/write it
+  // via raw SQL so missing-column is a graceful "treat as 0" instead.
   /**
    * VINs actually received from the dealer, per batch. 0 = none yet
    * (default). Captured when ops marks the batch-scope "VIN" External-
