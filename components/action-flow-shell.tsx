@@ -247,7 +247,10 @@ function BatchBlock({
           ? batch.legs.map((l) => `${l.city} ${l.quantity}`).join(", ")
           : batch.city}</span>
       </div>
-      <div className="grid gap-1.5 grid-cols-[repeat(auto-fit,minmax(220px,1fr))]">
+      {/* Stack chips one above the other so each card has full row
+          width — gives the touchpoint snippet + quick-log row room
+          to breathe instead of cramping into a 220px column. */}
+      <div className="flex flex-col gap-2">
         {augmented
           .slice()
           .sort((a, b) => a.sortOrder - b.sortOrder)
@@ -303,61 +306,62 @@ function FlowChip({
 
   return (
     <div className={cn(
-      "rounded-md border p-2 space-y-1.5 transition-shadow",
+      "rounded-lg border p-3 transition-shadow",
       tone.cls,
       busy && "opacity-50 cursor-wait",
     )}>
-      {/* Header line */}
-      <div className="flex items-center gap-1.5">
-        <span className={cn("h-1.5 w-1.5 rounded-full shrink-0", tone.dot)} aria-hidden />
-        <span className="text-[0.75rem] font-medium text-midnight truncate flex-1">{label}</span>
+      {/* Top row: dot · label · state · days · history · quick-log
+          All on one line now that the chip has full row width.
+          Quick-log lives on the far right so the eye scans
+          context (left) → controls (right) without re-orienting. */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={cn("h-2 w-2 rounded-full shrink-0", tone.dot)} aria-hidden />
+        <span className="text-sm font-medium text-midnight">{label}</span>
+        <span className="uppercase tracking-wide text-[0.6rem] text-ink-500 font-semibold">
+          {tone.label}
+        </span>
+        {action.daysSinceLastContact != null && (
+          <span className="text-[0.65rem] tabular-nums text-ink-500">
+            · {action.daysSinceLastContact}d ago
+          </span>
+        )}
         {action.touchpoints.length > 0 && (
           <button
             type="button"
             onClick={() => setShowPopover((v) => !v)}
             disabled={busy}
-            className="text-[0.6rem] tabular-nums text-ink-500 hover:text-midnight px-1"
+            className="text-[0.65rem] tabular-nums text-ink-500 hover:text-midnight px-1"
             title="Touchpoint history"
           >
             📞 {action.touchpoints.length}
           </button>
         )}
-      </div>
-
-      <div className="flex items-baseline justify-between gap-2 text-[0.6rem]">
-        <span className="uppercase tracking-wide text-ink-500 font-medium">
-          {tone.label}
-        </span>
-        {action.daysSinceLastContact != null && (
-          <span className="tabular-nums text-ink-500">
-            {action.daysSinceLastContact}d ago
-          </span>
+        {/* Quick-log buttons floated right when the chip is actionable. */}
+        {action.status !== "done" && action.status !== "skipped" && (
+          <div className="ml-auto flex flex-wrap gap-1">
+            <QuickLogBtn label="📧" title="Log email" disabled={busy}
+              onClick={() => onLog({ actionId: action.id, channel: "email", outcome: "no_response", nextFollowupAt: addDays(1) })} />
+            <QuickLogBtn label="📞" title="Log phone call" disabled={busy}
+              onClick={() => onLog({ actionId: action.id, channel: "phone", outcome: "no_response", nextFollowupAt: addDays(1) })} />
+            <QuickLogBtn label="💬" title="Log WhatsApp" disabled={busy}
+              onClick={() => onLog({ actionId: action.id, channel: "whatsapp", outcome: "no_response", nextFollowupAt: addDays(1) })} />
+            <QuickLogBtn label="↗" title="Escalate" tone="flame" disabled={busy}
+              onClick={() => onLog({
+                actionId: action.id, channel: lastChannel, direction: "internal",
+                outcome: "other", escalated: true, note: "Escalated",
+                nextFollowupAt: addDays(2),
+              })} />
+            <QuickLogBtn label="🪟" title="Open details" disabled={busy}
+              onClick={() => setShowPopover((v) => !v)} />
+          </div>
         )}
       </div>
 
-      {/* Direction C — quick-log buttons */}
-      {action.status !== "done" && action.status !== "skipped" && (
-        <div className="flex flex-wrap gap-1">
-          <QuickLogBtn label="📧" title="Log email" disabled={busy}
-            onClick={() => onLog({ actionId: action.id, channel: "email", outcome: "no_response", nextFollowupAt: addDays(1) })} />
-          <QuickLogBtn label="📞" title="Log phone call" disabled={busy}
-            onClick={() => onLog({ actionId: action.id, channel: "phone", outcome: "no_response", nextFollowupAt: addDays(1) })} />
-          <QuickLogBtn label="💬" title="Log WhatsApp" disabled={busy}
-            onClick={() => onLog({ actionId: action.id, channel: "whatsapp", outcome: "no_response", nextFollowupAt: addDays(1) })} />
-          <QuickLogBtn label="↗" title="Escalate" tone="flame" disabled={busy}
-            onClick={() => onLog({
-              actionId: action.id, channel: lastChannel, direction: "internal",
-              outcome: "other", escalated: true, note: "Escalated",
-              nextFollowupAt: addDays(2),
-            })} />
-          <QuickLogBtn label="🪟" title="Open details" disabled={busy}
-            onClick={() => setShowPopover((v) => !v)} />
-        </div>
-      )}
-
-      {/* Latest snippet — the freshest contextual info */}
+      {/* Latest snippet — full-width line beneath the header so the
+          freshest context reads naturally without competing for
+          space with the controls. */}
       {action.latestTouchpoint && (
-        <p className="text-[0.65rem] text-ink-600 line-clamp-2">
+        <p className="text-[0.7rem] text-ink-600 mt-1.5 line-clamp-2">
           <span className="text-ink-400">latest:</span>{" "}
           {summariseTouchpoint(action.latestTouchpoint)}
         </p>
@@ -400,7 +404,7 @@ function QuickLogBtn({
       disabled={disabled}
       title={title}
       className={cn(
-        "text-[0.7rem] px-1.5 py-0.5 rounded border bg-white transition-colors",
+        "text-xs px-2 py-1 rounded-md border bg-white transition-colors leading-none",
         cls,
         disabled && "opacity-50 cursor-wait",
       )}
