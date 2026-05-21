@@ -75,6 +75,31 @@ export default function ActionFlowShell({ data }: Props) {
   const [busyActionId, setBusyActionId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Backdate: datetime-local string like "2026-05-19T14:30". When set,
+  // quick-log + form submissions stamp `contactedAt` with this value
+  // so retroactive logging matches the actual contact moment. Cleared
+  // by the user once they're back to "live" logging.
+  const [backdateAt, setBackdateAt] = useState<string>("");
+
+  // Undo: track the most recently inserted touchpoint so we can offer
+  // a 10s "Undo" affordance. Cleared on undo or timeout.
+  interface LastLog { id: number; label: string; expiresAt: number }
+  const [lastLog, setLastLog] = useState<LastLog | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
+
+  // Tick once per second while an undo offer is live so the countdown
+  // re-renders. No interval when there's nothing to count down.
+  useEffect(() => {
+    if (!lastLog) return;
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [lastLog]);
+
+  // Auto-expire the undo offer once the 10s window passes.
+  useEffect(() => {
+    if (lastLog && now >= lastLog.expiresAt) setLastLog(null);
+  }, [lastLog, now]);
+
   async function logTouchpoint(opts: {
     actionId: number;
     channel:  Channel;
@@ -83,17 +108,37 @@ export default function ActionFlowShell({ data }: Props) {
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    /** Optional override — when omitted, the shell-level `backdateAt`
+     *  bar is applied if set. Pass explicitly to opt out. */
+    contactedAt?: string | null;
+    /** Short human label for the undo banner ("📧 email logged"). */
+    undoLabel?: string;
   }): Promise<void> {
     setBusyActionId(opts.actionId);
     setError(null);
     try {
+      // Apply backdate bar unless the caller passed contactedAt itself.
+      const contactedAt = opts.contactedAt !== undefined
+        ? opts.contactedAt
+        : (backdateAt ? new Date(backdateAt).toISOString() : null);
+      const { undoLabel, ...rest } = opts;
+      const payload = { ...rest, contactedAt };
       const res = await fetch("/api/action-touchpoint", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(opts),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { ok: boolean; touchpoint?: { id: number } };
       setLastChannel(opts.channel);
+      if (data.touchpoint?.id) {
+        setLastLog({
+          id: data.touchpoint.id,
+          label: undoLabel ?? `${channelGlyph(opts.channel)} ${opts.channel} logged`,
+          expiresAt: Date.now() + 10_000,
+        });
+        setNow(Date.now());
+      }
       router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -102,32 +147,103 @@ export default function ActionFlowShell({ data }: Props) {
     }
   }
 
+  async function undoLastLog(): Promise<void> {
+    if (!lastLog) return;
+    const idToDelete = lastLog.id;
+    setLastLog(null);
+    setError(null);
+    try {
+      const res = await fetch("/api/action-touchpoint", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: idToDelete }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   return (
     <div className="space-y-4">
-      {/* PO picker */}
-      <div className="card flex flex-wrap items-baseline gap-3">
-        <label className="text-xs font-medium text-ink-700">PO</label>
-        <select
-          value={selectedPoId ?? ""}
-          onChange={(e) => setSelectedPoId(e.target.value ? parseInt(e.target.value, 10) : null)}
-          className="text-sm px-2 py-1 border border-ink-300 rounded-md bg-white min-w-[260px]"
-        >
-          {allPos.length === 0 && <option value="">No live POs</option>}
-          {allPos.map(({ po, dealerName }) => (
-            <option key={po.id} value={po.id}>
-              {po.poNumber} — {dealerName}{po.closedAt ? " (closed)" : ""}
-            </option>
-          ))}
-        </select>
-        <span className="ml-auto text-[0.65rem] text-ink-500">
-          Last channel: <span className="text-midnight font-medium">{lastChannel}</span>
-        </span>
+      {/* PO picker + backdate bar */}
+      <div className="card space-y-2">
+        <div className="flex flex-wrap items-baseline gap-3">
+          <label className="text-xs font-medium text-ink-700">PO</label>
+          <select
+            value={selectedPoId ?? ""}
+            onChange={(e) => setSelectedPoId(e.target.value ? parseInt(e.target.value, 10) : null)}
+            className="text-sm px-2 py-1 border border-ink-300 rounded-md bg-white min-w-[260px]"
+          >
+            {allPos.length === 0 && <option value="">No live POs</option>}
+            {allPos.map(({ po, dealerName }) => (
+              <option key={po.id} value={po.id}>
+                {po.poNumber} — {dealerName}{po.closedAt ? " (closed)" : ""}
+              </option>
+            ))}
+          </select>
+          <span className="ml-auto text-[0.65rem] text-ink-500">
+            Last channel: <span className="text-midnight font-medium">{lastChannel}</span>
+          </span>
+        </div>
+        {/* Backdate: when set, every subsequent log (quick or form) is
+            stamped with this exact moment instead of "now". Survives
+            across actions so you can backfill an afternoon of phone
+            calls in one sitting. */}
+        <div className={cn(
+          "flex flex-wrap items-baseline gap-2 text-[0.7rem] rounded-md px-2 py-1 border",
+          backdateAt
+            ? "bg-gold-pale/40 border-gold text-gold-dark"
+            : "bg-ink-50/60 border-ink-200 text-ink-600",
+        )}>
+          <span className="font-medium">{backdateAt ? "⏮ Backdating to" : "🕒 Live (now)"}</span>
+          <input
+            type="datetime-local"
+            value={backdateAt}
+            onChange={(e) => setBackdateAt(e.target.value)}
+            className="px-1.5 py-0.5 border border-ink-300 rounded text-[0.7rem] bg-white tabular-nums"
+          />
+          {backdateAt && (
+            <button
+              type="button"
+              onClick={() => setBackdateAt("")}
+              className="text-[0.65rem] text-ink-600 hover:text-midnight underline"
+            >
+              Clear · log live
+            </button>
+          )}
+          <span className="ml-auto text-[0.6rem] text-ink-500 italic">
+            Affects every log on this page until cleared
+          </span>
+        </div>
       </div>
 
       {error && (
         <p role="alert" className="text-xs text-flame-dark bg-flame-pale border border-flame px-3 py-2 rounded-md">
           {error}
         </p>
+      )}
+
+      {/* Undo toast — shown for 10s after each successful log. */}
+      {lastLog && now < lastLog.expiresAt && (
+        <div
+          role="status"
+          className="flex items-center gap-3 text-xs bg-green-pale border border-green px-3 py-2 rounded-md"
+        >
+          <span aria-hidden>✓</span>
+          <span className="text-midnight">{lastLog.label}</span>
+          <span className="text-ink-500 tabular-nums">
+            · undo within {Math.max(0, Math.ceil((lastLog.expiresAt - now) / 1000))}s
+          </span>
+          <button
+            type="button"
+            onClick={undoLastLog}
+            className="ml-auto text-[0.7rem] px-2 py-1 rounded border border-flame text-flame-dark hover:bg-flame-pale font-medium"
+          >
+            ↶ Undo
+          </button>
+        </div>
       )}
 
       {!selected ? (
@@ -173,6 +289,8 @@ function WaveBlock({
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    contactedAt?: string | null;
+    undoLabel?: string;
   }) => Promise<void>;
 }) {
   return (
@@ -225,6 +343,8 @@ function BatchBlock({
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    contactedAt?: string | null;
+    undoLabel?: string;
   }) => Promise<void>;
 }) {
   // External-Phase batch-scope actions on this batch — fall back to
@@ -234,6 +354,11 @@ function BatchBlock({
   const batchScope = batch.actions.filter((a) => waveTypeIds.has(a.actionTypeId));
   const externalActions = batchScope.length > 0 ? batchScope : wave.actions;
   const augmented = augment(externalActions);
+  // The qty endpoints require a batch-scope action id — only batch-
+  // scope chips can flip the per-batch counters. When the row is
+  // rendering wave-scope chips as a fallback, the qty form still works
+  // for the persistence call (we just don't pass actionId).
+  const isBatchScopeRow = batchScope.length > 0;
 
   return (
     <li className="px-4 py-3 space-y-2">
@@ -242,6 +367,25 @@ function BatchBlock({
         <span className="text-midnight font-medium">{batch.modelYear}</span>
         <span className="text-ink-300">·</span>
         <span className="tabular-nums">{batch.requestedQuantity} cars</span>
+        {/* Surface the captured confirmation + VIN counts so ops can
+            glance the row and know "5 confirmed, 3 VINs in" without
+            opening the chip popovers. */}
+        {(batch.confirmedQuantity ?? 0) > 0 && (
+          <>
+            <span className="text-ink-300">·</span>
+            <span className="text-ink-500 tabular-nums">
+              ✅ {batch.confirmedQuantity}/{batch.requestedQuantity} confirmed
+            </span>
+          </>
+        )}
+        {(batch.vinsReceivedQuantity ?? 0) > 0 && (
+          <>
+            <span className="text-ink-300">·</span>
+            <span className="text-ink-500 tabular-nums">
+              🔑 {batch.vinsReceivedQuantity}/{batch.requestedQuantity} VINs
+            </span>
+          </>
+        )}
         <span className="text-ink-300">·</span>
         <span className="text-ink-500">📍 {batch.legs.length > 0
           ? batch.legs.map((l) => `${l.city} ${l.quantity}`).join(", ")
@@ -258,6 +402,8 @@ function BatchBlock({
             <FlowChip
               key={a.id}
               action={a}
+              batch={batch}
+              isBatchScopeRow={isBatchScopeRow}
               busy={busyActionId === a.id}
               lastChannel={lastChannel}
               onLog={onLog}
@@ -285,9 +431,11 @@ const FLOW_TONE: Record<FlowState, { label: string; cls: string; dot: string }> 
 };
 
 function FlowChip({
-  action, busy, lastChannel, onLog,
+  action, batch, isBatchScopeRow, busy, lastChannel, onLog,
 }: {
   action: FlowAction;
+  batch: BatchNode;
+  isBatchScopeRow: boolean;
   busy: boolean;
   lastChannel: Channel;
   onLog: (opts: {
@@ -298,11 +446,63 @@ function FlowChip({
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    contactedAt?: string | null;
+    undoLabel?: string;
   }) => Promise<void>;
 }) {
   const [showPopover, setShowPopover] = useState<boolean>(false);
+  // Per-chip qty form (VIN / Confirmation). Mirrors the old Action
+  // Center "click chip → inline form" affordance — without it ops has
+  // no way to record "dealer confirmed 5 of 10" or "got 3 VINs in".
+  const [showQtyForm, setShowQtyForm] = useState<boolean>(false);
+  const [qtyBusy, setQtyBusy] = useState<boolean>(false);
+  const [qtyError, setQtyError] = useState<string | null>(null);
+  const router = useRouter();
   const tone = FLOW_TONE[action.flowState];
   const label = action.doneLabel || action.waitingLabel;
+
+  // Action-type detection — drives which qty form (if any) we render
+  // and where to POST. We match by NAME (not id) so the seed names
+  // can shift without breaking the wiring.
+  const isVin          = /vin/i.test(action.actionTypeName);
+  const isConfirmation = /confirmation/i.test(action.actionTypeName);
+  const qtyKind: "vin" | "confirmation" | null
+    = isVin ? "vin" : isConfirmation ? "confirmation" : null;
+
+  async function submitQty(payload: { qty: number; legs?: { id: number; vinsReceivedQuantity: number }[] }) {
+    setQtyBusy(true);
+    setQtyError(null);
+    try {
+      if (qtyKind === "vin") {
+        const body = payload.legs
+          ? { batchId: batch.id, legs: payload.legs, ...(isBatchScopeRow ? { actionId: action.id } : {}) }
+          : { batchId: batch.id, vinsReceivedQuantity: payload.qty, ...(isBatchScopeRow ? { actionId: action.id } : {}) };
+        const res = await fetch("/api/batch-vins-received", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(await res.text());
+      } else if (qtyKind === "confirmation") {
+        const res = await fetch("/api/batch-confirmation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            batchId: batch.id,
+            confirmedQuantity: payload.qty,
+            ...(isBatchScopeRow ? { actionId: action.id } : {}),
+          }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+      }
+      setShowQtyForm(false);
+      router.refresh();
+    } catch (e) {
+      setQtyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setQtyBusy(false);
+    }
+  }
 
   return (
     <div className={cn(
@@ -336,20 +536,56 @@ function FlowChip({
             📞 {action.touchpoints.length}
           </button>
         )}
+        {/* Live qty badge on the VIN / Confirmation chip — read-only
+            indicator that makes the persisted state obvious without
+            needing to scan the batch header. */}
+        {qtyKind === "vin" && (batch.vinsReceivedQuantity ?? 0) > 0 && (
+          <span className="text-[0.65rem] tabular-nums text-ink-600">
+            🔑 {batch.vinsReceivedQuantity}/{batch.requestedQuantity}
+          </span>
+        )}
+        {qtyKind === "confirmation" && (batch.confirmedQuantity ?? 0) > 0 && (
+          <span className="text-[0.65rem] tabular-nums text-ink-600">
+            ✅ {batch.confirmedQuantity}/{batch.requestedQuantity}
+          </span>
+        )}
         {/* Quick-log buttons floated right when the chip is actionable. */}
         {action.status !== "done" && action.status !== "skipped" && (
           <div className="ml-auto flex flex-wrap gap-1">
             <QuickLogBtn label="📧" title="Log email" disabled={busy}
-              onClick={() => onLog({ actionId: action.id, channel: "email", outcome: "no_response", nextFollowupAt: addDays(1) })} />
+              onClick={() => onLog({ actionId: action.id, channel: "email", outcome: "no_response", nextFollowupAt: addDays(1), undoLabel: `📧 ${label} — email logged` })} />
             <QuickLogBtn label="📞" title="Log phone call" disabled={busy}
-              onClick={() => onLog({ actionId: action.id, channel: "phone", outcome: "no_response", nextFollowupAt: addDays(1) })} />
+              onClick={() => onLog({ actionId: action.id, channel: "phone", outcome: "no_response", nextFollowupAt: addDays(1), undoLabel: `📞 ${label} — phone logged` })} />
             <QuickLogBtn label="💬" title="Log WhatsApp" disabled={busy}
-              onClick={() => onLog({ actionId: action.id, channel: "whatsapp", outcome: "no_response", nextFollowupAt: addDays(1) })} />
+              onClick={() => onLog({ actionId: action.id, channel: "whatsapp", outcome: "no_response", nextFollowupAt: addDays(1), undoLabel: `💬 ${label} — WhatsApp logged` })} />
+            {/* ✅ Confirmed — dealer agreed / answered yes. Inbound +
+                outcome=confirmed, no follow-up needed. Uses lastChannel
+                so the audit trail records HOW we got the confirmation. */}
+            <QuickLogBtn label="✅" title="Mark confirmed (dealer agreed)" tone="green" disabled={busy}
+              onClick={() => onLog({
+                actionId: action.id, channel: lastChannel, direction: "inbound",
+                outcome: "confirmed", nextFollowupAt: null,
+                undoLabel: `✅ ${label} — confirmed`,
+              })} />
+            {/* Qty entry button — only on VIN / Confirmation chips,
+                where a count matters. Opens the inline qty form
+                without firing a touchpoint (the qty endpoint flips
+                status by itself when a batch-scope action is given). */}
+            {qtyKind && (
+              <QuickLogBtn
+                label={qtyKind === "vin" ? "🔑 N" : "🔢 N"}
+                title={qtyKind === "vin" ? "Record VINs received" : "Record dealer confirmation count"}
+                tone="brand"
+                disabled={busy || qtyBusy}
+                onClick={() => setShowQtyForm((v) => !v)}
+              />
+            )}
             <QuickLogBtn label="↗" title="Escalate" tone="flame" disabled={busy}
               onClick={() => onLog({
                 actionId: action.id, channel: lastChannel, direction: "internal",
                 outcome: "other", escalated: true, note: "Escalated",
                 nextFollowupAt: addDays(2),
+                undoLabel: `↗ ${label} — escalated`,
               })} />
             <QuickLogBtn label="🪟" title="Open details" disabled={busy}
               onClick={() => setShowPopover((v) => !v)} />
@@ -367,6 +603,20 @@ function FlowChip({
         </p>
       )}
 
+      {/* Inline qty form — VIN (per-leg or scalar) / Confirmation (scalar).
+          Mirrors the old Action Center "click VIN chip → form" UX so
+          ops can stop losing partial counts to free-text notes. */}
+      {showQtyForm && qtyKind && (
+        <QtyForm
+          kind={qtyKind}
+          batch={batch}
+          busy={qtyBusy}
+          error={qtyError}
+          onSubmit={submitQty}
+          onCancel={() => { setShowQtyForm(false); setQtyError(null); }}
+        />
+      )}
+
       {/* Popover — full history + rich form */}
       {showPopover && (
         <FullPopover
@@ -382,6 +632,164 @@ function FlowChip({
 }
 
 // ─────────────────────────────────────────────────────────────────
+// QtyForm — inline form for VIN / Confirmation count entry
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Persists how many VINs the dealer has shared OR how many cars the
+ * dealer has confirmed for this batch. VIN supports per-leg (multi-
+ * city) entry; Confirmation is always a single scalar (the data
+ * model doesn't track per-city confirmation today).
+ *
+ * Submit fires the matching /api/batch-* endpoint via the parent
+ * FlowChip — keeps the JSON-shape decisions in one place.
+ */
+function QtyForm({
+  kind, batch, busy, error, onSubmit, onCancel,
+}: {
+  kind: "vin" | "confirmation";
+  batch: BatchNode;
+  busy: boolean;
+  error: string | null;
+  onSubmit: (payload: { qty: number; legs?: { id: number; vinsReceivedQuantity: number }[] }) => Promise<void>;
+  onCancel: () => void;
+}) {
+  // VIN multi-leg only kicks in when the batch has ≥ 2 legs; otherwise
+  // (and always for Confirmation) we fall through to a single input.
+  const multiLeg = kind === "vin" && batch.legs.length >= 2;
+
+  const [legQtys, setLegQtys] = useState<Record<number, string>>(() => {
+    const init: Record<number, string> = {};
+    for (const l of batch.legs) {
+      init[l.id] = String(l.vinsReceivedQuantity > 0 ? l.vinsReceivedQuantity : l.quantity);
+    }
+    return init;
+  });
+
+  const initialScalar = kind === "vin"
+    ? ((batch.vinsReceivedQuantity ?? 0) > 0
+        ? (batch.vinsReceivedQuantity ?? 0)
+        : batch.requestedQuantity)
+    : ((batch.confirmedQuantity ?? 0) > 0
+        ? (batch.confirmedQuantity ?? 0)
+        : batch.requestedQuantity);
+  const [scalarQty, setScalarQty] = useState<string>(String(initialScalar));
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  const total = multiLeg
+    ? batch.legs.reduce((sum, l) => {
+        const n = parseInt(legQtys[l.id] ?? "0", 10);
+        return sum + (Number.isFinite(n) && n >= 0 ? n : 0);
+      }, 0)
+    : Math.max(0, parseInt(scalarQty, 10) || 0);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setLocalErr(null);
+    if (multiLeg) {
+      const legs: { id: number; vinsReceivedQuantity: number }[] = [];
+      for (const l of batch.legs) {
+        const n = parseInt(legQtys[l.id] ?? "0", 10);
+        if (!Number.isFinite(n) || n < 0) {
+          setLocalErr(`${l.city}: enter a non-negative integer.`);
+          return;
+        }
+        if (n > l.quantity) {
+          setLocalErr(`${l.city}: can't exceed ${l.quantity} cars.`);
+          return;
+        }
+        legs.push({ id: l.id, vinsReceivedQuantity: n });
+      }
+      await onSubmit({ qty: total, legs });
+      return;
+    }
+    const n = parseInt(scalarQty, 10);
+    if (!Number.isFinite(n) || n < 0) {
+      setLocalErr("Enter a non-negative integer.");
+      return;
+    }
+    if (n > batch.requestedQuantity) {
+      setLocalErr(`Can't exceed the batch size (${batch.requestedQuantity}).`);
+      return;
+    }
+    await onSubmit({ qty: n });
+  }
+
+  const title = kind === "vin" ? "🔑 VINs received" : "✅ Dealer confirmation count";
+  const blurb = kind === "vin"
+    ? (multiLeg
+        ? "Record per-city. Each city's Mark-as-delivered caps at its own VINs."
+        : "How many VINs has the dealer shared so far? Partial is fine.")
+    : "How many of the requested cars has the dealer confirmed they can supply? Partial is normal.";
+
+  return (
+    <form onSubmit={submit} className="mt-2 p-2 border border-brand rounded-md bg-brand-pastel/30 space-y-2 text-[0.7rem]">
+      <p className="font-medium text-brand-dark">{title} — {batch.batchCode}</p>
+      <p className="text-[0.65rem] text-ink-600 leading-snug">{blurb}</p>
+      {multiLeg ? (
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-[8rem_5rem_auto] items-baseline gap-x-2 gap-y-1">
+            {batch.legs.map((l) => (
+              <div key={l.id} className="contents">
+                <span className="text-[0.65rem] text-ink-600 truncate">📍 {l.city}</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={l.quantity}
+                  value={legQtys[l.id] ?? ""}
+                  onChange={(e) => { setLegQtys((p) => ({ ...p, [l.id]: e.target.value })); setLocalErr(null); }}
+                  className="text-xs px-2 py-1 border border-ink-300 rounded tabular-nums"
+                />
+                <span className="text-[0.65rem] text-ink-500 tabular-nums">/ {l.quantity}</span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[0.65rem] text-ink-500 tabular-nums pt-1 border-t border-ink-200">
+            Batch total: <span className="text-midnight font-medium">{total}</span> / {batch.requestedQuantity} cars
+          </p>
+        </div>
+      ) : (
+        <div className="flex items-baseline gap-2">
+          <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
+            {kind === "vin" ? "VINs received" : "Confirmed"}
+            <input
+              type="number"
+              min={0}
+              max={batch.requestedQuantity}
+              value={scalarQty}
+              onChange={(e) => { setScalarQty(e.target.value); setLocalErr(null); }}
+              className="text-xs px-2 py-1 border border-ink-300 rounded w-20 tabular-nums"
+              autoFocus
+            />
+          </label>
+          <span className="text-[0.65rem] text-ink-500 tabular-nums">/ {batch.requestedQuantity} cars</span>
+        </div>
+      )}
+      {(localErr || error) && (
+        <p className="text-[0.65rem] text-flame-dark">{localErr ?? error}</p>
+      )}
+      <div className="flex justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel"
+        >
+          {busy ? "…" : (kind === "vin" ? "✓ Save VIN count" : "✓ Save confirmation")}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Quick-log button
 // ─────────────────────────────────────────────────────────────────
 
@@ -392,10 +800,12 @@ function QuickLogBtn({
   title: string;
   onClick: () => void;
   disabled: boolean;
-  tone?: "brand" | "flame";
+  tone?: "brand" | "flame" | "green";
 }) {
   const cls = tone === "flame"
     ? "border-flame text-flame-dark hover:bg-flame-pale"
+    : tone === "green"
+    ? "border-green text-green-dark hover:bg-green-pale"
     : "border-ink-300 text-ink-700 hover:bg-ink-50";
   return (
     <button
@@ -433,6 +843,8 @@ function FullPopover({
     note?:    string | null;
     nextFollowupAt?: string | null;
     escalated?: boolean;
+    contactedAt?: string | null;
+    undoLabel?: string;
   }) => Promise<void>;
 }) {
   const [channel, setChannel] = useState<Channel>(lastChannel);

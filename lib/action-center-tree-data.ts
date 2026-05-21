@@ -49,10 +49,11 @@ async function fetchBatchesTolerant(): Promise<BatchRow[]> {
       `Run the matching /api/admin/ensure-* endpoint to migrate. (${msg})`,
     );
     // Project only the columns the data layer actually consumes,
-    // skipping `vinsReceivedQuantity` (the newest addition). Drizzle's
-    // .select({...}) still maps snake_case → camelCase per the schema,
-    // so consumers get the BatchRow shape they expect with `vins
-    // ReceivedQuantity` filled in as 0 at the call site.
+    // skipping the newest additions (`vinsReceivedQuantity`,
+    // `confirmedQuantity`). Drizzle's .select({...}) still maps
+    // snake_case → camelCase per the schema, so consumers get the
+    // BatchRow shape they expect with the missing fields filled in as
+    // 0 at the call site.
     const rows = await db.select({
       id:                            batches.id,
       batchCode:                     batches.batchCode,
@@ -73,6 +74,7 @@ async function fetchBatchesTolerant(): Promise<BatchRow[]> {
     return rows.map((r) => ({
       ...r,
       vinsReceivedQuantity: 0,
+      confirmedQuantity:    0,
     })) as unknown as BatchRow[];
   }
 }
@@ -122,6 +124,13 @@ export interface BatchNode {
    * legacy batches that pre-date the column.
    */
   vinsReceivedQuantity: number;
+  /**
+   * Cars the dealer has *confirmed* they can supply (0..requested).
+   * Captured when ops marks the Confirmation chip done — often
+   * partial ("dealer can only give us 7 of 10"). Defaults to 0 on
+   * legacy batches that pre-date the column.
+   */
+  confirmedQuantity:   number;
   closedAt:           string | null;
   closureReason:      "delivered" | "cancelled" | null;
   appListedAt:        string | null;
@@ -631,6 +640,9 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           // Drizzle's select returns undefined in that case. Treat as 0
           // until /api/admin/ensure-vins-received-column has run.
           vinsReceivedQuantity: (b as { vinsReceivedQuantity?: number | null }).vinsReceivedQuantity ?? 0,
+          // Same story for the newer `confirmedQuantity` column —
+          // /api/admin/ensure-confirmed-quantity-column patches it in.
+          confirmedQuantity:    (b as { confirmedQuantity?: number | null }).confirmedQuantity ?? 0,
           closedAt:           b.closedAt ?? null,
           closureReason:      (b.closureReason ?? null) as BatchNode["closureReason"],
           appListedAt:        b.appListedAt ?? null,

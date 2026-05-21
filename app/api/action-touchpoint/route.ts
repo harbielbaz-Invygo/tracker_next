@@ -75,6 +75,9 @@ interface Body {
   note?:           string | null;
   nextFollowupAt?: string | null;
   escalated?:      boolean;
+  /** Optional ISO datetime override — backdate / forward-date the
+   *  contact moment. Defaults to CURRENT_TIMESTAMP at insert time. */
+  contactedAt?:    string | null;
 }
 
 export async function POST(req: NextRequest) {
@@ -108,6 +111,19 @@ export async function POST(req: NextRequest) {
   ) {
     return apiError("nextFollowupAt must be yyyy-mm-dd or null", 400);
   }
+  // contactedAt override (backdate / forward-date). Accept full ISO
+  // datetime (the UI uses datetime-local, which we convert to ISO).
+  let contactedAtIso: string | null = null;
+  if (body.contactedAt != null && body.contactedAt !== "") {
+    if (typeof body.contactedAt !== "string") {
+      return apiError("contactedAt must be a string or null", 400);
+    }
+    const parsed = new Date(body.contactedAt);
+    if (Number.isNaN(parsed.getTime())) {
+      return apiError("contactedAt must parse as a date", 400);
+    }
+    contactedAtIso = parsed.toISOString();
+  }
 
   // Sanity check the action exists — keeps log entries from
   // referencing deleted/typo'd ids.
@@ -125,11 +141,57 @@ export async function POST(req: NextRequest) {
       direction,
       outcome,
       note:           body.note?.trim() || null,
+      // contactedAt override only when supplied; otherwise let the
+      // schema's CURRENT_TIMESTAMP default kick in so timestamps are
+      // server-clock-consistent.
+      ...(contactedAtIso ? { contactedAt: contactedAtIso } : {}),
       nextFollowupAt: body.nextFollowupAt ? body.nextFollowupAt : null,
       loggedBy:       gate.user.username,
       escalated:      body.escalated ?? false,
     }).returning();
     return NextResponse.json({ ok: true, touchpoint: inserted });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table/i.test(msg)) {
+      return apiError(
+        "action_touchpoints table missing — run /api/admin/ensure-action-touchpoints-table",
+        503,
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * DELETE — undo a just-logged touchpoint. Body: { id }.
+ *
+ * The UI surfaces this via the "Undo" toast that fades after 10s
+ * post-log. No soft-delete here: the touchpoint row is removed.
+ * That's the correct semantics for "I clicked the wrong chip"
+ * rather than "I want to retract a recorded conversation".
+ */
+export async function DELETE(req: NextRequest) {
+  const gate = await requireAuth(["ops", "admin"]);
+  if (!gate.ok) return gate.response;
+  let body: { id?: number };
+  try {
+    body = (await req.json()) as { id?: number };
+  } catch {
+    return apiError("Invalid JSON", 400);
+  }
+  const id = Number(body.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return apiError("id required", 400);
+  }
+  try {
+    const result = await db
+      .delete(actionTouchpoints)
+      .where(eq(actionTouchpoints.id, id))
+      .returning({ id: actionTouchpoints.id });
+    if (result.length === 0) {
+      return apiError(`Touchpoint ${id} not found`, 404);
+    }
+    return NextResponse.json({ ok: true, deletedId: id });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (/no such table/i.test(msg)) {
