@@ -354,6 +354,11 @@ function BatchBlock({
   const batchScope = batch.actions.filter((a) => waveTypeIds.has(a.actionTypeId));
   const externalActions = batchScope.length > 0 ? batchScope : wave.actions;
   const augmented = augment(externalActions);
+  // The qty endpoints require a batch-scope action id — only batch-
+  // scope chips can flip the per-batch counters. When the row is
+  // rendering wave-scope chips as a fallback, the qty form still works
+  // for the persistence call (we just don't pass actionId).
+  const isBatchScopeRow = batchScope.length > 0;
 
   return (
     <li className="px-4 py-3 space-y-2">
@@ -362,6 +367,25 @@ function BatchBlock({
         <span className="text-midnight font-medium">{batch.modelYear}</span>
         <span className="text-ink-300">·</span>
         <span className="tabular-nums">{batch.requestedQuantity} cars</span>
+        {/* Surface the captured confirmation + VIN counts so ops can
+            glance the row and know "5 confirmed, 3 VINs in" without
+            opening the chip popovers. */}
+        {(batch.confirmedQuantity ?? 0) > 0 && (
+          <>
+            <span className="text-ink-300">·</span>
+            <span className="text-ink-500 tabular-nums">
+              ✅ {batch.confirmedQuantity}/{batch.requestedQuantity} confirmed
+            </span>
+          </>
+        )}
+        {(batch.vinsReceivedQuantity ?? 0) > 0 && (
+          <>
+            <span className="text-ink-300">·</span>
+            <span className="text-ink-500 tabular-nums">
+              🔑 {batch.vinsReceivedQuantity}/{batch.requestedQuantity} VINs
+            </span>
+          </>
+        )}
         <span className="text-ink-300">·</span>
         <span className="text-ink-500">📍 {batch.legs.length > 0
           ? batch.legs.map((l) => `${l.city} ${l.quantity}`).join(", ")
@@ -378,6 +402,8 @@ function BatchBlock({
             <FlowChip
               key={a.id}
               action={a}
+              batch={batch}
+              isBatchScopeRow={isBatchScopeRow}
               busy={busyActionId === a.id}
               lastChannel={lastChannel}
               onLog={onLog}
@@ -405,9 +431,11 @@ const FLOW_TONE: Record<FlowState, { label: string; cls: string; dot: string }> 
 };
 
 function FlowChip({
-  action, busy, lastChannel, onLog,
+  action, batch, isBatchScopeRow, busy, lastChannel, onLog,
 }: {
   action: FlowAction;
+  batch: BatchNode;
+  isBatchScopeRow: boolean;
   busy: boolean;
   lastChannel: Channel;
   onLog: (opts: {
@@ -423,8 +451,58 @@ function FlowChip({
   }) => Promise<void>;
 }) {
   const [showPopover, setShowPopover] = useState<boolean>(false);
+  // Per-chip qty form (VIN / Confirmation). Mirrors the old Action
+  // Center "click chip → inline form" affordance — without it ops has
+  // no way to record "dealer confirmed 5 of 10" or "got 3 VINs in".
+  const [showQtyForm, setShowQtyForm] = useState<boolean>(false);
+  const [qtyBusy, setQtyBusy] = useState<boolean>(false);
+  const [qtyError, setQtyError] = useState<string | null>(null);
+  const router = useRouter();
   const tone = FLOW_TONE[action.flowState];
   const label = action.doneLabel || action.waitingLabel;
+
+  // Action-type detection — drives which qty form (if any) we render
+  // and where to POST. We match by NAME (not id) so the seed names
+  // can shift without breaking the wiring.
+  const isVin          = /vin/i.test(action.actionTypeName);
+  const isConfirmation = /confirmation/i.test(action.actionTypeName);
+  const qtyKind: "vin" | "confirmation" | null
+    = isVin ? "vin" : isConfirmation ? "confirmation" : null;
+
+  async function submitQty(payload: { qty: number; legs?: { id: number; vinsReceivedQuantity: number }[] }) {
+    setQtyBusy(true);
+    setQtyError(null);
+    try {
+      if (qtyKind === "vin") {
+        const body = payload.legs
+          ? { batchId: batch.id, legs: payload.legs, ...(isBatchScopeRow ? { actionId: action.id } : {}) }
+          : { batchId: batch.id, vinsReceivedQuantity: payload.qty, ...(isBatchScopeRow ? { actionId: action.id } : {}) };
+        const res = await fetch("/api/batch-vins-received", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(await res.text());
+      } else if (qtyKind === "confirmation") {
+        const res = await fetch("/api/batch-confirmation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            batchId: batch.id,
+            confirmedQuantity: payload.qty,
+            ...(isBatchScopeRow ? { actionId: action.id } : {}),
+          }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+      }
+      setShowQtyForm(false);
+      router.refresh();
+    } catch (e) {
+      setQtyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setQtyBusy(false);
+    }
+  }
 
   return (
     <div className={cn(
@@ -458,6 +536,19 @@ function FlowChip({
             📞 {action.touchpoints.length}
           </button>
         )}
+        {/* Live qty badge on the VIN / Confirmation chip — read-only
+            indicator that makes the persisted state obvious without
+            needing to scan the batch header. */}
+        {qtyKind === "vin" && (batch.vinsReceivedQuantity ?? 0) > 0 && (
+          <span className="text-[0.65rem] tabular-nums text-ink-600">
+            🔑 {batch.vinsReceivedQuantity}/{batch.requestedQuantity}
+          </span>
+        )}
+        {qtyKind === "confirmation" && (batch.confirmedQuantity ?? 0) > 0 && (
+          <span className="text-[0.65rem] tabular-nums text-ink-600">
+            ✅ {batch.confirmedQuantity}/{batch.requestedQuantity}
+          </span>
+        )}
         {/* Quick-log buttons floated right when the chip is actionable. */}
         {action.status !== "done" && action.status !== "skipped" && (
           <div className="ml-auto flex flex-wrap gap-1">
@@ -476,6 +567,19 @@ function FlowChip({
                 outcome: "confirmed", nextFollowupAt: null,
                 undoLabel: `✅ ${label} — confirmed`,
               })} />
+            {/* Qty entry button — only on VIN / Confirmation chips,
+                where a count matters. Opens the inline qty form
+                without firing a touchpoint (the qty endpoint flips
+                status by itself when a batch-scope action is given). */}
+            {qtyKind && (
+              <QuickLogBtn
+                label={qtyKind === "vin" ? "🔑 N" : "🔢 N"}
+                title={qtyKind === "vin" ? "Record VINs received" : "Record dealer confirmation count"}
+                tone="brand"
+                disabled={busy || qtyBusy}
+                onClick={() => setShowQtyForm((v) => !v)}
+              />
+            )}
             <QuickLogBtn label="↗" title="Escalate" tone="flame" disabled={busy}
               onClick={() => onLog({
                 actionId: action.id, channel: lastChannel, direction: "internal",
@@ -499,6 +603,20 @@ function FlowChip({
         </p>
       )}
 
+      {/* Inline qty form — VIN (per-leg or scalar) / Confirmation (scalar).
+          Mirrors the old Action Center "click VIN chip → form" UX so
+          ops can stop losing partial counts to free-text notes. */}
+      {showQtyForm && qtyKind && (
+        <QtyForm
+          kind={qtyKind}
+          batch={batch}
+          busy={qtyBusy}
+          error={qtyError}
+          onSubmit={submitQty}
+          onCancel={() => { setShowQtyForm(false); setQtyError(null); }}
+        />
+      )}
+
       {/* Popover — full history + rich form */}
       {showPopover && (
         <FullPopover
@@ -510,6 +628,164 @@ function FlowChip({
         />
       )}
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// QtyForm — inline form for VIN / Confirmation count entry
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Persists how many VINs the dealer has shared OR how many cars the
+ * dealer has confirmed for this batch. VIN supports per-leg (multi-
+ * city) entry; Confirmation is always a single scalar (the data
+ * model doesn't track per-city confirmation today).
+ *
+ * Submit fires the matching /api/batch-* endpoint via the parent
+ * FlowChip — keeps the JSON-shape decisions in one place.
+ */
+function QtyForm({
+  kind, batch, busy, error, onSubmit, onCancel,
+}: {
+  kind: "vin" | "confirmation";
+  batch: BatchNode;
+  busy: boolean;
+  error: string | null;
+  onSubmit: (payload: { qty: number; legs?: { id: number; vinsReceivedQuantity: number }[] }) => Promise<void>;
+  onCancel: () => void;
+}) {
+  // VIN multi-leg only kicks in when the batch has ≥ 2 legs; otherwise
+  // (and always for Confirmation) we fall through to a single input.
+  const multiLeg = kind === "vin" && batch.legs.length >= 2;
+
+  const [legQtys, setLegQtys] = useState<Record<number, string>>(() => {
+    const init: Record<number, string> = {};
+    for (const l of batch.legs) {
+      init[l.id] = String(l.vinsReceivedQuantity > 0 ? l.vinsReceivedQuantity : l.quantity);
+    }
+    return init;
+  });
+
+  const initialScalar = kind === "vin"
+    ? ((batch.vinsReceivedQuantity ?? 0) > 0
+        ? (batch.vinsReceivedQuantity ?? 0)
+        : batch.requestedQuantity)
+    : ((batch.confirmedQuantity ?? 0) > 0
+        ? (batch.confirmedQuantity ?? 0)
+        : batch.requestedQuantity);
+  const [scalarQty, setScalarQty] = useState<string>(String(initialScalar));
+  const [localErr, setLocalErr] = useState<string | null>(null);
+
+  const total = multiLeg
+    ? batch.legs.reduce((sum, l) => {
+        const n = parseInt(legQtys[l.id] ?? "0", 10);
+        return sum + (Number.isFinite(n) && n >= 0 ? n : 0);
+      }, 0)
+    : Math.max(0, parseInt(scalarQty, 10) || 0);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setLocalErr(null);
+    if (multiLeg) {
+      const legs: { id: number; vinsReceivedQuantity: number }[] = [];
+      for (const l of batch.legs) {
+        const n = parseInt(legQtys[l.id] ?? "0", 10);
+        if (!Number.isFinite(n) || n < 0) {
+          setLocalErr(`${l.city}: enter a non-negative integer.`);
+          return;
+        }
+        if (n > l.quantity) {
+          setLocalErr(`${l.city}: can't exceed ${l.quantity} cars.`);
+          return;
+        }
+        legs.push({ id: l.id, vinsReceivedQuantity: n });
+      }
+      await onSubmit({ qty: total, legs });
+      return;
+    }
+    const n = parseInt(scalarQty, 10);
+    if (!Number.isFinite(n) || n < 0) {
+      setLocalErr("Enter a non-negative integer.");
+      return;
+    }
+    if (n > batch.requestedQuantity) {
+      setLocalErr(`Can't exceed the batch size (${batch.requestedQuantity}).`);
+      return;
+    }
+    await onSubmit({ qty: n });
+  }
+
+  const title = kind === "vin" ? "🔑 VINs received" : "✅ Dealer confirmation count";
+  const blurb = kind === "vin"
+    ? (multiLeg
+        ? "Record per-city. Each city's Mark-as-delivered caps at its own VINs."
+        : "How many VINs has the dealer shared so far? Partial is fine.")
+    : "How many of the requested cars has the dealer confirmed they can supply? Partial is normal.";
+
+  return (
+    <form onSubmit={submit} className="mt-2 p-2 border border-brand rounded-md bg-brand-pastel/30 space-y-2 text-[0.7rem]">
+      <p className="font-medium text-brand-dark">{title} — {batch.batchCode}</p>
+      <p className="text-[0.65rem] text-ink-600 leading-snug">{blurb}</p>
+      {multiLeg ? (
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-[8rem_5rem_auto] items-baseline gap-x-2 gap-y-1">
+            {batch.legs.map((l) => (
+              <div key={l.id} className="contents">
+                <span className="text-[0.65rem] text-ink-600 truncate">📍 {l.city}</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={l.quantity}
+                  value={legQtys[l.id] ?? ""}
+                  onChange={(e) => { setLegQtys((p) => ({ ...p, [l.id]: e.target.value })); setLocalErr(null); }}
+                  className="text-xs px-2 py-1 border border-ink-300 rounded tabular-nums"
+                />
+                <span className="text-[0.65rem] text-ink-500 tabular-nums">/ {l.quantity}</span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[0.65rem] text-ink-500 tabular-nums pt-1 border-t border-ink-200">
+            Batch total: <span className="text-midnight font-medium">{total}</span> / {batch.requestedQuantity} cars
+          </p>
+        </div>
+      ) : (
+        <div className="flex items-baseline gap-2">
+          <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
+            {kind === "vin" ? "VINs received" : "Confirmed"}
+            <input
+              type="number"
+              min={0}
+              max={batch.requestedQuantity}
+              value={scalarQty}
+              onChange={(e) => { setScalarQty(e.target.value); setLocalErr(null); }}
+              className="text-xs px-2 py-1 border border-ink-300 rounded w-20 tabular-nums"
+              autoFocus
+            />
+          </label>
+          <span className="text-[0.65rem] text-ink-500 tabular-nums">/ {batch.requestedQuantity} cars</span>
+        </div>
+      )}
+      {(localErr || error) && (
+        <p className="text-[0.65rem] text-flame-dark">{localErr ?? error}</p>
+      )}
+      <div className="flex justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel"
+        >
+          {busy ? "…" : (kind === "vin" ? "✓ Save VIN count" : "✓ Save confirmation")}
+        </button>
+      </div>
+    </form>
   );
 }
 

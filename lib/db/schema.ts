@@ -112,6 +112,17 @@ export const batches = sqliteTable("batches", {
   allocatedQuantity:   integer("allocated_quantity").default(0),
   deliveredQuantity:   integer("delivered_quantity").default(0),
   /**
+   * Cars the dealer has *confirmed* they can supply against the
+   * batch's `requestedQuantity`. Captured when ops marks the batch-
+   * scope "Send Dealer Confirmation Email" External-Phase chip done.
+   * Drives the upper bound on `vinsReceivedQuantity` (you can't have
+   * VINs for cars the dealer never confirmed). 0 = no confirmation
+   * captured yet. Partial confirmations (5 of 10) are normal — they
+   * surface "the dealer said they only have 5" as data instead of
+   * losing it in a touchpoint note.
+   */
+  confirmedQuantity:    integer("confirmed_quantity").notNull().default(0),
+  /**
    * VINs actually received from the dealer, per batch. 0 = none yet
    * (default). Captured when ops marks the batch-scope "VIN" External-
    * Phase chip done — the operator types how many of the N cars in
