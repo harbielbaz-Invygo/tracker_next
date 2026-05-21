@@ -18,14 +18,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ActionFlowData, FlowAction, FlowState, Channel, Outcome, Touchpoint } from "@/lib/action-flow-data";
-import type { PoNode, WaveNode, BatchNode } from "@/lib/action-center-tree-data";
+import { augmentActions } from "@/lib/action-flow-data";
+import type { PoNode, WaveNode, BatchNode, ScopedActionDetail } from "@/lib/action-center-tree-data";
 import { cn } from "@/lib/utils";
 
 interface Props { data: ActionFlowData }
 
 export default function ActionFlowShell({ data }: Props) {
-  const { tree, augment } = data;
+  const { tree, touchpointsByAction } = data;
   const router = useRouter();
+  // Local augmenter — pure function imported from the data layer.
+  // The function CAN'T live on `data` itself because Next.js can't
+  // serialise functions from a Server Component to a Client one.
+  const augment = (actions: ScopedActionDetail[]) =>
+    augmentActions(actions, touchpointsByAction);
 
   // Flatten POs across dealers for the picker. Pre-PO entries opt out
   // — the flow surface targets External-Phase work.
@@ -146,7 +152,7 @@ function WaveBlock({
   wave, augment, busyActionId, lastChannel, onLog,
 }: {
   wave: WaveNode;
-  augment: ActionFlowData["augment"];
+  augment: (actions: ScopedActionDetail[]) => FlowAction[];
   busyActionId: number | null;
   lastChannel: Channel;
   onLog: (opts: {
@@ -198,7 +204,7 @@ function BatchBlock({
 }: {
   batch: BatchNode;
   wave: WaveNode;
-  augment: ActionFlowData["augment"];
+  augment: (actions: ScopedActionDetail[]) => FlowAction[];
   busyActionId: number | null;
   lastChannel: Channel;
   onLog: (opts: {

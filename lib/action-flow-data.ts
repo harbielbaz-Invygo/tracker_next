@@ -79,12 +79,16 @@ export interface FlowAction extends ScopedActionDetail {
   daysSinceLastContact: number | null;
 }
 
+/**
+ * Shape passed from the server component to the client shell.
+ * MUST be plain-JSON-serialisable (no Map, no functions) — Next.js
+ * Server Components can't ship those across the boundary. The
+ * client imports `augmentActions` separately and applies it locally.
+ */
 export interface ActionFlowData {
   tree: ActionCenterTree;
-  /** Per-action augmentation, keyed by action id. */
-  touchpointsByAction: Map<number, Touchpoint[]>;
-  /** Helper — apply augmentation to any action set. */
-  augment(actions: ScopedActionDetail[], today?: string): FlowAction[];
+  /** Per-action touchpoint list, keyed by action id (stringified). */
+  touchpointsByAction: Record<string, Touchpoint[]>;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -138,33 +142,43 @@ export async function getActionFlowData(): Promise<ActionFlowData> {
     }
   }
 
-  const touchpointsByAction = new Map<number, Touchpoint[]>();
+  const touchpointsByAction: Record<string, Touchpoint[]> = {};
   for (const t of touchpoints) {
-    const arr = touchpointsByAction.get(t.actionId) ?? [];
+    const key = String(t.actionId);
+    const arr = touchpointsByAction[key] ?? [];
     arr.push(t);
-    touchpointsByAction.set(t.actionId, arr);
-  }
-
-  function augment(actions: ScopedActionDetail[], today = new Date().toISOString().slice(0, 10)): FlowAction[] {
-    return actions.map((a) => {
-      const tps = touchpointsByAction.get(a.id) ?? [];
-      const latest = tps[0] ?? null;
-      const daysSinceLastContact = latest
-        ? daysBetween(today, latest.contactedAt.slice(0, 10))
-        : null;
-      return {
-        ...a,
-        touchpoints: tps,
-        latestTouchpoint: latest,
-        flowState: deriveFlowState(a.status, latest, today),
-        daysSinceLastContact,
-      };
-    });
+    touchpointsByAction[key] = arr;
   }
 
   return {
     tree,
     touchpointsByAction,
-    augment,
   };
+}
+
+/**
+ * Pure augmenter — server-friendly and client-friendly. The shell
+ * imports this and runs it locally, since a function in
+ * ActionFlowData would break the server→client serialisation
+ * boundary.
+ */
+export function augmentActions(
+  actions: ScopedActionDetail[],
+  touchpointsByAction: Record<string, Touchpoint[]>,
+  today: string = new Date().toISOString().slice(0, 10),
+): FlowAction[] {
+  return actions.map((a) => {
+    const tps = touchpointsByAction[String(a.id)] ?? [];
+    const latest = tps[0] ?? null;
+    const daysSinceLastContact = latest
+      ? daysBetween(today, latest.contactedAt.slice(0, 10))
+      : null;
+    return {
+      ...a,
+      touchpoints: tps,
+      latestTouchpoint: latest,
+      flowState: deriveFlowState(a.status, latest, today),
+      daysSinceLastContact,
+    };
+  });
 }
