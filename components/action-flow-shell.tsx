@@ -17,8 +17,18 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { ActionFlowData, FlowAction, FlowState, Channel, Outcome, Touchpoint } from "@/lib/action-flow-data";
-import { augmentActions } from "@/lib/action-flow-data";
+// Type-only import from the data layer is fine — TS strips it at
+// build time. Runtime imports (augmentActions) MUST come from the
+// client-safe shared module to keep `db` out of the client bundle.
+import type { ActionFlowData } from "@/lib/action-flow-data";
+import {
+  augmentActions,
+  type FlowAction,
+  type FlowState,
+  type Channel,
+  type Outcome,
+  type Touchpoint,
+} from "@/lib/action-flow-shared";
 import type { PoNode, WaveNode, BatchNode, ScopedActionDetail } from "@/lib/action-center-tree-data";
 import { cn } from "@/lib/utils";
 
