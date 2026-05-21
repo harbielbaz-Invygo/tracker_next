@@ -10,12 +10,26 @@
 import AccessGate from "@/components/access-gate";
 import PageHeader from "@/components/page-header";
 import ActionFlowShell from "@/components/action-flow-shell";
-import { getActionFlowData } from "@/lib/action-flow-data";
+import { getActionFlowData, type ActionFlowData } from "@/lib/action-flow-data";
 
 export const dynamic = "force-dynamic";
 
 export default async function ActionCenterFlowPage() {
-  const data = await getActionFlowData();
+  // Wrapped so a data-layer crash surfaces an inline diagnostic
+  // instead of bubbling up as an opaque "Server Components render"
+  // 500 with no clue about the root cause. Test sandbox = transparent
+  // error reporting; the live /action-center doesn't get this
+  // treatment because its data layer is battle-tested.
+  let data: ActionFlowData | null = null;
+  let error: string | null = null;
+  try {
+    data = await getActionFlowData();
+  } catch (e) {
+    error = e instanceof Error
+      ? `${e.name}: ${e.message}${e.stack ? `\n\n${e.stack.split("\n").slice(0, 8).join("\n")}` : ""}`
+      : String(e);
+  }
+
   return (
     <AccessGate view="Action Center Flow">
       <div>
@@ -31,7 +45,15 @@ export default async function ActionCenterFlowPage() {
             </>
           }
         />
-        <ActionFlowShell data={data} />
+        {error ? (
+          <pre className="card text-xs text-flame-dark whitespace-pre-wrap font-mono leading-tight">
+            {error}
+          </pre>
+        ) : data ? (
+          <ActionFlowShell data={data} />
+        ) : (
+          <p className="text-sm text-ink-500 italic">Loading…</p>
+        )}
       </div>
     </AccessGate>
   );
