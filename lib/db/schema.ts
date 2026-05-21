@@ -840,6 +840,62 @@ export const actions = sqliteTable("actions", {
                 .on(t.scope, t.scopeId, t.actionTypeId),
 }));
 
+// ─────────────────────────────────────────────────────────
+// Action touchpoints — per-action follow-up log (test surface).
+//
+// Real-life external-phase actions (Dealer Confirmation, VIN, Plate,
+// Insurance, Tracking, Inspection) are NOT a binary done/not-done
+// flow. Ops sends emails, makes calls, ships WhatsApp messages,
+// escalates to Partnership, waits for responses, gets partial info
+// back. The chip alone can't tell that story.
+//
+// One row per touchpoint. Latest touchpoint per action drives the
+// derived "flow state" (fresh / contacted_waiting / partial_response
+// / stalled / escalated / confirmed_pending) the test page renders
+// without adding new status enum values.
+//
+// Lives under /action-center-flow first — promotes to the main
+// Action Center after validation.
+// ─────────────────────────────────────────────────────────
+export const actionTouchpoints = sqliteTable("action_touchpoints", {
+  id:             integer("id").primaryKey({ autoIncrement: true }),
+  /** FK target is `actions.id` (scope-aware actions table). Drizzle
+   *  can't model the polymorphic-scope relationship cleanly, so we
+   *  store the id only and join in application code. */
+  actionId:       integer("action_id").notNull(),
+  channel:        text("channel",
+                       { enum: ["email", "phone", "whatsapp", "meeting", "other"] })
+                  .notNull().default("email"),
+  /** outbound = we contacted them; inbound = unprompted reply; internal = handoff. */
+  direction:      text("direction",
+                       { enum: ["outbound", "inbound", "internal"] })
+                  .notNull().default("outbound"),
+  outcome:        text("outcome",
+                       { enum: [
+                         "no_response",
+                         "partial",
+                         "confirmed",
+                         "excuse",
+                         "counter_proposal",
+                         "other",
+                       ] })
+                  .notNull().default("no_response"),
+  note:           text("note"),
+  contactedAt:    text("contacted_at").default(sql`(CURRENT_TIMESTAMP)`),
+  /** When to follow up if no progress lands by then. Drives the
+   *  stalled flow state + reminder surfacing in the inbox. */
+  nextFollowupAt: text("next_followup_at"),
+  /** Username who logged the touchpoint (audit). */
+  loggedBy:       text("logged_by"),
+  /** Marks this touchpoint as an escalation handoff (dealer→partnership
+   *  or ops→manager). Drives the derived "escalated" flow state. */
+  escalated:      integer("escalated", { mode: "boolean" }).notNull().default(false),
+  createdAt:      text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
+}, (t) => ({
+  byAction: index("action_touchpoints_action_idx").on(t.actionId),
+  byNextFollowupAt: index("action_touchpoints_followup_idx").on(t.nextFollowupAt),
+}));
+
 // Convenient TS types
 export type User              = typeof users.$inferSelect;
 export type Dealer            = typeof dealers.$inferSelect;
