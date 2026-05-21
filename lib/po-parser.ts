@@ -166,7 +166,12 @@ function extractDeliveryInstructions(text: string): string | null {
 // `\s*$`): year alone is a strong enough discriminator within the
 // items section, and any trailing pricing digits are peeled off later
 // by parseItemChunk's pricing regex.
-const ITEM_HEAD_RE = /^([A-Z][A-Za-z\-]+(?:\s+[A-Za-z\-]+){1,4})\s+(20[2-3][0-9])/gm;
+//
+// Each token must START with a letter so a year-like 4-digit number
+// in the description ("2030 Special edition") can't be confused for a
+// model token. Tokens MAY contain digits after the first letter so
+// model codes like GS3 / Q5 / X3 / E300 / C-HR / GT-R parse cleanly.
+const ITEM_HEAD_RE = /^([A-Z][A-Za-z0-9\-]*(?:\s+[A-Za-z][A-Za-z0-9\-]*){1,4})\s+(20[2-3][0-9])/gm;
 
 /**
  * Drop table-header garbage that some PDFs concatenate into a row, e.g.
@@ -186,10 +191,16 @@ function cleanModelName(raw: string): string {
       if (/^[A-Z][a-z]+[A-Z]/.test(w)) return false;
       // Proper noun (Toyota, Hyundai, Accent)
       if (/^[A-Z][a-z]+$/.test(w)) return true;
-      // Short all-caps brand (BMW, MG, GMC, KIA)
+      // Short all-caps brand (BMW, MG, GMC, KIA, GAC)
       if (/^[A-Z]{2,4}$/.test(w)) return true;
       // Hyphenated proper noun (e.g. "Land-Cruiser")
       if (/^[A-Z][a-z]+(?:-[A-Z]?[a-z]+)+$/.test(w)) return true;
+      // Alphanumeric model code (GS3, Q5, X3, A4, E300, RX450h). Must
+      // start with a letter and contain at least one digit so we don't
+      // mistake plain proper nouns or stop-word concats for codes.
+      if (/^[A-Z][A-Za-z0-9]*\d[A-Za-z0-9]*$/.test(w)) return true;
+      // Hyphenated alphanumeric model code (C-HR, GT-R, X-Trail, GS-3).
+      if (/^[A-Z][A-Za-z0-9]*(?:-[A-Z0-9][A-Za-z0-9]*)+$/.test(w)) return true;
       return false;
     })
     .join(" ");
