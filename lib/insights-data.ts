@@ -11,7 +11,8 @@ import { gte, or, isNull, eq, and, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   batches, batchForecasts, users, batchActions, actionTypes,
-  batchDateRevisions,
+  batchDateRevisions, pos,
+  actions as actionsTable,
 } from "@/lib/db/schema";
 import { getDashboardRows, type DashboardRow } from "@/lib/dashboard-data";
 import { getPerformanceReport, type PerformanceReport } from "@/lib/reports-data";
@@ -116,6 +117,34 @@ export interface ForecastReliabilityRow {
 }
 
 /**
+ * Audit 2 #1 — Per-action-type breakdown for the Internal Phase.
+ * Answers "which stage is the bottleneck?" — the most-asked listing-
+ * speed question. One row per action_type with scope='po'.
+ *
+ *   medianDaysFromSubmission = median of (completedAt − PO.requestedAt)
+ *     across done actions of this type. Cumulative days from PO
+ *     submission to this stage landing — gaps between adjacent rows
+ *     reveal where time pools (e.g. SKU done day 7 but App Listing
+ *     done day 11 → 4 days waiting on listing after SKU is in).
+ *   avgDelayDays           = mean (completedAt − expectedDate) across
+ *     done rows with both dates set. Negative = ahead, positive = late.
+ *   onTimeRate             = % of done rows where completedAt ≤
+ *     expectedDate. Null when no done rows had an expectedDate.
+ *   openCount              = waiting + blocked rows of this type.
+ *   doneCount              = done rows of this type.
+ */
+export interface InternalPhaseActionStat {
+  actionTypeId: number;
+  actionTypeName: string;
+  sortOrder: number;
+  doneCount: number;
+  openCount: number;
+  medianDaysFromSubmission: number | null;
+  avgDelayDays: number | null;
+  onTimeRate: number | null;
+}
+
+/**
  * Audit 3 #1 — "🚨 Upcoming deliveries at risk" feed row.
  *
  * One per open batch whose effective availability date is within the
@@ -158,6 +187,12 @@ export interface InsightsData {
    * widget stays scannable.
    */
   upcomingAtRisk: UpcomingAtRiskRow[];
+  /**
+   * Per-action-type breakdown for the Internal Phase (Audit 2 #1).
+   * Sorted by action_types.sortOrder so the rows read in the same
+   * order ops sees the chips in the Action Center.
+   */
+  internalPhaseStats: InternalPhaseActionStat[];
 }
 
 /** Period lower-bound ISO date. Duplicated from reports-data so we
@@ -549,6 +584,11 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     .sort((a, b) => a.confidenceScore - b.confidenceScore)
     .slice(0, 10);
 
+  // Audit 2 #1 — per-action-type breakdown for the Internal Phase.
+  // Cheap aggregation (small dataset); runs after the other awaits
+  // since it doesn't need their results.
+  const internalPhaseStats = await getInternalPhaseStats(period);
+
   return {
     generatedAt: report.generatedAt,
     hero,
@@ -557,6 +597,7 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     closure,
     forecastReliability,
     upcomingAtRisk,
+    internalPhaseStats,
   };
 }
 
@@ -606,4 +647,187 @@ async function getCustomerDaysLostWeekly(): Promise<number[]> {
     }
   }
   return buckets;
+}
+
+/**
+ * Audit 2 #1 — per-action-type breakdown for the Internal Phase.
+ *
+ * Joins `actions` (scope='po') with `action_types` (catalog) and the
+ * `pos` row to anchor each done row's days-from-submission. Aggregates
+ * in JS — same shape as the existing department/stakeholder
+ * aggregators in reports-data, but keyed by action_type instead of
+ * owner so the question becomes "which stage" rather than "which
+ * team".
+ *
+ * Tolerant of fresh DBs: returns an empty array if the actions table
+ * or its dependencies are missing.
+ */
+async function getInternalPhaseStats(period: ReportPeriod): Promise<InternalPhaseActionStat[]> {
+  const fromIso = fromIsoForPeriod(period);
+
+  // Pull every PO-scope action joined with type catalog + parent PO's
+  // requestedAt (proxy for "submission date" — actions don't carry
+  // their own start time, so we measure cumulative days from PO
+  // submission to action completion).
+  interface Row {
+    actionTypeId:   number;
+    actionTypeName: string;
+    sortOrder:      number;
+    status:         "waiting" | "blocked" | "done" | "skipped";
+    completedAt:    string | null;
+    expectedDate:   string | null;
+    requestedAt:    string;
+  }
+  let rows: Row[];
+  try {
+    // The scope-aware actions row has scopeId pointing at pos.id for
+    // scope='po'. Anchor days-from-submission to the PO's parent
+    // batch's requestedAt — every PO has at least one batch, and they
+    // all share the same submission moment so the first batch's value
+    // is sufficient. We pre-aggregate the batch lookup in JS to keep
+    // the SQL simple.
+    const actionRows = await db
+      .select({
+        actionTypeId:   actionsTable.actionTypeId,
+        actionTypeName: actionTypes.name,
+        sortOrder:      actionTypes.sortOrder,
+        status:         actionsTable.status,
+        completedAt:    actionsTable.completedAt,
+        expectedDate:   actionsTable.expectedDate,
+        scopeId:        actionsTable.scopeId,
+      })
+      .from(actionsTable)
+      .innerJoin(actionTypes, eq(actionsTable.actionTypeId, actionTypes.id))
+      .where(eq(actionsTable.scope, "po"));
+
+    // Look up each PO's earliest batch requestedAt (the "submission"
+    // date). Batches link to PO via the `po_number` text column, not
+    // a foreign key, so we join through (pos.id → pos.poNumber →
+    // batches.poNumber).
+    const submissionByPo = new Map<number, string>();
+    const poRows = await db
+      .select({ id: pos.id, poNumber: pos.poNumber })
+      .from(pos);
+    const poByNumber = new Map<string, number>();
+    for (const p of poRows) poByNumber.set(p.poNumber, p.id);
+
+    const batchRows = await db
+      .select({
+        poNumber:    batches.poNumber,
+        requestedAt: batches.requestedAt,
+      })
+      .from(batches);
+    for (const b of batchRows) {
+      if (!b.poNumber || !b.requestedAt) continue;
+      const poId = poByNumber.get(b.poNumber);
+      if (poId == null) continue;
+      const cur = submissionByPo.get(poId);
+      if (cur == null || b.requestedAt < cur) {
+        submissionByPo.set(poId, b.requestedAt);
+      }
+    }
+    rows = actionRows.flatMap((r): Row[] => {
+      const submission = submissionByPo.get(r.scopeId);
+      if (!submission) return [];
+      return [{
+        actionTypeId:   r.actionTypeId,
+        actionTypeName: r.actionTypeName,
+        sortOrder:      r.sortOrder,
+        status:         r.status,
+        completedAt:    r.completedAt,
+        expectedDate:   r.expectedDate,
+        requestedAt:    submission,
+      }];
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table|no such column/i.test(msg)) {
+      // eslint-disable-next-line no-console
+      console.warn("[insights-data] internal-phase stats skipped — actions table missing.");
+      return [];
+    }
+    throw err;
+  }
+
+  // Bucket by actionTypeId.
+  interface Bucket {
+    actionTypeId:   number;
+    actionTypeName: string;
+    sortOrder:      number;
+    doneCount:      number;
+    openCount:      number;
+    daysToComplete: number[];  // (completedAt - requestedAt), only done rows
+    delaySamples:   number[];  // signed (completedAt - expectedDate), only done rows with expectedDate
+    onTimeHits:     number;
+    onTimeTotal:    number;
+  }
+  const buckets = new Map<number, Bucket>();
+
+  for (const r of rows) {
+    let b = buckets.get(r.actionTypeId);
+    if (!b) {
+      b = {
+        actionTypeId: r.actionTypeId,
+        actionTypeName: r.actionTypeName,
+        sortOrder: r.sortOrder,
+        doneCount: 0, openCount: 0,
+        daysToComplete: [],
+        delaySamples: [],
+        onTimeHits: 0, onTimeTotal: 0,
+      };
+      buckets.set(r.actionTypeId, b);
+    }
+    if (r.status === "waiting" || r.status === "blocked") {
+      b.openCount++;
+      continue;
+    }
+    if (r.status !== "done" || !r.completedAt) continue;
+
+    // Period filter for the done-rate samples: only count completions
+    // that landed inside the window. Skipped rows are excluded from
+    // both done + delay buckets entirely.
+    const completedOn = r.completedAt.slice(0, 10);
+    if (fromIso && completedOn < fromIso) continue;
+    b.doneCount++;
+
+    const days = Math.round(
+      (new Date(completedOn).getTime() - new Date(r.requestedAt).getTime())
+        / (24 * 60 * 60 * 1000),
+    );
+    if (days >= 0) b.daysToComplete.push(days);
+
+    if (r.expectedDate) {
+      const delay = Math.round(
+        (new Date(completedOn).getTime() - new Date(r.expectedDate).getTime())
+          / (24 * 60 * 60 * 1000),
+      );
+      b.delaySamples.push(delay);
+      b.onTimeTotal++;
+      if (delay <= 0) b.onTimeHits++;
+    }
+  }
+
+  function median(arr: number[]): number | null {
+    if (arr.length === 0) return null;
+    const sorted = arr.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0
+      ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+      : sorted[mid];
+  }
+
+  return Array.from(buckets.values())
+    .map((b): InternalPhaseActionStat => ({
+      actionTypeId:   b.actionTypeId,
+      actionTypeName: b.actionTypeName,
+      sortOrder:      b.sortOrder,
+      doneCount:      b.doneCount,
+      openCount:      b.openCount,
+      medianDaysFromSubmission: median(b.daysToComplete),
+      avgDelayDays:   b.delaySamples.length === 0
+        ? null
+        : Math.round(b.delaySamples.reduce((s, v) => s + v, 0) / b.delaySamples.length),
+      onTimeRate:     b.onTimeTotal === 0 ? null : Math.round((b.onTimeHits / b.onTimeTotal) * 100),
+    }))
+    .sort((a, b) => a.sortOrder - b.sortOrder);
 }

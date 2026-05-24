@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
   InsightsData, ClosureSummary, ForecastReliabilityRow,
-  UpcomingAtRiskRow,
+  UpcomingAtRiskRow, InternalPhaseActionStat,
 } from "@/lib/insights-data";
 import type {
   DepartmentRow, StakeholderRow, DealerReliabilityRow, CityReliabilityRow,
@@ -88,6 +88,8 @@ export default function InsightsShell({ data, period }: Props) {
       <ClosureStrip closure={data.closure} />
 
       <UpcomingAtRiskBlock rows={data.upcomingAtRisk} />
+
+      <InternalPhaseBreakdown stats={data.internalPhaseStats} />
 
       <CustomerImpactBlock impact={data.report.customerImpact} />
 
@@ -424,6 +426,89 @@ function UpcomingAtRiskBlock({ rows }: { rows: UpcomingAtRiskRow[] }) {
                       ? <li className="italic text-ink-400">—</li>
                       : r.reasons.map((why, i) => <li key={i}>· {why}</li>)}
                   </ul>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Internal-phase per-action-type breakdown (Audit 2 #1)
+// ──────────────────────────────────────────────────────────────────
+
+function InternalPhaseBreakdown({ stats }: { stats: InternalPhaseActionStat[] }) {
+  if (stats.length === 0) {
+    return (
+      <section className="card border-ink-200">
+        <h2 className="text-base font-bold text-midnight">📱 Internal Phase — per stage</h2>
+        <p className="text-sm text-ink-500 mt-2 italic">
+          No Internal-Phase completions yet for this period. Will populate once
+          Specs / Pricing / SKU / App Listing chips start landing.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="card">
+      <div className="flex items-baseline justify-between gap-3 mb-1">
+        <h2 className="text-base font-bold text-midnight">📱 Internal Phase — per stage</h2>
+        <span className="text-[0.7rem] text-ink-500">PO scope · sorted by chip order</span>
+      </div>
+      <p className="text-xs text-ink-500 mb-3">
+        Cumulative days from PO submission to each stage landing. Gaps between
+        adjacent rows show where time pools — e.g. if SKU lands day 7 and App
+        Listing lands day 11, the four extra days are waiting on listing after
+        SKU is in.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-[0.65rem] uppercase tracking-wide text-ink-500 border-b border-ink-200">
+              <th className="py-1.5 pr-3">Stage</th>
+              <th className="py-1.5 pr-3 text-right tabular-nums">Done</th>
+              <th className="py-1.5 pr-3 text-right tabular-nums">Open</th>
+              <th className="py-1.5 pr-3 text-right tabular-nums">Median days from submission</th>
+              <th className="py-1.5 pr-3 text-right tabular-nums">Avg delay</th>
+              <th className="py-1.5 pr-3 text-right tabular-nums">On-time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.map((s) => (
+              <tr key={s.actionTypeId} className="border-b border-ink-100 last:border-b-0">
+                <td className="py-1.5 pr-3 text-midnight">{s.actionTypeName}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums text-ink-700">{s.doneCount}</td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">
+                  {s.openCount === 0
+                    ? <span className="text-ink-400">0</span>
+                    : <span className="text-gold-dark font-semibold">{s.openCount}</span>}
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">
+                  {s.medianDaysFromSubmission == null
+                    ? <span className="text-ink-400">—</span>
+                    : <span className="text-midnight font-semibold">{s.medianDaysFromSubmission}d</span>}
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">
+                  {s.avgDelayDays == null
+                    ? <span className="text-ink-400">—</span>
+                    : s.avgDelayDays > 0
+                      ? <span className="text-flame-dark">+{s.avgDelayDays}d</span>
+                      : s.avgDelayDays < 0
+                        ? <span className="text-blue-dark">{s.avgDelayDays}d</span>
+                        : <span className="text-green-dark">0d</span>}
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">
+                  {s.onTimeRate == null
+                    ? <span className="text-ink-400">—</span>
+                    : s.onTimeRate >= 80
+                      ? <span className="text-green-dark font-semibold">{s.onTimeRate}%</span>
+                      : s.onTimeRate >= 60
+                        ? <span className="text-gold-dark font-semibold">{s.onTimeRate}%</span>
+                        : <span className="text-flame-dark font-semibold">{s.onTimeRate}%</span>}
                 </td>
               </tr>
             ))}
