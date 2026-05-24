@@ -1779,15 +1779,17 @@ function derivePoPhases(po: PoNode, todayStr: string): PoPhase[] {
     date:  listing.completedAt ? listing.completedAt.slice(0, 10) : null,
   };
 
-  // 4. VIN chase — aggregate every wave-scope action's status. Done
-  //    when all wave actions are settled, in progress if any are
-  //    done OR any are blocked + the PO is post-internal-phase.
+  // 4. External phase — aggregate every wave-scope action's status.
+  //    (Internally still keyed "vin_chase" because the data model
+  //    keys VIN-chase actions at wave scope.) Done when all wave
+  //    actions are settled, in progress if any are done OR any are
+  //    blocked + the PO is post-internal-phase.
   const waveActions = po.waves.flatMap((w) => w.actions);
   const waveDone   = waveActions.filter((a) => a.status === "done" || a.status === "skipped").length;
   const waveTotal  = waveActions.length;
   const vinChase: PoPhase = {
     key:   "vin_chase",
-    label: "VIN chase",
+    label: "External phase",
     state: waveTotal === 0
       ? "not_started"
       : waveDone === waveTotal
@@ -1900,7 +1902,7 @@ function PoStoryBar({ po }: { po: PoNode }) {
 /**
  * Story sentence — auto-generated 1-line narrative. Reads like a
  * progress note: "Signed Nd ago · Internal 3/4 · App listing pending
- * · VIN chase not started · Next milestone: App listing." Adapts to
+ * · External phase not started · Next milestone: App listing." Adapts to
  * each PO state (open / partly delivered / fully delivered / etc.).
  */
 function PoStorySentence({ po }: { po: PoNode }) {
@@ -1945,14 +1947,14 @@ function PoStorySentence({ po }: { po: PoNode }) {
     parts.push({ text: label, tone: app.state === "done" ? "good" : "warn" });
   }
 
-  // 4. VIN chase
+  // 4. External phase (formerly "VIN chase")
   const vin = phases.find((p) => p.key === "vin_chase");
   if (vin?.progress) {
     const label = vin.state === "done"
-      ? "VIN chase done"
+      ? "External phase done"
       : vin.state === "in_progress"
-        ? `VIN chase ${vin.progress.done}/${vin.progress.total}`
-        : "VIN chase not started";
+        ? `External phase ${vin.progress.done}/${vin.progress.total}`
+        : "External phase not started";
     parts.push({ text: label, tone: vin.state === "done" ? "good" : "neutral" });
   }
 
@@ -2056,46 +2058,11 @@ function PoHeaderTimeline({ po }: { po: PoNode }) {
 
   return (
     <div className="space-y-1.5">
-      {/* Phase chips — counts only, mirrors the tree summary. */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.7rem]">
-        {counts.internal.total > 0 && (
-          <span className="inline-flex items-baseline gap-1">
-            <span className="text-ink-500">Internal phase</span>
-            <span className={cn(
-              "tabular-nums font-medium",
-              counts.internal.done === counts.internal.total
-                ? "text-green-dark"
-                : "text-midnight",
-            )}>
-              {counts.internal.done}/{counts.internal.total}
-            </span>
-          </span>
-        )}
-        {counts.external.total > 0 && (
-          <>
-            <span className="text-ink-300">·</span>
-            <span className="inline-flex items-baseline gap-1">
-              <span className="text-ink-500">External phase</span>
-              <span className={cn(
-                "tabular-nums font-medium",
-                counts.external.done === counts.external.total
-                  ? "text-green-dark"
-                  : "text-midnight",
-              )}>
-                {counts.external.done}/{counts.external.total}
-              </span>
-            </span>
-          </>
-        )}
-        {counts.overdue > 0 && (
-          <>
-            <span className="text-ink-300">·</span>
-            <span className="text-flame-dark font-bold tabular-nums">
-              ⚠ {counts.overdue} overdue
-            </span>
-          </>
-        )}
-      </div>
+      {/* Phase counts row removed — the new PoStoryBar + PoStorySentence
+          above already render Internal X/Y, External X/Y, and overdue
+          status. We surface only the "overdue" pill inline with the
+          milestone strip below when it's non-zero, since the story
+          surfaces don't always cover it explicitly. */}
 
       {/* Milestone strip — horizontal chips. Each milestone shows
           icon, label, date, status (done / pending). Today badge
@@ -2113,6 +2080,14 @@ function PoHeaderTimeline({ po }: { po: PoNode }) {
               relativeLabel={m.date ? relativeLabel(m.date) : null}
             />
           ))}
+          {/* Overdue pill — the only count the story surfaces above
+              don't always show, so we surface it here as a small
+              warning chip inline with the milestone strip. */}
+          {counts.overdue > 0 && (
+            <span className="text-[0.65rem] font-bold tabular-nums px-2 py-0.5 rounded-full border border-flame text-flame-dark bg-flame-pale">
+              ⚠ {counts.overdue} overdue
+            </span>
+          )}
           <span className="text-[0.65rem] text-brand-dark font-medium tabular-nums bg-brand-pastel/70 rounded-full px-2 py-0.5 ml-1">
             ⭐ Today {today}
           </span>
