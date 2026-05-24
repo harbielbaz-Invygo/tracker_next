@@ -139,7 +139,6 @@ const ICONS: Record<ViewName, (p: IconProps) => React.ReactElement> = {
   // visual lineage in the sidebar.
   "Action Center 3": ActionCenterIcon,
   "Action Center Fluent": ActionCenterIcon,
-  "Action Center Flow": ActionCenterIcon,
   "Reports":       ReportsIcon,
   "Settings":      SettingsIcon,
   "Guide":         GuideIcon,
