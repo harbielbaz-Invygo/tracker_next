@@ -1,18 +1,28 @@
 /**
- * Plan vs Reality timeline — pure SVG, server-renderable.
- *
- * Ported almost line-for-line from
- *   tracker_v1/dashboard.py:_build_plan_vs_reality_timeline
+ * Plan vs Reality — Gantt chart, pure SVG, server-renderable.
  *
  * Layout (text representation):
- *   Reality  ━━┷━━━━━━┷━━━━━━━━━━━━━━━━━━━━┷━━
- *   Plan     ━━┷━━━━━━┷━━━━━━━━━━━━┷
- *                          └── PO delay +5d ──┘
- *                                    └─ Delivery delay +Nd ─┘
  *
- * Time flows left → right. Reality runs above, Plan below.
- * Reality colour follows the worst delay: ahead → blue, on track → green,
- * delayed → flame.
+ *                     Apr 8      Apr 15      Apr 22      May 1
+ *   Submit → PO       ▒▒▒▒▒▒▒
+ *                     █████████████  +5d
+ *
+ *   PO → Ready                ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+ *                                  █████████  (ongoing)
+ *
+ *   Delivery                                      ▒  (point)
+ *                                                          █  +Nd
+ *
+ *   ─────────────────────────────────────────────────────────
+ *   Apr 8   Apr 15   Apr 22   May 1
+ *
+ * Each lifecycle phase = one row. Plan bar (ghost / striped) sits
+ * above the Reality bar (solid, colored by delay). On-time = green,
+ * delayed = flame, ahead = blue. A dotted "today" line marks the
+ * present moment when relevant.
+ *
+ * Same TimelineData input as the previous two-track timeline, so no
+ * data-layer change is required.
  */
 import { Brand } from "@/lib/brand";
 import type { TimelineData } from "@/lib/dashboard-data";
@@ -22,53 +32,152 @@ import type { TimelineData } from "@/lib/dashboard-data";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function asDate(iso: string): Date {
-  // Anchor at UTC noon to dodge timezone roll-back when displaying.
   return new Date(iso + "T12:00:00Z");
 }
-
 function daysBetween(a: Date, b: Date): number {
   return Math.round((a.getTime() - b.getTime()) / DAY_MS);
 }
-
 function addDays(d: Date, days: number): Date {
   return new Date(d.getTime() + days * DAY_MS);
 }
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
-const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH_ABBR = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 function fmtAxis(d: Date): string {
   return `${MONTH_ABBR[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
-/**
- * Estimate how wide a label needs (mirrors the Python heuristic
- * `len(s) * 6.5 + 14`). It only has to be roughly right — used purely
- * to decide which labels need to climb to a higher row.
- */
-function labelWidth(s: string): number {
-  return s.length * 6.5 + 14;
+// ── phase model ──────────────────────────────────────────────────
+
+interface Span {
+  start: Date;
+  end:   Date;
+  /** When true, the right end is "now" rather than a known completion
+   *  (renders as an open chevron + dashed cap). */
+  ongoing?: boolean;
+  /** Optional small label shown at the right end of the bar. */
+  badge?: string | null;
+}
+
+interface Phase {
+  label:     string;
+  plan:      Span | null;
+  reality:   Span | null;
+  /**
+   * Signed delay in days (positive = late). Drives the reality bar
+   * colour: > 0 → flame, < 0 → blue, 0 → green. Null = unknown
+   * (treated as green/neutral).
+   */
+  delayDays: number | null;
 }
 
 /**
- * For each tick, return the row offset that avoids overlap with earlier
- * ticks. 0 means "default row," 1 means "one row up/down," etc.
+ * Map TimelineData → Gantt rows. Each phase only renders when at
+ * least one of its plan / reality spans is computable. Skipping a
+ * phase is normal: pre-PO bets have no expectedPo, batches without
+ * an actual PO date can't fill phase 2, etc.
  */
-function staggerOffsets(xs: number[], labels: string[]): number[] {
-  const offsets: number[] = [];
-  for (let i = 0; i < xs.length; i++) {
-    let chosen = 0;
-    for (let step = 0; step < 4; step++) {
-      let collides = false;
-      for (let j = 0; j < i; j++) {
-        if (offsets[j] !== step) continue;
-        const gap = xs[i] - xs[j];
-        const needed = (labelWidth(labels[j]) + labelWidth(labels[i])) / 2;
-        if (gap < needed) { collides = true; break; }
-      }
-      if (!collides) { chosen = step; break; }
-    }
-    offsets.push(chosen);
+function computePhases(data: TimelineData): Phase[] {
+  const today = asDate(todayIso());
+  const phases: Phase[] = [];
+
+  // Phase 1 — Submit → PO. Only meaningful when we tracked an
+  // expected PO date OR captured an actual PO. Without either, the
+  // pre-PO phase collapses into Phase 2 below.
+  const hasPrePoPlan    = !!data.planExpectedPo;
+  const hasPrePoReality = !!data.realityActualPo;
+  if (hasPrePoPlan || hasPrePoReality) {
+    phases.push({
+      label: "Submit → PO",
+      plan: hasPrePoPlan ? {
+        start: asDate(data.planRequested),
+        end:   asDate(data.planExpectedPo!),
+      } : null,
+      reality: hasPrePoReality ? {
+        start: asDate(data.realityRequested),
+        end:   asDate(data.realityActualPo!),
+      } : {
+        // Plan exists but reality doesn't → still chasing the PO.
+        start:   asDate(data.realityRequested),
+        end:     today,
+        ongoing: true,
+      },
+      delayDays: data.poDelayDays ?? null,
+    });
   }
-  return offsets;
+
+  // Phase 2 — PO → Ready. Always rendered (every batch has a
+  // promised date). When there's no expectedPo, the Plan bar spans
+  // requested → promised (full plan duration).
+  const planStart  = data.planExpectedPo ? asDate(data.planExpectedPo) : asDate(data.planRequested);
+  const realStart  = data.realityActualPo ? asDate(data.realityActualPo) : asDate(data.realityRequested);
+  // Reality "end" for phase 2 = the latest non-Delivery completed
+  // action, or — when nothing's been done yet — today.
+  const lastActionDate = (data.realityActions ?? [])
+    .map((a) => asDate(a.date))
+    .reduce<Date | null>((acc, d) => acc == null || d > acc ? d : acc, null);
+  const phase2RealityEnd = lastActionDate ?? today;
+  const phase2Ongoing    = lastActionDate == null
+    || (data.realityDelivery == null);
+  phases.push({
+    label: "PO → Ready",
+    plan: {
+      start: planStart,
+      end:   asDate(data.planPromised),
+    },
+    reality: {
+      start:   realStart,
+      end:     phase2RealityEnd,
+      ongoing: phase2Ongoing,
+    },
+    delayDays: null, // no top-level metric for this phase
+  });
+
+  // Phase 3 — Delivery. Plan is a single point (the promised date).
+  // Reality is the closure / projection. Always rendered so the
+  // chart always shows the final outcome (or its absence).
+  const deliveryEnd = data.realityDelivery ? asDate(data.realityDelivery) : null;
+  phases.push({
+    label: "Delivery",
+    plan: {
+      start: asDate(data.planPromised),
+      end:   asDate(data.planPromised),
+    },
+    reality: deliveryEnd ? {
+      start: deliveryEnd,
+      end:   deliveryEnd,
+      badge: data.realityDeliveryLabel ?? null,
+    } : {
+      start:   today,
+      end:     today,
+      ongoing: true,
+      badge:   "Projected",
+    },
+    delayDays: data.deliveryDelayDays ?? null,
+  });
+
+  return phases;
+}
+
+// ── colour ───────────────────────────────────────────────────────
+
+function realityColor(delayDays: number | null): string {
+  if (delayDays == null) return Brand.GREEN;
+  if (delayDays > 0)     return Brand.ORANGE;
+  if (delayDays < 0)     return Brand.BLUE;
+  return Brand.GREEN;
+}
+
+function realityFill(delayDays: number | null): string {
+  if (delayDays == null) return Brand.GREEN_PALE;
+  if (delayDays > 0)     return Brand.ORANGE_PALE;
+  if (delayDays < 0)     return Brand.BLUE_PALE;
+  return Brand.GREEN_PALE;
 }
 
 // ── component ────────────────────────────────────────────────────
@@ -78,70 +187,16 @@ interface Props {
 }
 
 export default function TimelineSvg({ data }: Props) {
-  // ─── Plan track ──────────────────────────────────────────────
-  const plan: { date: Date; label: string }[] = [
-    { date: asDate(data.planRequested), label: "Submitted" },
-  ];
-  if (data.planExpectedPo) {
-    plan.push({ date: asDate(data.planExpectedPo), label: "PO Expected" });
-  }
-  plan.push({ date: asDate(data.planPromised), label: "Promised Availability Date" });
+  const phases = computePhases(data);
 
-  // ─── Reality track ───────────────────────────────────────────
-  // Each Reality tick can carry a `delayDays` value that's appended to
-  // the label as a "+Nd" / "−Nd" chip when nonzero.
-  const reality: { date: Date; label: string; delayDays?: number; tone?: "delay" | "ahead" }[] = [];
-
-  // Optional PO Issued tick — only rendered when there's a pre-tracking
-  // gap (we uploaded the PO after the dealer issued it).
-  if (data.poIssuedDate && data.preTrackingGapDays > 0) {
-    reality.push({
-      date: asDate(data.poIssuedDate),
-      label: `PO Issued (gap +${data.preTrackingGapDays}d)`,
-      delayDays: data.preTrackingGapDays,
-      tone: "delay",
-    });
+  // Date scale — covers every plan + reality span plus today, so an
+  // ongoing reality bar always has somewhere to extend to.
+  const today = asDate(todayIso());
+  const allDates: Date[] = [today];
+  for (const p of phases) {
+    if (p.plan)    { allDates.push(p.plan.start,    p.plan.end); }
+    if (p.reality) { allDates.push(p.reality.start, p.reality.end); }
   }
-  reality.push({ date: asDate(data.realityRequested), label: "Submitted" });
-  if (data.realityActualPo && data.realityActualPo !== data.poIssuedDate) {
-    reality.push({ date: asDate(data.realityActualPo), label: "PO Received" });
-  }
-  // Every completed action becomes a Reality tick (excluding "Delivery").
-  // Delay chip ("+Nd" or "−Nd") appended when the action's actual completion
-  // missed (or beat) its expectedDate.
-  for (const a of data.realityActions ?? []) {
-    const label = a.delayDays === 0
-      ? a.label
-      : `${a.label} ${a.delayDays > 0 ? `+${a.delayDays}d` : `${a.delayDays}d`}`;
-    reality.push({
-      date: asDate(a.date),
-      label,
-      delayDays: a.delayDays,
-      tone: a.delayDays > 0 ? "delay" : a.delayDays < 0 ? "ahead" : undefined,
-    });
-  }
-  if (data.realityDelivery && data.realityDeliveryLabel) {
-    // For "Projected" labels, append the shift relative to the promised
-    // availability so the operator sees the auto-shift (e.g. VIN delay
-    // pushed projected forward).
-    let label: string = data.realityDeliveryLabel;
-    if (data.realityDeliveryLabel === "Projected" && (data.deliveryDelayDays ?? 0) !== 0) {
-      const d = data.deliveryDelayDays!;
-      label = `Projected ${d > 0 ? `+${d}d` : `${d}d`}`;
-    }
-    reality.push({ date: asDate(data.realityDelivery), label });
-  }
-  // Sort chronologically so the stagger algorithm sees them in left-to-right
-  // order — required for the collision-avoidance heuristic below.
-  reality.sort((a, b) => a.date.getTime() - b.date.getTime());
-
-  // ─── Reality colour from worst delay ─────────────────────────
-  const worst = Math.max(data.poDelayDays ?? 0, data.deliveryDelayDays ?? 0);
-  const realityColor =
-    worst > 0 ? Brand.ORANGE : worst < 0 ? Brand.BLUE : Brand.GREEN;
-
-  // ─── Date scaling ────────────────────────────────────────────
-  const allDates = [...plan, ...reality].map((p) => p.date);
   const minD = new Date(Math.min(...allDates.map((d) => d.getTime())));
   const maxD = new Date(Math.max(...allDates.map((d) => d.getTime())));
   const spanDays = Math.max(daysBetween(maxD, minD), 1);
@@ -150,206 +205,266 @@ export default function TimelineSvg({ data }: Props) {
   const chartMax = addDays(maxD, pad);
   const chartSpan = daysBetween(chartMax, chartMin);
 
-  // ─── Layout dimensions ───────────────────────────────────────
-  const W = 1100;
-  const M_L = 90;
-  const M_R = 50;
-  const Y_REALITY = 75;
-  const Y_PLAN = 165;
+  // Layout
+  const W      = 1100;
+  const M_L    = 150;   // label column on the left
+  const M_R    = 60;
   const PLOT_W = W - M_L - M_R;
+
+  const ROW_H        = 56;  // total per phase
+  const PLAN_BAR_H   = 14;
+  const REAL_BAR_H   = 18;
+  const BAR_GAP      = 4;
+  const HEADER_H     = 24;  // legend strip
+  const AXIS_H       = 36;
 
   const x = (d: Date) =>
     M_L + (daysBetween(d, chartMin) / chartSpan) * PLOT_W;
 
-  // ─── Stagger offsets ─────────────────────────────────────────
-  const rx = reality.map((p) => x(p.date));
-  const px = plan.map((p) => x(p.date));
-  const realityOffsets = staggerOffsets(rx, reality.map((p) => p.label));
-  const planOffsets    = staggerOffsets(px, plan.map((p) => p.label));
-  const LABEL_ROW_GAP = 14;
-  const maxPlanOff    = Math.max(0, ...planOffsets);
-  const TICK = 9;
+  const H = HEADER_H + phases.length * ROW_H + AXIS_H;
 
-  const nBrackets =
-    ((data.poDelayDays ?? 0) > 0 ? 1 : 0) +
-    ((data.deliveryDelayDays ?? 0) > 0 ? 1 : 0);
+  // Y of each row
+  const rowTop = (i: number) => HEADER_H + i * ROW_H + 8;
 
-  const bracketStartY =
-    Y_PLAN + TICK + 14 + maxPlanOff * LABEL_ROW_GAP + 24;
-  const BRACKET_DROP = 26;
-  const BRACKET_PILL_H = 28;
-  const BRACKET_GAP = BRACKET_DROP + BRACKET_PILL_H + 16; // 70
-
-  let H: number;
-  if (nBrackets > 0) {
-    const lastBracketBottom =
-      bracketStartY + (nBrackets - 1) * BRACKET_GAP + BRACKET_DROP + BRACKET_PILL_H;
-    H = lastBracketBottom + 36; // axis space
-  } else {
-    H = Y_PLAN + TICK + 14 + maxPlanOff * LABEL_ROW_GAP + 12 + 36;
-  }
-
-  // ─── Bracket renderer ────────────────────────────────────────
-  function Bracket({ x1, x2, text, yTop }: { x1: number; x2: number; text: string; yTop: number }) {
-    const midpoint = (x1 + x2) / 2;
-    const yH = yTop + BRACKET_DROP;
-    return (
-      <g>
-        <path
-          d={`M ${x1} ${yTop} L ${x1} ${yH} L ${x2} ${yH} L ${x2} ${yTop}`}
-          stroke={Brand.ORANGE}
-          strokeWidth={2}
-          fill="none"
-          strokeLinejoin="round"
-        />
-        <rect
-          x={midpoint - 70}
-          y={yH + 4}
-          width={140}
-          height={22}
-          rx={11}
-          fill={Brand.ORANGE_PALE}
-        />
-        <text
-          x={midpoint}
-          y={yH + 19}
-          textAnchor="middle"
-          fontSize={12}
-          fontWeight={600}
-          fill={Brand.ORANGE_DARK}
-        >
-          {text}
-        </text>
-      </g>
-    );
-  }
-
-  // Bracket positioning
-  let curBracketY = bracketStartY;
-  const brackets: { x1: number; x2: number; text: string; yTop: number }[] = [];
-  if ((data.poDelayDays ?? 0) > 0 && data.planExpectedPo && data.realityActualPo) {
-    brackets.push({
-      x1: x(asDate(data.planExpectedPo)),
-      x2: x(asDate(data.realityActualPo)),
-      text: `PO delay  ·  +${data.poDelayDays}d`,
-      yTop: curBracketY,
-    });
-    curBracketY += BRACKET_GAP;
-  }
-  if ((data.deliveryDelayDays ?? 0) > 0 && data.realityDelivery) {
-    brackets.push({
-      x1: x(asDate(data.planPromised)),
-      x2: x(asDate(data.realityDelivery)),
-      text: `Delivery delay  ·  +${data.deliveryDelayDays}d`,
-      yTop: curBracketY,
-    });
-  }
-
-  // ─── Date axis ───────────────────────────────────────────────
-  const AXIS_Y = H - 30;
+  // Date axis ticks
   const nTicks = Math.min(7, Math.max(3, Math.floor(spanDays / 7) + 2));
   const axisTicks: { x: number; label: string }[] = [];
   for (let i = 0; i < nTicks; i++) {
     const d = addDays(chartMin, Math.round((i * chartSpan) / (nTicks - 1)));
     axisTicks.push({ x: x(d), label: fmtAxis(d) });
   }
+  const axisY = HEADER_H + phases.length * ROW_H + 16;
+
+  // Render a Plan or Reality bar inside a row. Plan = striped/ghost,
+  // Reality = solid colour. Point-spans (start == end) render as a
+  // narrow diamond so they're still visible.
+  function Bar({
+    span, y, h, fill, stroke, striped, label,
+  }: {
+    span: Span;
+    y: number;
+    h: number;
+    fill:   string;
+    stroke: string;
+    striped?: boolean;
+    label?:  string | null;
+  }) {
+    const x1 = x(span.start);
+    const x2 = x(span.end);
+    const width = Math.max(2, x2 - x1);
+    const isPoint = Math.abs(x2 - x1) < 2;
+    const dur = daysBetween(span.end, span.start);
+
+    if (isPoint) {
+      // Diamond marker for point spans (e.g. Delivery promised date).
+      const cx = x1, cy = y + h / 2;
+      return (
+        <g>
+          <polygon
+            points={`${cx},${cy - 6} ${cx + 6},${cy} ${cx},${cy + 6} ${cx - 6},${cy}`}
+            fill={fill}
+            stroke={stroke}
+            strokeWidth={1.5}
+          >
+            <title>{`${span.start.toISOString().slice(0, 10)}`}</title>
+          </polygon>
+          {label && (
+            <text
+              x={cx + 10} y={cy + 4}
+              fontSize={11} fontWeight={600} fill={stroke}
+            >{label}</text>
+          )}
+        </g>
+      );
+    }
+
+    return (
+      <g>
+        <rect
+          x={x1} y={y}
+          width={width} height={h}
+          rx={4}
+          fill={fill}
+          stroke={stroke}
+          strokeWidth={1.5}
+          strokeDasharray={span.ongoing ? "4 3" : undefined}
+        >
+          <title>
+            {`${span.start.toISOString().slice(0, 10)} → ${span.end.toISOString().slice(0, 10)} · ${dur}d`}
+          </title>
+        </rect>
+        {striped && (
+          // Diagonal stripe overlay to differentiate Plan from Reality
+          // without colour. Pattern is inline so the whole SVG remains
+          // self-contained / server-renderable.
+          <rect
+            x={x1} y={y}
+            width={width} height={h}
+            rx={4}
+            fill="url(#planStripes)"
+            pointerEvents="none"
+          />
+        )}
+        {span.ongoing && (
+          // Chevron at the right end to signal "still in progress".
+          <polygon
+            points={`${x2},${y} ${x2 + 8},${y + h / 2} ${x2},${y + h}`}
+            fill={stroke}
+            opacity={0.65}
+          />
+        )}
+        {label && (
+          <text
+            x={x2 + (span.ongoing ? 14 : 6)}
+            y={y + h / 2 + 4}
+            fontSize={11}
+            fontWeight={600}
+            fill={stroke}
+          >{label}</text>
+        )}
+      </g>
+    );
+  }
+
+  const todayX = x(today);
+  const todayInChart = today >= chartMin && today <= chartMax;
 
   return (
-    <div className="overflow-x-auto" role="img" aria-label={`Plan vs Reality timeline for ${data.batchCode}`}>
+    <div className="overflow-x-auto" role="img" aria-label={`Plan vs Reality Gantt for ${data.batchCode}`}>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         width="100%"
         style={{ fontFamily: "Alexandria, sans-serif", display: "block" }}
       >
-        {/* Track labels */}
-        <text
-          x={M_L - 14} y={Y_REALITY + 5} textAnchor="end"
-          fontSize={14} fontWeight={700} fill={Brand.MIDNIGHT}
-        >Reality</text>
-        <text
-          x={M_L - 14} y={Y_PLAN + 5} textAnchor="end"
-          fontSize={14} fontWeight={700} fill={Brand.MIDNIGHT}
-        >Plan</text>
+        {/* Pattern defs — diagonal stripes for the Plan bars. */}
+        <defs>
+          <pattern
+            id="planStripes"
+            patternUnits="userSpaceOnUse"
+            width={6} height={6}
+            patternTransform="rotate(45)"
+          >
+            <line x1={0} y1={0} x2={0} y2={6} stroke={Brand.MIDNIGHT} strokeWidth={1.2} opacity={0.35} />
+          </pattern>
+        </defs>
 
-        {/* Reality track line */}
-        {rx.length > 1 && (
-          <line
-            x1={rx[0]} x2={rx[rx.length - 1]}
-            y1={Y_REALITY} y2={Y_REALITY}
-            stroke={realityColor} strokeWidth={3} strokeLinecap="round"
-          />
+        {/* Header legend */}
+        <g transform={`translate(${M_L}, 4)`}>
+          <rect x={0} y={4} width={14} height={10} rx={2}
+                fill={Brand.MIDNIGHT_PALE ?? "#E5E8EE"}
+                stroke={Brand.MIDNIGHT} strokeWidth={1} />
+          <rect x={0} y={4} width={14} height={10} rx={2}
+                fill="url(#planStripes)" pointerEvents="none" />
+          <text x={20} y={13} fontSize={11} fill={Brand.GREY_600}>Plan</text>
+          <rect x={64} y={4} width={14} height={10} rx={2}
+                fill={Brand.GREEN_PALE} stroke={Brand.GREEN} strokeWidth={1} />
+          <text x={84} y={13} fontSize={11} fill={Brand.GREY_600}>Reality (on time)</text>
+          <rect x={196} y={4} width={14} height={10} rx={2}
+                fill={Brand.ORANGE_PALE} stroke={Brand.ORANGE} strokeWidth={1} />
+          <text x={216} y={13} fontSize={11} fill={Brand.GREY_600}>Delayed</text>
+          <rect x={272} y={4} width={14} height={10} rx={2}
+                fill={Brand.BLUE_PALE} stroke={Brand.BLUE} strokeWidth={1} />
+          <text x={292} y={13} fontSize={11} fill={Brand.GREY_600}>Ahead</text>
+        </g>
+
+        {/* Today vertical guide */}
+        {todayInChart && (
+          <g>
+            <line
+              x1={todayX} x2={todayX}
+              y1={HEADER_H} y2={axisY}
+              stroke={Brand.ORANGE}
+              strokeWidth={1}
+              strokeDasharray="3 3"
+              opacity={0.8}
+            />
+            <text
+              x={todayX} y={HEADER_H - 4}
+              textAnchor="middle"
+              fontSize={10}
+              fontWeight={600}
+              fill={Brand.ORANGE_DARK}
+            >today</text>
+          </g>
         )}
 
-        {/* Plan track line */}
-        <line
-          x1={px[0]} x2={px[px.length - 1]}
-          y1={Y_PLAN} y2={Y_PLAN}
-          stroke={Brand.MIDNIGHT} strokeWidth={3} strokeLinecap="round"
-        />
+        {/* Rows */}
+        {phases.map((p, i) => {
+          const top = rowTop(i);
+          const planY    = top;
+          const realityY = top + PLAN_BAR_H + BAR_GAP;
+          const stroke   = realityColor(p.delayDays);
+          const fill     = realityFill(p.delayDays);
+          const delayBadge = p.reality && p.delayDays != null && p.delayDays !== 0
+            ? (p.delayDays > 0 ? `+${p.delayDays}d` : `${p.delayDays}d`)
+            : (p.reality?.badge ?? null);
 
-        {/* Reality ticks + labels (above the line) */}
-        {reality.map((m, i) => {
-          const xx = rx[i];
-          const off = realityOffsets[i];
-          const yLabel = Y_REALITY - TICK - 8 - off * LABEL_ROW_GAP;
           return (
-            <g key={`r-${i}`}>
-              <line
-                x1={xx} x2={xx}
-                y1={Y_REALITY - TICK} y2={Y_REALITY + TICK}
-                stroke={realityColor} strokeWidth={2} strokeLinecap="round"
-              >
-                <title>{`${m.label} · ${m.date.toISOString().slice(0, 10)}`}</title>
-              </line>
+            <g key={i}>
+              {/* Row label */}
               <text
-                x={xx} y={yLabel} textAnchor="middle"
-                fontSize={11} fontWeight={500} fill={realityColor}
-              >{m.label}</text>
+                x={M_L - 14} y={top + (PLAN_BAR_H + BAR_GAP + REAL_BAR_H) / 2 + 4}
+                textAnchor="end"
+                fontSize={13}
+                fontWeight={700}
+                fill={Brand.MIDNIGHT}
+              >{p.label}</text>
+
+              {/* Faint row separator under each row */}
+              <line
+                x1={M_L} x2={W - M_R}
+                y1={top + PLAN_BAR_H + BAR_GAP + REAL_BAR_H + 10}
+                y2={top + PLAN_BAR_H + BAR_GAP + REAL_BAR_H + 10}
+                stroke={Brand.GREY_300}
+                strokeWidth={1}
+                opacity={0.4}
+              />
+
+              {/* Plan bar */}
+              {p.plan && (
+                <Bar
+                  span={p.plan}
+                  y={planY}
+                  h={PLAN_BAR_H}
+                  fill={Brand.MIDNIGHT_PALE ?? "#E5E8EE"}
+                  stroke={Brand.MIDNIGHT}
+                  striped
+                />
+              )}
+
+              {/* Reality bar */}
+              {p.reality && (
+                <Bar
+                  span={p.reality}
+                  y={realityY}
+                  h={REAL_BAR_H}
+                  fill={fill}
+                  stroke={stroke}
+                  label={delayBadge}
+                />
+              )}
             </g>
           );
         })}
-
-        {/* Plan ticks + labels (below the line) */}
-        {plan.map((m, i) => {
-          const xx = px[i];
-          const off = planOffsets[i];
-          const yLabel = Y_PLAN + TICK + 14 + off * LABEL_ROW_GAP;
-          return (
-            <g key={`p-${i}`}>
-              <line
-                x1={xx} x2={xx}
-                y1={Y_PLAN - TICK} y2={Y_PLAN + TICK}
-                stroke={Brand.MIDNIGHT} strokeWidth={2} strokeLinecap="round"
-              >
-                <title>{`${m.label} · ${m.date.toISOString().slice(0, 10)}`}</title>
-              </line>
-              <text
-                x={xx} y={yLabel} textAnchor="middle"
-                fontSize={11} fontWeight={500} fill={Brand.GREY_600}
-              >{m.label}</text>
-            </g>
-          );
-        })}
-
-        {/* Delay brackets */}
-        {brackets.map((b, i) => (
-          <Bracket key={`bk-${i}`} {...b} />
-        ))}
 
         {/* Date axis */}
         <line
-          x1={M_L} x2={W - M_R} y1={AXIS_Y} y2={AXIS_Y}
-          stroke={Brand.GREY_300} strokeWidth={1}
+          x1={M_L} x2={W - M_R}
+          y1={axisY} y2={axisY}
+          stroke={Brand.GREY_300}
+          strokeWidth={1}
         />
         {axisTicks.map((t, i) => (
           <g key={`a-${i}`}>
             <line
-              x1={t.x} x2={t.x} y1={AXIS_Y} y2={AXIS_Y + 4}
+              x1={t.x} x2={t.x} y1={axisY} y2={axisY + 4}
               stroke={Brand.GREY_400}
             />
             <text
-              x={t.x} y={AXIS_Y + 18} textAnchor="middle"
-              fontSize={10} fill={Brand.GREY_500}
+              x={t.x} y={axisY + 18}
+              textAnchor="middle"
+              fontSize={10}
+              fill={Brand.GREY_500}
             >{t.label}</text>
           </g>
         ))}
