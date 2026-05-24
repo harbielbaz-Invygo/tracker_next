@@ -2703,10 +2703,19 @@ function ActionChip({
   // doubles the chip's height by lifting text from text-[0.7rem] to
   // text-sm and padding from py-0.5 to py-1.5; everywhere else stays
   // pixel-identical to the historical chip.
+  //
+  // Lg also stretches the chip to fill its container (so every chip
+  // in a column reaches the same right edge), while sm keeps its
+  // historical inline-flex shrink-to-content behaviour so non-flow
+  // call sites stay pixel-identical.
   const isLg = size === "lg";
+  const outerFlexCls   = isLg ? "flex w-full" : "inline-flex";
+  const shellFlexCls   = isLg ? "flex w-full" : "inline-flex";
   const shellTextCls   = isLg ? "text-sm"             : "text-[0.7rem]";
   const labelPadCls    = isLg ? "px-3 py-1.5 gap-1.5" : "px-2 py-0.5 gap-1";
-  const labelMaxWCls   = isLg ? "max-w-[18rem]"       : "max-w-[10rem]";
+  // Drop the small-variant label truncation cap on lg so it fills
+  // its column even when the label is short.
+  const labelMaxWCls   = isLg ? ""                    : "max-w-[10rem]";
   const vinsBadgeCls   = isLg ? "text-xs"             : "text-[0.65rem]";
   const dateBtnCls     = isLg ? "px-2.5 text-sm"      : "px-1.5 text-[0.7rem]";
 
@@ -2715,11 +2724,12 @@ function ActionChip({
   // visually. Two separate <button>s under the shell (rather than a
   // nested button) keeps the HTML valid.
   return (
-    <span className="inline-flex flex-col items-stretch">
+    <span className={cn(outerFlexCls, "flex-col items-stretch")}>
       <span
         className={cn(
           shellTextCls,
-          "rounded border transition-colors inline-flex items-stretch overflow-hidden",
+          shellFlexCls,
+          "rounded border transition-colors items-stretch overflow-hidden",
           toneCls,
           busy && "opacity-50 cursor-wait",
         )}
@@ -2741,7 +2751,7 @@ function ActionChip({
           <span aria-hidden>{icon}</span>
           <span className={cn("font-medium truncate", labelMaxWCls)}>{label}</span>
           {vinsBadge && (
-            <span className={cn("tabular-nums ml-0.5 text-ink-500", vinsBadgeCls)}>
+            <span className={cn("tabular-nums ml-auto text-ink-500", vinsBadgeCls)}>
               {vinsBadge}
             </span>
           )}
@@ -4258,21 +4268,32 @@ function ExtPhaseChipWithFlow({
   // Don't surface contact / escalate on synthetic rows.
   if (action.id < 0) return null;
 
+  // Always render the buttons slot, even when the chip is done /
+  // skipped, so every row's right-edge controls land at the same x
+  // position. Done rows just get empty placeholders matching the
+  // button footprint so the column stays aligned.
+  const buttonW = "min-w-[2.25rem]"; // matches text-sm px-2 py-1 button width
+
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <ActionChip
-          action={action}
-          busy={busy}
-          onChangeStatus={onChangeStatus}
-          vinsBadge={vinsBadge}
-          onClickOverride={onClickOverride}
-          onEditDate={onEditDate}
-          size="lg"
-        />
-        {/* Inline metric badges — same shape as /action-center-flow.
-            Bumped from text-[0.6rem] → text-xs + thicker padding so
-            the badges read at the same scale as the lg chip. */}
+    // Three-column grid: chip stretches (1fr), metric badges sit
+    // right-aligned in the middle (fixed-min so the column line is
+    // stable across rows), action buttons hug the right edge (auto).
+    // Every row obeys the same grid so every visual column lines up
+    // — no more zigzag from variable-width chips.
+    <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+      <ActionChip
+        action={action}
+        busy={busy}
+        onChangeStatus={onChangeStatus}
+        vinsBadge={vinsBadge}
+        onClickOverride={onClickOverride}
+        onEditDate={onEditDate}
+        size="lg"
+      />
+
+      {/* Metric badges — right-aligned within a fixed-min cell so the
+          inner items line up regardless of which badges are present. */}
+      <div className="flex items-center gap-1.5 justify-end min-w-[10rem]">
         {augmented.contactCount > 0 && (
           <span
             className="text-xs tabular-nums text-ink-600 bg-ink-50 border border-ink-200 rounded px-1.5 py-0.5 leading-tight"
@@ -4305,16 +4326,22 @@ function ExtPhaseChipWithFlow({
             ⏱ {augmented.daysToConfirm}d
           </span>
         )}
-        {/* 📞 Contact + ↗ Escalate — only when the chip is still open.
-            Done / skipped chips don't need outreach. */}
-        {!isDone && (
+      </div>
+
+      {/* Right-edge action buttons — always rendered so every row's
+          right column aligns. Done/skipped rows get invisible spacers
+          of the same dimensions to keep the column straight. */}
+      <div className="flex items-center gap-1 justify-end">
+        {!isDone ? (
           <>
             <button
               type="button"
               onClick={() => onLogContact(action.id)}
               disabled={anyBusy}
               title="Log a touchpoint (default: outbound, +1d follow-up)"
-              className="text-sm px-2 py-1 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 bg-white leading-tight"
+              className={cn(buttonW,
+                "text-sm px-2 py-1 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 bg-white leading-tight text-center",
+              )}
             >
               📞
             </button>
@@ -4323,10 +4350,19 @@ function ExtPhaseChipWithFlow({
               onClick={() => onEscalate(action.id)}
               disabled={anyBusy}
               title="Log an internal escalation (+2d follow-up)"
-              className="text-sm px-2 py-1 rounded border border-flame text-flame-dark hover:bg-flame-pale bg-white leading-tight"
+              className={cn(buttonW,
+                "text-sm px-2 py-1 rounded border border-flame text-flame-dark hover:bg-flame-pale bg-white leading-tight text-center",
+              )}
             >
               ↗
             </button>
+          </>
+        ) : (
+          // Invisible spacers so done rows occupy the same right-edge
+          // width as open rows. aria-hidden so screen readers skip them.
+          <>
+            <span className={cn(buttonW, "text-sm px-2 py-1 leading-tight invisible")} aria-hidden>📞</span>
+            <span className={cn(buttonW, "text-sm px-2 py-1 leading-tight invisible")} aria-hidden>↗</span>
           </>
         )}
       </div>
