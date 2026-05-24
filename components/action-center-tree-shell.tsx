@@ -1392,7 +1392,7 @@ function MineView({
             lastStep = {
               label:       winner.doneLabel || winner.waitingLabel,
               completedAt: winner.completedAt
-                ? winner.completedAt.slice(0, 10)
+                ? localIsoDate(winner.completedAt)
                 : null,
             };
           }
@@ -2028,7 +2028,7 @@ function PoHeaderTimeline({ po }: { po: PoNode }) {
     .at(0) ?? null;
 
   const appListedAt = po.appListingSummary.completedAt
-    ? po.appListingSummary.completedAt.slice(0, 10)
+    ? localIsoDate(po.appListingSummary.completedAt)
     : null;
 
   // Op availability = earliest projected delivery across the PO's
@@ -3089,7 +3089,7 @@ function ActionChip({
     label,
     action.expectedDate ? `due ${action.expectedDate}` : null,
     action.status === "done" && action.completedAt
-      ? `✓ done ${action.completedAt.slice(0, 10)}`
+      ? `✓ done ${localIsoDate(action.completedAt)}`
       : null,
     action.stakeholderName ? `@${action.stakeholderName}` : null,
     action.departmentName,
@@ -3248,6 +3248,23 @@ function isoToDatetimeLocal(iso: string): string {
 }
 function datetimeLocalNow(): string {
   return isoToDatetimeLocal(new Date().toISOString());
+}
+
+/**
+ * Local-time yyyy-mm-dd extractor — replacement for naive
+ * `iso.slice(0, 10)` at every UI display site. The naive slice reads
+ * the UTC date from the stored ISO, which mis-aligns by a day for
+ * picks near midnight in any non-UTC timezone (e.g. Riyadh = UTC+3
+ * means a 2 AM local pick stores as 23:00 UTC the previous day, and
+ * the slice would show yesterday's date in the tooltip). Reading via
+ * Date accessors keeps the displayed value in the same day the
+ * operator picked locally.
+ */
+function localIsoDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /**
@@ -5160,7 +5177,7 @@ function ActionCard({
             future obligation, no need to also parse the colour. */}
         {action.status === "done" && action.completedAt && (
           <p className="text-[0.7rem] text-green-dark tabular-nums">
-            ✓ {action.completedAt.slice(0, 10)}
+            ✓ {localIsoDate(action.completedAt)}
           </p>
         )}
         {action.status !== "done" && action.status !== "skipped" && action.expectedDate && (
