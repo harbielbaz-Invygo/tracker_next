@@ -24,6 +24,10 @@ declare module "next-auth" {
 
 declare module "next-auth/jwt" {
   interface JWT {
+    /** Numeric user id (as string) — mirrors `users.id`. Persisted
+     *  through the jwt callback so server gates can resolve the
+     *  signed-in account without a DB lookup. */
+    userId?: string;
     role?: Role;
     username?: string;
   }

@@ -80,8 +80,13 @@ export const authConfig = {
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        // Persist role + username on the token so middleware can read them
-        // without hitting the DB.
+        // Persist id + role + username on the token so middleware
+        // (and downstream API gates) can read them without hitting
+        // the DB. NextAuth puts `user.id` on `token.sub` by default,
+        // but reading from there is fragile (some providers don't
+        // set it); persist it explicitly so server-side code can
+        // resolve "who is logged in" deterministically.
+        if (user.id) token.userId = user.id;
         token.role = user.role;
         token.username = user.username;
       }
@@ -93,6 +98,11 @@ export const authConfig = {
         // but the Edge build of next-auth's types resolves these as `{}`
         // before our augmentation kicks in. Cast to keep the runtime
         // assignment intact without losing the augmentation in consumers.
+        // `id` falls back to `token.sub` (NextAuth's default user-id
+        // location) when the explicit `token.userId` isn't set — covers
+        // older JWTs that pre-date this callback change.
+        const id = (token as { userId?: string }).userId ?? token.sub;
+        if (id) session.user.id = id;
         if (token.role)     session.user.role     = token.role     as Role;
         if (token.username) session.user.username = token.username as string;
       }
