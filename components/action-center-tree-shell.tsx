@@ -3303,7 +3303,11 @@ function BatchRow({
           unreadable. Inline forms (shift/cancel/vins/deliver/date)
           take over the full width below when active. */}
       {!formActive && (
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_min(280px,42%)] min-h-[10rem]">
+        // Right column doubled from min(280px,42%) → min(560px,55%) so
+        // the External-Phase chip + flow-controls row has room to
+        // breathe — the satellite metrics (📞 N · ↗ N · ⏱ Nd) plus the
+        // bigger lg chip were wrapping onto two lines in the old width.
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_min(560px,55%)] min-h-[10rem]">
           {/* LEFT — identity + meta. No colors line (intentionally
               dropped from this view — the modal at intake captures it
               and the dashboard surfaces it; here it crowded the row). */}
