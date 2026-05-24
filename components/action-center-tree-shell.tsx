@@ -20,8 +20,9 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import type {
   ActionCenterTree, PoNode, WaveNode, BatchNode, ScopedActionDetail,
-  DepartmentCatalog,
+  DepartmentCatalog, ActionTouchpoint,
 } from "@/lib/action-center-tree-data";
+import { augmentActions, type Touchpoint } from "@/lib/action-flow-shared";
 
 /**
  * Shell context — gives every nested card access to the reassign
@@ -33,6 +34,13 @@ interface ShellCtx {
   onBulkSetAppListed: (batchIds: number[], setListed: boolean) => Promise<void>;
   busyBatchId: number | null;
   departments: DepartmentCatalog[];
+  // Touchpoint flow — used only by the External-Phase chips on each
+  // batch row to surface metrics (📞 N · ↗ N · ⏱ Nd) and to fire
+  // Log-contact / Escalate from a satellite row beneath the chip.
+  touchpointsByAction: Record<string, ActionTouchpoint[]>;
+  onLogContact:       (actionId: number) => Promise<void>;
+  onEscalate:         (actionId: number) => Promise<void>;
+  busyTouchpointActionId: number | null;
 }
 const ShellContext = createContext<ShellCtx | null>(null);
 function useShell(): ShellCtx {
@@ -47,6 +55,14 @@ type Status = ScopedActionDetail["status"];
 /** Today's date in ISO yyyy-mm-dd — used for the overdue check. */
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+/** Today + N days, ISO yyyy-mm-dd. Used as the default next-follow-up
+ *  date for Log-contact / Escalate touchpoints. */
+function addDaysIso(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
 }
 /**
  * "Overdue" = expectedDate in the past AND the action isn't settled.
@@ -158,12 +174,12 @@ export default function ActionCenterTreeShell({ tree }: Props) {
    * keeps focus, prevents accidental edits to other batches.
    */
   const [inlineForm, setInlineForm] = useState<
-    | { batchId: number; kind: "shift" | "cancel" | "vins" | "deliver" | "date"; actionId?: number }
+    | { batchId: number; kind: "shift" | "cancel" | "vins" | "confirmation" | "deliver" | "date"; actionId?: number }
     | null
   >(null);
   function openInlineForm(
     batchId: number,
-    kind: "shift" | "cancel" | "vins" | "deliver" | "date",
+    kind: "shift" | "cancel" | "vins" | "confirmation" | "deliver" | "date",
     actionId?: number,
   ) {
     setInlineForm({ batchId, kind, actionId });
@@ -414,12 +430,70 @@ export default function ActionCenterTreeShell({ tree }: Props) {
     if (selectedPo && !selectedPo.isPrePo && view === "prepo") setView("internal");
   }, [selectedPo, view]);
 
+  // Touchpoint mutations — wired into ShellContext so the per-chip
+  // satellite row in BatchRow can fire them without prop-drilling.
+  const [busyTouchpointActionId, setBusyTouchpointActionId] = useState<number | null>(null);
+
+  async function logContactMutation(actionId: number): Promise<void> {
+    setBusyTouchpointActionId(actionId);
+    setMutationError(null);
+    try {
+      const res = await fetch("/api/action-touchpoint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actionId,
+          channel:        "other",
+          direction:      "outbound",
+          outcome:        "no_response",
+          nextFollowupAt: addDaysIso(1),
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setMutationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyTouchpointActionId(null);
+    }
+  }
+
+  async function escalateMutation(actionId: number): Promise<void> {
+    setBusyTouchpointActionId(actionId);
+    setMutationError(null);
+    try {
+      const res = await fetch("/api/action-touchpoint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actionId,
+          channel:        "other",
+          direction:      "internal",
+          outcome:        "other",
+          escalated:      true,
+          note:           "Escalated",
+          nextFollowupAt: addDaysIso(2),
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setMutationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyTouchpointActionId(null);
+    }
+  }
+
   return (
     <ShellContext.Provider value={{
       onReassign: reassignStakeholder,
       onBulkSetAppListed: bulkSetAppListed,
       busyBatchId,
       departments: tree.departments,
+      touchpointsByAction:    tree.touchpointsByAction,
+      onLogContact:           logContactMutation,
+      onEscalate:             escalateMutation,
+      busyTouchpointActionId,
     }}>
     <div className="relative grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]">
       {/* Floating help button — bottom-right of the grid container. */}
@@ -551,8 +625,8 @@ interface BatchOpProps {
 interface UiStateProps {
   expandedWaveIds: Set<number>;
   onToggleWave: (id: number) => void;
-  inlineForm: { batchId: number; kind: "shift" | "cancel" | "vins" | "deliver" | "date"; actionId?: number } | null;
-  onOpenInlineForm:  (batchId: number, kind: "shift" | "cancel" | "vins" | "deliver" | "date", actionId?: number) => void;
+  inlineForm: { batchId: number; kind: "shift" | "cancel" | "vins" | "confirmation" | "deliver" | "date"; actionId?: number } | null;
+  onOpenInlineForm:  (batchId: number, kind: "shift" | "cancel" | "vins" | "confirmation" | "deliver" | "date", actionId?: number) => void;
   onCloseInlineForm: () => void;
 }
 
@@ -3127,6 +3201,7 @@ function BatchRow({
   const showShiftForm   = inlineForm?.batchId === b.id && inlineForm.kind === "shift";
   const showCancelForm  = inlineForm?.batchId === b.id && inlineForm.kind === "cancel";
   const showVinsForm    = inlineForm?.batchId === b.id && inlineForm.kind === "vins";
+  const showConfirmationForm = inlineForm?.batchId === b.id && inlineForm.kind === "confirmation";
   const showDeliverForm = inlineForm?.batchId === b.id && inlineForm.kind === "deliver";
   const showDateForm    = inlineForm?.batchId === b.id && inlineForm.kind === "date";
   const dateFormActionId = showDateForm ? inlineForm?.actionId ?? null : null;
@@ -3150,7 +3225,8 @@ function BatchRow({
     );
   })();
 
-  const formActive = showShiftForm || showCancelForm || showVinsForm || showDeliverForm || showDateForm;
+  const formActive = showShiftForm || showCancelForm || showVinsForm
+    || showConfirmationForm || showDeliverForm || showDateForm;
 
   // Remainder batches carry a `-R{n}` suffix that the close endpoint
   // assigns when ops splits off the undelivered cars from a partial
@@ -3334,30 +3410,35 @@ function BatchRow({
               </div>
 
               {externalActions.length > 0 && (
-                <div className="flex flex-col gap-1 pt-1 border-t border-ink-200">
+                <div className="flex flex-col gap-1.5 pt-1 border-t border-ink-200">
                   {externalActions
                     .slice()
                     .sort((a, b) => a.sortOrder - b.sortOrder)
                     .map((a) => {
                       const isVin = /vin/i.test(a.actionTypeName);
                       const isBatchScopeVin = isVin && batchScopeExternal.some((x) => x.id === a.id);
+                      const isConfirmation = /confirmation/i.test(a.actionTypeName);
+                      const isBatchScopeConfirmation = isConfirmation
+                        && batchScopeExternal.some((x) => x.id === a.id);
                       return (
-                        <ActionChip
+                        <ExtPhaseChipWithFlow
                           key={a.id}
                           action={a}
+                          batch={b}
                           busy={busyActionId === a.id}
                           onChangeStatus={onChangeStatus}
                           vinsBadge={isBatchScopeVin && vinsReceived > 0
                             ? `${vinsReceived}/${b.requestedQuantity}`
-                            : null}
-                          onClickOverride={isBatchScopeVin
-                            ? () => onOpenInlineForm(b.id, "vins", a.id)
-                            : null}
-                          // Every chip exposes 📅 so ops can mark
-                          // done at a custom date (or backdate when
-                          // already done). Skipped chips drop the
-                          // affordance since there's no completion
-                          // moment to record.
+                            : isBatchScopeConfirmation && (b.confirmedQuantity ?? 0) > 0
+                              ? `${b.confirmedQuantity}/${b.requestedQuantity}`
+                              : null}
+                          onClickOverride={
+                            isBatchScopeVin
+                              ? () => onOpenInlineForm(b.id, "vins", a.id)
+                              : isBatchScopeConfirmation
+                                ? () => onOpenInlineForm(b.id, "confirmation", a.id)
+                                : null
+                          }
                           onEditDate={a.status === "skipped"
                             ? null
                             : () => onOpenInlineForm(b.id, "date", a.id)}
@@ -3404,6 +3485,18 @@ function BatchRow({
           busy={batchBusy}
           onSubmit={(payload) => {
             onBatchOp(b.id, "/api/batch-vins-received", payload);
+            onCloseInlineForm();
+          }}
+          onCancel={onCloseInlineForm}
+        />
+      )}
+      {showConfirmationForm && (
+        <ConfirmationQtyForm
+          batch={b}
+          actionId={inlineForm?.actionId ?? null}
+          busy={batchBusy}
+          onSubmit={(payload) => {
+            onBatchOp(b.id, "/api/batch-confirmation", payload);
             onCloseInlineForm();
           }}
           onCancel={onCloseInlineForm}
@@ -4006,6 +4099,210 @@ function VinsReceivedForm({
         </button>
       </div>
     </form>
+  );
+}
+
+/**
+ * Inline form for the Confirmation chip — captures "dealer confirmed N
+ * of M cars". Scalar only (the data model doesn't track per-city
+ * confirmation today). Mirrors VinsReceivedForm's visual style so the
+ * two flows feel identical to ops.
+ */
+function ConfirmationQtyForm({
+  batch: b, actionId, busy, onSubmit, onCancel,
+}: {
+  batch: BatchNode;
+  actionId: number | null;
+  busy: boolean;
+  onSubmit: (payload: { batchId: number; confirmedQuantity: number; actionId?: number }) => void;
+  onCancel: () => void;
+}) {
+  const initial = (b.confirmedQuantity ?? 0) > 0
+    ? (b.confirmedQuantity ?? 0)
+    : b.requestedQuantity;
+  const [qty, setQty] = useState<string>(String(initial));
+  const [error, setError] = useState<string | null>(null);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const n = parseInt(qty, 10);
+    if (!Number.isFinite(n) || n < 0) {
+      setError("Enter a non-negative integer.");
+      return;
+    }
+    if (n > b.requestedQuantity) {
+      setError(`Can't exceed the batch size (${b.requestedQuantity}).`);
+      return;
+    }
+    onSubmit({
+      batchId:           b.id,
+      confirmedQuantity: n,
+      ...(actionId ? { actionId } : {}),
+    });
+  }
+
+  return (
+    <form onSubmit={submit} className="mt-2 p-2 border border-brand rounded-md bg-brand-pastel/30 space-y-2">
+      <p className="text-[0.7rem] font-medium text-brand-dark">
+        ✅ Dealer confirmation — {b.batchCode}
+      </p>
+      <p className="text-[0.65rem] text-ink-600 leading-snug">
+        How many of the requested cars has the dealer confirmed they can
+        supply? Partial (e.g. 7 of 10) is normal.
+      </p>
+      <div className="flex items-baseline gap-2">
+        <label className="text-[0.65rem] text-ink-600 flex items-baseline gap-1.5">
+          Confirmed
+          <input
+            type="number"
+            min={0}
+            max={b.requestedQuantity}
+            value={qty}
+            onChange={(e) => { setQty(e.target.value); setError(null); }}
+            className="text-xs px-2 py-1 border border-ink-300 rounded w-20 tabular-nums"
+            autoFocus
+          />
+        </label>
+        <span className="text-[0.65rem] text-ink-500 tabular-nums">
+          / {b.requestedQuantity} cars
+        </span>
+      </div>
+      {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
+      <div className="flex justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel"
+        >
+          {busy ? "…" : "✓ Save confirmation"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * External-Phase chip + satellite row of touchpoint controls. The
+ * chip itself is the unchanged ActionChip (status, qty pill, 📅).
+ * Beneath it sits a compact row with the metrics ops asked for
+ * (📞 N · ↗ N · ⏱ Nd) plus 📞 Contact / ↗ Escalate buttons that fire
+ * touchpoint mutations via ShellContext.
+ *
+ * Scope: only used at the External-Phase chip render site in BatchRow.
+ * Internal-Phase / PO-scope / Pre-PO chips render plain ActionChip so
+ * their UX stays untouched (per the user's "don't change anything
+ * outside the action box" instruction).
+ */
+function ExtPhaseChipWithFlow({
+  action, batch, busy, onChangeStatus, vinsBadge, onClickOverride, onEditDate,
+}: {
+  action: ScopedActionDetail;
+  batch: BatchNode;
+  busy: boolean;
+  onChangeStatus: (actionId: number, status: Status, completedAt?: string) => void;
+  vinsBadge?: string | null;
+  onClickOverride?: (() => void) | null;
+  onEditDate?: (() => void) | null;
+}) {
+  const { touchpointsByAction, onLogContact, onEscalate, busyTouchpointActionId } = useShell();
+
+  // Reuse the action-flow augmenter so the badges match what
+  // /action-center-flow shows. ActionTouchpoint is structurally
+  // compatible with Touchpoint (same fields) so the cast is safe.
+  const augmented = useMemo(
+    () => augmentActions(
+      [action],
+      touchpointsByAction as unknown as Record<string, Touchpoint[]>,
+    )[0],
+    [action, touchpointsByAction],
+  );
+
+  const tpBusy = busyTouchpointActionId === action.id;
+  const anyBusy = busy || tpBusy;
+  const isDone = action.status === "done" || action.status === "skipped";
+  // Don't surface contact / escalate on synthetic rows.
+  if (action.id < 0) return null;
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-center gap-1 flex-wrap">
+        <ActionChip
+          action={action}
+          busy={busy}
+          onChangeStatus={onChangeStatus}
+          vinsBadge={vinsBadge}
+          onClickOverride={onClickOverride}
+          onEditDate={onEditDate}
+        />
+        {/* Inline metric badges — same shape as /action-center-flow.
+            Only render the ones that have a value so an idle chip
+            stays clean. */}
+        {augmented.contactCount > 0 && (
+          <span
+            className="text-[0.6rem] tabular-nums text-ink-600 bg-ink-50 border border-ink-200 rounded px-1 leading-tight"
+            title={`${augmented.contactCount} touchpoint${augmented.contactCount === 1 ? "" : "s"} logged`}
+          >
+            📞 {augmented.contactCount}
+          </span>
+        )}
+        {augmented.escalationCount > 0 && (
+          <span
+            className="text-[0.6rem] tabular-nums text-flame-dark bg-flame-pale border border-flame rounded px-1 leading-tight"
+            title={`${augmented.escalationCount} escalation${augmented.escalationCount === 1 ? "" : "s"}`}
+          >
+            ↗ {augmented.escalationCount}
+          </span>
+        )}
+        {augmented.daysSinceLastContact != null && !isDone && (
+          <span
+            className="text-[0.6rem] tabular-nums text-ink-500 leading-tight"
+            title="Days since last contact"
+          >
+            {augmented.daysSinceLastContact}d ago
+          </span>
+        )}
+        {augmented.daysToConfirm != null && (
+          <span
+            className="text-[0.6rem] tabular-nums text-green-dark bg-green-pale border border-green rounded px-1 leading-tight"
+            title="Days from first contact to confirmation"
+          >
+            ⏱ {augmented.daysToConfirm}d
+          </span>
+        )}
+        {/* 📞 Contact + ↗ Escalate — only when the chip is still open.
+            Done / skipped chips don't need outreach. */}
+        {!isDone && (
+          <>
+            <button
+              type="button"
+              onClick={() => onLogContact(action.id)}
+              disabled={anyBusy}
+              title="Log a touchpoint (default: outbound, +1d follow-up)"
+              className="text-[0.6rem] px-1 py-0 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 bg-white leading-tight"
+            >
+              📞
+            </button>
+            <button
+              type="button"
+              onClick={() => onEscalate(action.id)}
+              disabled={anyBusy}
+              title="Log an internal escalation (+2d follow-up)"
+              className="text-[0.6rem] px-1 py-0 rounded border border-flame text-flame-dark hover:bg-flame-pale bg-white leading-tight"
+            >
+              ↗
+            </button>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
