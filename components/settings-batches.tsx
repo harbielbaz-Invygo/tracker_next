@@ -706,9 +706,17 @@ function DetailForm({
                   {a.status === "done" ? a.doneLabel : a.waitingLabel}
                 </span>
                 <span className="text-[0.7rem] text-ink-500">{a.departmentName ?? "— unassigned —"}</span>
-                {a.completedAt && (
-                  <span className="text-[0.7rem] text-ink-500 tabular-nums">✓ {a.completedAt.slice(0, 10)}</span>
-                )}
+                {a.completedAt && (() => {
+                  // Local-time yyyy-mm-dd; naive slice(0,10) on the UTC
+                  // ISO mis-aligns by a day for near-midnight picks in
+                  // non-UTC timezones.
+                  const d = new Date(a.completedAt);
+                  const pad = (n: number) => String(n).padStart(2, "0");
+                  const local = Number.isNaN(d.getTime())
+                    ? a.completedAt.slice(0, 10)
+                    : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+                  return <span className="text-[0.7rem] text-ink-500 tabular-nums">✓ {local}</span>;
+                })()}
                 <select
                   className="input text-xs py-1 max-w-[8rem]"
                   value={a.status}
