@@ -4983,60 +4983,187 @@ function ActionCard({
 function AppListedBulkCta({ po }: { po: PoNode }) {
   const { onBulkSetAppListed, busyBatchId } = useShell();
   const allBatches = po.waves.flatMap((w) => w.batches);
-  const unlistedIds = allBatches.filter((b) => b.appListedAt == null).map((b) => b.id);
-  const listedIds   = allBatches.filter((b) => b.appListedAt != null).map((b) => b.id);
-  const total    = allBatches.length;
-  const listed   = listedIds.length;
-  const fullyListed = total > 0 && listed === total;
-  const gateOk = po.internalPhaseDone || fullyListed; // un-listing always allowed
+  const total = allBatches.length;
+  const gateOk = po.internalPhaseDone;
   const busy = busyBatchId != null && allBatches.some((b) => b.id === busyBatchId);
 
-  function handleClick() {
-    if (!gateOk) return;
-    if (fullyListed) {
-      const ok = window.confirm(`Un-list all ${total} batch${total === 1 ? "" : "es"}? Clears every appListedAt timestamp.`);
-      if (!ok) return;
-      onBulkSetAppListed(listedIds, false);
-    } else {
-      onBulkSetAppListed(unlistedIds, true);
+  // Per-wave snapshot — drives both the inline summary and the
+  // checkbox form. A wave is "listed" only when EVERY batch under
+  // it has appListedAt set; "partial" when some are listed.
+  interface WaveStat {
+    waveId: number;
+    date:   string;
+    listed: number;
+    total:  number;
+  }
+  const waveStats: WaveStat[] = po.waves.map((w) => ({
+    waveId: w.id,
+    date:   w.availabilityDate,
+    listed: w.batches.filter((b) => b.appListedAt != null).length,
+    total:  w.batches.length,
+  }));
+  const fullyListedWaves   = waveStats.filter((w) => w.total > 0 && w.listed === w.total).length;
+  const allFullyListed     = waveStats.length > 0 && fullyListedWaves === waveStats.length;
+  const overallListedBatches = allBatches.filter((b) => b.appListedAt != null).length;
+
+  const [open, setOpen]       = useState<boolean>(false);
+  // Default-checked: every wave that ISN'T fully listed yet. Already-
+  // listed waves stay unchecked so submitting doesn't re-stamp them.
+  const [checked, setChecked] = useState<Set<number>>(() => {
+    const init = new Set<number>();
+    for (const w of waveStats) {
+      if (!(w.total > 0 && w.listed === w.total)) init.add(w.waveId);
     }
+    return init;
+  });
+
+  function toggleWave(id: number) {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
   }
 
-  const remaining = total - listed;
-  const label =
-    fullyListed   ? "📱 Un-list all"
-    : !gateOk     ? `🔒 Mark all listed (${remaining} pending)`
-    : listed === 0
-                  ? `📱 Mark all batches as listed (${total})`
-                  : `📱 Mark remaining as listed (${remaining})`;
+  function handleSubmit() {
+    if (!gateOk) return;
+    // Collect the unlisted batches in checked waves only — checked
+    // waves whose batches are already listed contribute nothing.
+    const ids: number[] = [];
+    for (const w of po.waves) {
+      if (!checked.has(w.id)) continue;
+      for (const b of w.batches) {
+        if (b.appListedAt == null) ids.push(b.id);
+      }
+    }
+    if (ids.length === 0) {
+      setOpen(false);
+      return;
+    }
+    onBulkSetAppListed(ids, true);
+    setOpen(false);
+  }
 
-  const tone = fullyListed
-    ? "border-ink-300 text-ink-600 hover:bg-ink-50"
-    : gateOk
-      ? "border-brand text-brand-dark hover:bg-brand-pastel"
-      : "border-ink-200 text-ink-400 cursor-not-allowed";
+  function handleUnlistAll() {
+    const ids = allBatches.filter((b) => b.appListedAt != null).map((b) => b.id);
+    if (ids.length === 0) return;
+    const ok = window.confirm(
+      `Un-list all ${ids.length} batch${ids.length === 1 ? "" : "es"}? ` +
+      `Clears every appListedAt timestamp.`,
+    );
+    if (!ok) return;
+    onBulkSetAppListed(ids, false);
+    setOpen(false);
+  }
+
+  // Collapsed-state label summarises the current per-wave reality.
+  const collapsedLabel = allFullyListed
+    ? `✓ All ${waveStats.length} window${waveStats.length === 1 ? "" : "s"} listed`
+    : fullyListedWaves > 0
+      ? `📱 ${fullyListedWaves}/${waveStats.length} windows listed — pick more`
+      : `📱 Pick windows to list (${overallListedBatches}/${total} batches)`;
+
+  if (total === 0) return null;
 
   return (
-    <div className="flex flex-wrap gap-1.5 mt-2">
-      <button
-        type="button"
-        disabled={!gateOk || busy || total === 0}
-        onClick={handleClick}
-        title={
-          !gateOk
-            ? "Complete Internal-phase actions before listing batches."
-            : fullyListed
-              ? "Clears every batch's app-listing timestamp."
-              : "Marks every batch as live in the app right now."
-        }
-        className={cn(
-          "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
-          tone,
-          busy && "opacity-50 cursor-wait",
+    <div className="mt-2 space-y-1.5">
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          disabled={!gateOk || busy}
+          onClick={() => setOpen((v) => !v)}
+          title={
+            !gateOk
+              ? "Complete Internal-phase actions before listing batches."
+              : "Pick which delivery windows are now listed in the app."
+          }
+          className={cn(
+            "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
+            allFullyListed
+              ? "border-green text-green-dark hover:bg-green-pale bg-white"
+              : gateOk
+                ? "border-brand text-brand-dark hover:bg-brand-pastel bg-white"
+                : "border-ink-200 text-ink-400 cursor-not-allowed bg-white",
+            busy && "opacity-50 cursor-wait",
+          )}
+        >
+          {busy ? "…" : collapsedLabel}
+        </button>
+        {allFullyListed && (
+          <button
+            type="button"
+            onClick={handleUnlistAll}
+            disabled={busy}
+            className="text-[0.65rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50 bg-white"
+          >
+            Un-list all
+          </button>
         )}
-      >
-        {busy ? "…" : label}
-      </button>
+      </div>
+
+      {/* Per-wave checkbox form. App listing is per delivery window —
+          checking a window marks every unlisted batch in it as listed
+          on submit; leaving unchecked leaves the window untouched.
+          Default state: every not-yet-fully-listed window is checked
+          so the common case (list everything now) is one click. */}
+      {open && gateOk && (
+        <div className="border border-brand rounded-md bg-brand-pastel/30 p-2 space-y-1.5">
+          <p className="text-[0.7rem] font-medium text-brand-dark">
+            📱 List delivery windows
+          </p>
+          <p className="text-[0.65rem] text-ink-600 leading-snug">
+            Checked windows will be marked as listed. Unchecked windows stay in
+            App Listing. Already-fully-listed windows start unchecked so saving
+            doesn&apos;t re-stamp them.
+          </p>
+          <ul className="space-y-1">
+            {waveStats.map((w) => {
+              const isFullyListed = w.total > 0 && w.listed === w.total;
+              const isPartial = w.listed > 0 && w.listed < w.total;
+              return (
+                <li key={w.waveId} className="flex items-baseline gap-2 text-[0.7rem]">
+                  <input
+                    type="checkbox"
+                    checked={checked.has(w.waveId)}
+                    onChange={() => toggleWave(w.waveId)}
+                    className="accent-brand"
+                  />
+                  <span className="text-midnight tabular-nums font-medium">{w.date}</span>
+                  <span className="text-ink-500 tabular-nums">{w.total} batch{w.total === 1 ? "" : "es"}</span>
+                  {isFullyListed && (
+                    <span className="text-[0.6rem] font-semibold tabular-nums px-1.5 py-0.5 rounded border border-green text-green-dark bg-green-pale">
+                      ✓ already listed
+                    </span>
+                  )}
+                  {isPartial && (
+                    <span className="text-[0.6rem] font-semibold tabular-nums px-1.5 py-0.5 rounded border border-gold text-gold-dark bg-gold-pale">
+                      partial {w.listed}/{w.total}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          <div className="flex justify-end gap-1.5">
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              disabled={busy}
+              className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50 bg-white"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={busy || checked.size === 0}
+              className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel bg-white font-medium"
+            >
+              {busy ? "…" : `✓ List ${checked.size} window${checked.size === 1 ? "" : "s"}`}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
