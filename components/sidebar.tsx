@@ -32,7 +32,6 @@ const VIEW_TO_PATH: Record<ViewName, string> = {
   "Action Center": "/action-center",
   "Action Center 3": "/action-center-3",
   "Action Center Fluent": "/action-center-fluent",
-  "Action Center Flow":   "/action-center-flow",
   "Reports":       "/reports",
   "Settings":      "/settings",
   "Guide":         "/guide",
@@ -46,7 +45,7 @@ const VIEW_TO_PATH: Record<ViewName, string> = {
 const NAV_GROUPS: { label: string | null; items: ViewName[] }[] = [
   { label: null,         items: ["Insights"] },
   { label: "Workflow",   items: ["Intake", "Forecast"] },
-  { label: "Operations", items: ["Action Center", "Action Center Flow"] },
+  { label: "Operations", items: ["Action Center"] },
   { label: "Admin",      items: ["Settings"] },
   { label: "Help",       items: ["Guide"] },
 ];

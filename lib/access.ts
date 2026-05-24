@@ -24,7 +24,6 @@ export const ALL_VIEWS = [
   "Action Center",
   "Action Center 3",
   "Action Center Fluent",
-  "Action Center Flow",
   "Reports",
   "Settings",
   "Guide",
@@ -47,11 +46,6 @@ export const ACCESS: Record<ViewName, Role[] | "public"> = {
   // Fluent UI v9 take on the Action Center surface — separate test
   // surface so the design-system pick is testable in isolation.
   "Action Center Fluent": ["ops", "admin"],
-  // Test surface — touchpoint-log workflow (Direction A + B + C
-  // combined). Lets ops record follow-ups (email/phone/whatsapp +
-  // outcome), see derived flow state, and quick-log via one-click
-  // buttons without re-typing channel / reminder defaults.
-  "Action Center Flow": ["ops", "admin"],
   "Reports":       ["ops", "admin"],
   "Settings":      ["admin"],
   // Public — pages overview, workflow, roles, glossary, tech stack.
@@ -68,7 +62,6 @@ export const VIEW_LABELS: Record<ViewName, string> = {
   "Action Center": "Action Center",
   "Action Center 3": "Action Center 3",
   "Action Center Fluent": "Action Center · Fluent",
-  "Action Center Flow":   "Action Center · Flow",
   "Reports":       "Reports",
   "Settings":      "Settings",
   "Guide":         "Guide",
