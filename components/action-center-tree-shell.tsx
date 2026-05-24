@@ -2625,7 +2625,7 @@ function WindowActionBar({
  * pending parents list.
  */
 function ActionChip({
-  action, busy, onChangeStatus, vinsBadge, onClickOverride, onEditDate,
+  action, busy, onChangeStatus, vinsBadge, onClickOverride, onEditDate, size = "sm",
 }: {
   action: ScopedActionDetail;
   busy: boolean;
@@ -2640,6 +2640,11 @@ function ActionChip({
    *  opens its full-width inline date form this way). When omitted,
    *  the chip renders its own inline date popover below itself. */
   onEditDate?: (() => void) | null;
+  /** Visual size. "sm" (default) is the historical compact chip used
+   *  everywhere; "lg" roughly doubles the chip's text and padding for
+   *  the External-Phase row, where ops asked for bigger tap targets
+   *  and at-a-glance readability. */
+  size?: "sm" | "lg";
 }) {
   // Synthetic rows (negative id) shouldn't expose interactive chips —
   // they're read-only summaries.
@@ -2694,6 +2699,17 @@ function ActionChip({
       : null,
   ].filter(Boolean) as string[];
 
+  // Size-aware classes — only "lg" differs. The lg variant roughly
+  // doubles the chip's height by lifting text from text-[0.7rem] to
+  // text-sm and padding from py-0.5 to py-1.5; everywhere else stays
+  // pixel-identical to the historical chip.
+  const isLg = size === "lg";
+  const shellTextCls   = isLg ? "text-sm"             : "text-[0.7rem]";
+  const labelPadCls    = isLg ? "px-3 py-1.5 gap-1.5" : "px-2 py-0.5 gap-1";
+  const labelMaxWCls   = isLg ? "max-w-[18rem]"       : "max-w-[10rem]";
+  const vinsBadgeCls   = isLg ? "text-xs"             : "text-[0.65rem]";
+  const dateBtnCls     = isLg ? "px-2.5 text-sm"      : "px-1.5 text-[0.7rem]";
+
   // Wrap the chip's main click target + the optional date-edit
   // trigger in a single bordered shell so they read as one chip
   // visually. Two separate <button>s under the shell (rather than a
@@ -2702,7 +2718,8 @@ function ActionChip({
     <span className="inline-flex flex-col items-stretch">
       <span
         className={cn(
-          "text-[0.7rem] rounded border transition-colors inline-flex items-stretch overflow-hidden",
+          shellTextCls,
+          "rounded border transition-colors inline-flex items-stretch overflow-hidden",
           toneCls,
           busy && "opacity-50 cursor-wait",
         )}
@@ -2716,12 +2733,15 @@ function ActionChip({
           title={vinsBadge
             ? `${tooltipBits.join(" · ")} · ${vinsBadge} VINs received`
             : tooltipBits.join(" · ")}
-          className="px-2 py-0.5 inline-flex items-center gap-1 flex-1 min-w-0 text-left hover:bg-black/5"
+          className={cn(
+            labelPadCls,
+            "inline-flex items-center flex-1 min-w-0 text-left hover:bg-black/5",
+          )}
         >
           <span aria-hidden>{icon}</span>
-          <span className="font-medium truncate max-w-[10rem]">{label}</span>
+          <span className={cn("font-medium truncate", labelMaxWCls)}>{label}</span>
           {vinsBadge && (
-            <span className="tabular-nums text-[0.65rem] ml-0.5 text-ink-500">
+            <span className={cn("tabular-nums ml-0.5 text-ink-500", vinsBadgeCls)}>
               {vinsBadge}
             </span>
           )}
@@ -2738,7 +2758,10 @@ function ActionChip({
               ? "Edit completion date"
               : "Mark done with a custom date"}
             aria-label="Set completion date"
-            className="px-1.5 border-l border-current/40 hover:bg-black/10 text-[0.7rem]"
+            className={cn(
+              dateBtnCls,
+              "border-l border-current/40 hover:bg-black/10",
+            )}
           >
             📅
           </button>
@@ -4232,8 +4255,8 @@ function ExtPhaseChipWithFlow({
   if (action.id < 0) return null;
 
   return (
-    <div className="flex flex-col gap-0.5">
-      <div className="flex items-center gap-1 flex-wrap">
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-1.5 flex-wrap">
         <ActionChip
           action={action}
           busy={busy}
@@ -4241,13 +4264,14 @@ function ExtPhaseChipWithFlow({
           vinsBadge={vinsBadge}
           onClickOverride={onClickOverride}
           onEditDate={onEditDate}
+          size="lg"
         />
         {/* Inline metric badges — same shape as /action-center-flow.
-            Only render the ones that have a value so an idle chip
-            stays clean. */}
+            Bumped from text-[0.6rem] → text-xs + thicker padding so
+            the badges read at the same scale as the lg chip. */}
         {augmented.contactCount > 0 && (
           <span
-            className="text-[0.6rem] tabular-nums text-ink-600 bg-ink-50 border border-ink-200 rounded px-1 leading-tight"
+            className="text-xs tabular-nums text-ink-600 bg-ink-50 border border-ink-200 rounded px-1.5 py-0.5 leading-tight"
             title={`${augmented.contactCount} touchpoint${augmented.contactCount === 1 ? "" : "s"} logged`}
           >
             📞 {augmented.contactCount}
@@ -4255,7 +4279,7 @@ function ExtPhaseChipWithFlow({
         )}
         {augmented.escalationCount > 0 && (
           <span
-            className="text-[0.6rem] tabular-nums text-flame-dark bg-flame-pale border border-flame rounded px-1 leading-tight"
+            className="text-xs tabular-nums text-flame-dark bg-flame-pale border border-flame rounded px-1.5 py-0.5 leading-tight"
             title={`${augmented.escalationCount} escalation${augmented.escalationCount === 1 ? "" : "s"}`}
           >
             ↗ {augmented.escalationCount}
@@ -4263,7 +4287,7 @@ function ExtPhaseChipWithFlow({
         )}
         {augmented.daysSinceLastContact != null && !isDone && (
           <span
-            className="text-[0.6rem] tabular-nums text-ink-500 leading-tight"
+            className="text-xs tabular-nums text-ink-500 leading-tight"
             title="Days since last contact"
           >
             {augmented.daysSinceLastContact}d ago
@@ -4271,7 +4295,7 @@ function ExtPhaseChipWithFlow({
         )}
         {augmented.daysToConfirm != null && (
           <span
-            className="text-[0.6rem] tabular-nums text-green-dark bg-green-pale border border-green rounded px-1 leading-tight"
+            className="text-xs tabular-nums text-green-dark bg-green-pale border border-green rounded px-1.5 py-0.5 leading-tight"
             title="Days from first contact to confirmation"
           >
             ⏱ {augmented.daysToConfirm}d
@@ -4286,7 +4310,7 @@ function ExtPhaseChipWithFlow({
               onClick={() => onLogContact(action.id)}
               disabled={anyBusy}
               title="Log a touchpoint (default: outbound, +1d follow-up)"
-              className="text-[0.6rem] px-1 py-0 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 bg-white leading-tight"
+              className="text-sm px-2 py-1 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 bg-white leading-tight"
             >
               📞
             </button>
@@ -4295,7 +4319,7 @@ function ExtPhaseChipWithFlow({
               onClick={() => onEscalate(action.id)}
               disabled={anyBusy}
               title="Log an internal escalation (+2d follow-up)"
-              className="text-[0.6rem] px-1 py-0 rounded border border-flame text-flame-dark hover:bg-flame-pale bg-white leading-tight"
+              className="text-sm px-2 py-1 rounded border border-flame text-flame-dark hover:bg-flame-pale bg-white leading-tight"
             >
               ↗
             </button>
