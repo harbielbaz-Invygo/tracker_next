@@ -803,6 +803,8 @@ function DealerTab({ rows }: { rows: DealerReliabilityRow[] }) {
             <Th align="right">Qty %</Th>
             <Th align="right">Colour %</Th>
             <Th align="right">Cancel %</Th>
+            <Th align="right">List d</Th>
+            <Th align="right">List on-time</Th>
           </tr>
         </thead>
         <tbody>
@@ -846,6 +848,17 @@ function DealerTab({ rows }: { rows: DealerReliabilityRow[] }) {
               <Td align="right" tabular><RateChip rate={d.qtyFulfillmentRate} /></Td>
               <Td align="right" tabular><RateChip rate={d.colorReliabilityRate} /></Td>
               <Td align="right" tabular><RateChip rate={d.cancellationRate} invert /></Td>
+              <Td align="right" tabular>
+                {d.medianDaysToListed == null
+                  ? <span className="text-ink-400">—</span>
+                  : <span className={cn(
+                      "font-medium tabular-nums",
+                      d.medianDaysToListed <= 7  ? "text-green-dark" :
+                      d.medianDaysToListed <= 14 ? "text-gold-dark" :
+                      "text-flame-dark",
+                    )}>{d.medianDaysToListed}d</span>}
+              </Td>
+              <Td align="right" tabular><RateChip rate={d.listingOnTimeRate} /></Td>
             </tr>
           ))}
         </tbody>
@@ -1013,6 +1026,24 @@ function PoReliabilityTab({ rows }: { rows: PoReliabilityRowFull[] }) {
                   {!r.fullyClosed && (
                     <span className="ml-1 text-[0.6rem] text-gold-dark italic">
                       partial
+                    </span>
+                  )}
+                  {/* Audit 1 #4 — closure outcome badge. Derived from
+                      batches under the PO; only shows when something
+                      meaningful has happened (open is implicit by
+                      absence of "delivered" / "partial" / "cancelled"). */}
+                  {r.closureOutcome !== "open" && (
+                    <span className={cn(
+                      "ml-1 text-[0.6rem] font-semibold px-1.5 py-0.5 rounded border whitespace-nowrap",
+                      r.closureOutcome === "delivered_in_full"     && "border-green text-green-dark bg-green-pale",
+                      r.closureOutcome === "partly_delivered"      && "border-gold  text-gold-dark  bg-gold-pale",
+                      r.closureOutcome === "cancelled_mid_flight"  && "border-flame text-flame-dark bg-flame-pale",
+                    )}>
+                      {r.closureOutcome === "delivered_in_full"
+                        ? "✓ in full"
+                        : r.closureOutcome === "partly_delivered"
+                          ? "⚠ partial"
+                          : "🚫 cancelled"}
                     </span>
                   )}
                 </td>
