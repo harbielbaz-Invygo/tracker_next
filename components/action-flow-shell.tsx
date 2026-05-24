@@ -117,6 +117,41 @@ export default function ActionFlowShell({ data }: Props) {
     }
   }
 
+  async function escalate(action: FlowAction, label: string): Promise<void> {
+    setBusyId(action.id);
+    setError(null);
+    try {
+      const res = await fetch("/api/action-touchpoint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actionId:       action.id,
+          channel:        "other",
+          direction:      "internal",
+          outcome:        "other",
+          escalated:      true,
+          note:           "Escalated",
+          nextFollowupAt: addDays(2),
+          contactedAt:    backdateIso(),
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { touchpoint?: { id: number } };
+      if (data.touchpoint?.id) {
+        setLastAction({
+          touchpointId: data.touchpoint.id,
+          label:        `↗ ${label} — escalated`,
+          expiresAt:    Date.now() + 10_000,
+        });
+      }
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function markDone(action: FlowAction, label: string): Promise<void> {
     setBusyId(action.id);
     setError(null);
@@ -247,6 +282,7 @@ export default function ActionFlowShell({ data }: Props) {
             busyId={busyId}
             backdateAt={backdateAt}
             onLogContact={logContact}
+            onEscalate={escalate}
             onMarkDone={markDone}
             onQtyChanged={() => { setLastAction(null); router.refresh(); }}
           />
@@ -261,13 +297,14 @@ export default function ActionFlowShell({ data }: Props) {
 // ─────────────────────────────────────────────────────────────────
 
 function WaveBlock({
-  wave, augment, busyId, backdateAt, onLogContact, onMarkDone, onQtyChanged,
+  wave, augment, busyId, backdateAt, onLogContact, onEscalate, onMarkDone, onQtyChanged,
 }: {
   wave: WaveNode;
   augment: (actions: ScopedActionDetail[]) => FlowAction[];
   busyId: number | null;
   backdateAt: string;
   onLogContact: (a: FlowAction, label: string) => Promise<void>;
+  onEscalate:   (a: FlowAction, label: string) => Promise<void>;
   onMarkDone:   (a: FlowAction, label: string) => Promise<void>;
   onQtyChanged: () => void;
 }) {
@@ -291,6 +328,7 @@ function WaveBlock({
             busyId={busyId}
             backdateAt={backdateAt}
             onLogContact={onLogContact}
+            onEscalate={onEscalate}
             onMarkDone={onMarkDone}
             onQtyChanged={onQtyChanged}
           />
@@ -305,7 +343,7 @@ function WaveBlock({
 // ─────────────────────────────────────────────────────────────────
 
 function BatchBlock({
-  batch, wave, augment, busyId, backdateAt, onLogContact, onMarkDone, onQtyChanged,
+  batch, wave, augment, busyId, backdateAt, onLogContact, onEscalate, onMarkDone, onQtyChanged,
 }: {
   batch: BatchNode;
   wave: WaveNode;
@@ -313,6 +351,7 @@ function BatchBlock({
   busyId: number | null;
   backdateAt: string;
   onLogContact: (a: FlowAction, label: string) => Promise<void>;
+  onEscalate:   (a: FlowAction, label: string) => Promise<void>;
   onMarkDone:   (a: FlowAction, label: string) => Promise<void>;
   onQtyChanged: () => void;
 }) {
@@ -321,6 +360,12 @@ function BatchBlock({
   const isBatchScopeRow = batchScope.length > 0;
   const augmented = augment(batchScope.length > 0 ? batchScope : wave.actions);
   const cars = batch.requestedQuantity;
+
+  // Per-batch roll-up so ops sees totals without scanning every chip.
+  // Sum across the chips actually rendered here (matches what the user
+  // sees, not the entire DB).
+  const totalContacts    = augmented.reduce((n, a) => n + a.contactCount, 0);
+  const totalEscalations = augmented.reduce((n, a) => n + a.escalationCount, 0);
 
   return (
     <li className="px-3 py-2 space-y-1.5">
@@ -333,6 +378,16 @@ function BatchBlock({
         )}
         {(batch.vinsReceivedQuantity ?? 0) > 0 && (
           <span className="text-ink-500 tabular-nums">· 🔑 {batch.vinsReceivedQuantity}/{cars}</span>
+        )}
+        {totalContacts > 0 && (
+          <span className="text-ink-500 tabular-nums" title="Total touchpoints across this batch">
+            · 📞 {totalContacts}
+          </span>
+        )}
+        {totalEscalations > 0 && (
+          <span className="text-flame-dark tabular-nums" title="Total escalations across this batch">
+            · ↗ {totalEscalations}
+          </span>
         )}
       </div>
       <div className="flex flex-col gap-1">
@@ -348,6 +403,7 @@ function BatchBlock({
               busy={busyId === a.id}
               backdateAt={backdateAt}
               onLogContact={onLogContact}
+              onEscalate={onEscalate}
               onMarkDone={onMarkDone}
               onQtyChanged={onQtyChanged}
             />
@@ -374,7 +430,7 @@ const FLOW_TONE: Record<FlowState, { cls: string; dot: string }> = {
 };
 
 function FlowChip({
-  action, batch, isBatchScopeRow, busy, backdateAt, onLogContact, onMarkDone, onQtyChanged,
+  action, batch, isBatchScopeRow, busy, backdateAt, onLogContact, onEscalate, onMarkDone, onQtyChanged,
 }: {
   action: FlowAction;
   batch: BatchNode;
@@ -382,6 +438,7 @@ function FlowChip({
   busy: boolean;
   backdateAt: string;
   onLogContact: (a: FlowAction, label: string) => Promise<void>;
+  onEscalate:   (a: FlowAction, label: string) => Promise<void>;
   onMarkDone:   (a: FlowAction, label: string) => Promise<void>;
   onQtyChanged: () => void;
 }) {
@@ -395,16 +452,48 @@ function FlowChip({
 
   return (
     <div className={cn(
-      "rounded-md border px-2.5 py-1.5 flex items-center gap-2 flex-wrap text-xs",
+      "rounded-md border px-2.5 py-1.5 flex items-center gap-x-2 gap-y-1 flex-wrap text-xs",
       tone.cls,
       busy && "opacity-50 cursor-wait",
     )}>
       <span className={cn("h-2 w-2 rounded-full shrink-0", tone.dot)} aria-hidden />
       <span className="font-medium text-midnight">{label}</span>
-      {action.daysSinceLastContact != null && (
-        <span className="text-[0.65rem] tabular-nums text-ink-500">{action.daysSinceLastContact}d ago</span>
+
+      {/* Metric badges — the three numbers ops asked for. Keep them
+          compact (badge-style) so they don't dominate the chip but
+          remain instantly scannable: "did anyone call? how many times?
+          escalated? how long did it take to close?". */}
+      {action.contactCount > 0 && (
+        <span
+          className="text-[0.65rem] tabular-nums text-ink-700 bg-ink-50 border border-ink-200 rounded px-1"
+          title={`${action.contactCount} touchpoint${action.contactCount === 1 ? "" : "s"} logged`}
+        >
+          📞 {action.contactCount}
+        </span>
       )}
-      {/* Primary action — single CTA per chip. */}
+      {action.escalationCount > 0 && (
+        <span
+          className="text-[0.65rem] tabular-nums text-flame-dark bg-flame-pale border border-flame rounded px-1"
+          title={`${action.escalationCount} escalation${action.escalationCount === 1 ? "" : "s"}`}
+        >
+          ↗ {action.escalationCount}
+        </span>
+      )}
+      {action.daysSinceLastContact != null && !isDone && (
+        <span className="text-[0.65rem] tabular-nums text-ink-500" title="Days since last contact">
+          {action.daysSinceLastContact}d ago
+        </span>
+      )}
+      {action.daysToConfirm != null && (
+        <span
+          className="text-[0.65rem] tabular-nums text-green-dark bg-green-pale border border-green rounded px-1"
+          title="Days from first contact to confirmation"
+        >
+          ⏱ {action.daysToConfirm}d to confirm
+        </span>
+      )}
+
+      {/* Right side — actions. */}
       <div className="ml-auto flex items-center gap-1">
         {qtyKind && !isDone ? (
           <QtyInline
@@ -422,7 +511,16 @@ function FlowChip({
               disabled={busy}
               className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 bg-white"
             >
-              📞 Log contact
+              📞 Contact
+            </button>
+            <button
+              type="button"
+              onClick={() => onEscalate(action, label)}
+              disabled={busy}
+              className="text-[0.7rem] px-1.5 py-0.5 rounded border border-flame text-flame-dark hover:bg-flame-pale bg-white"
+              title="Log an internal escalation"
+            >
+              ↗
             </button>
             <button
               type="button"

@@ -64,6 +64,19 @@ export interface FlowAction extends ScopedActionDetail {
   flowState:            FlowState;
   /** Days since the latest touchpoint (null when none). */
   daysSinceLastContact: number | null;
+  /** Total touchpoint count across every direction. Drives the
+   *  📞 N badge — "how many times we contacted the dealer". */
+  contactCount:         number;
+  /** Touchpoints with escalated=true. Drives the ↗ N badge. */
+  escalationCount:      number;
+  /**
+   * Days between the earliest touchpoint and the moment confirmation
+   * landed. Confirmation = first inbound `outcome=confirmed` touchpoint
+   * OR the chip being marked done, whichever happened first. Null when
+   * the chip hasn't been confirmed yet or no touchpoints exist.
+   * Surfaces "we burned 7 days chasing this".
+   */
+  daysToConfirm:        number | null;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -90,12 +103,36 @@ export function augmentActions(
     const daysSinceLastContact = latest
       ? daysBetween(today, latest.contactedAt.slice(0, 10))
       : null;
+
+    const contactCount    = tps.length;
+    const escalationCount = tps.reduce((n, t) => n + (t.escalated ? 1 : 0), 0);
+
+    // Earliest touchpoint by contactedAt — tps is already ordered desc
+    // by contactedAt at the data layer, so the last entry is oldest.
+    const earliest = tps.length > 0 ? tps[tps.length - 1] : null;
+
+    // Confirmation moment: the inbound `outcome=confirmed` touchpoint
+    // wins over a generic `status=done` mark, because it records the
+    // moment the dealer actually confirmed. Fall back to completedAt
+    // for chips that were flipped done without a touchpoint trail.
+    const confirmingTp = tps.find((t) => t.outcome === "confirmed");
+    const confirmingMoment = confirmingTp?.contactedAt ?? a.completedAt ?? null;
+    const daysToConfirm = (earliest && confirmingMoment)
+      ? Math.max(0, daysBetween(
+          confirmingMoment.slice(0, 10),
+          earliest.contactedAt.slice(0, 10),
+        ))
+      : null;
+
     return {
       ...a,
       touchpoints: tps,
       latestTouchpoint: latest,
       flowState: deriveFlowState(a.status, latest, today),
       daysSinceLastContact,
+      contactCount,
+      escalationCount,
+      daysToConfirm,
     };
   });
 }
