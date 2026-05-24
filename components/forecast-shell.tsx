@@ -110,10 +110,13 @@ export default function ForecastShell({ rows, options }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...(dealerMode === "existing" ? { dealerId } : { dealerName: dealerName.trim() }),
-          items:                 cleanedItems,
+          items:                    cleanedItems,
           expectedDeliveryDate,
-          expectedPoSigningDate: expectedPoSigningDate || null,
-          submittedByUserId:     submitterId,
+          expectedPoSigningDate:    expectedPoSigningDate || null,
+          // Dropdown binds a Partnership stakeholder (not a user). The
+          // auth account that clicked submit lives in submittedByUserId
+          // server-side.
+          submittedByStakeholderId: submitterId,
         }),
       });
       if (!res.ok) throw new Error(await res.text());

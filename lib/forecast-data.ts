@@ -14,7 +14,7 @@
  */
 import { eq, asc, desc } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { batches, batchForecasts, dealers, users, departments } from "@/lib/db/schema";
+import { batches, batchForecasts, dealers, users, departments, stakeholders } from "@/lib/db/schema";
 
 const PARTNERSHIP_DEPARTMENT_NAME = "Partnership";
 
@@ -118,17 +118,27 @@ function statusFromRow(r: {
   return "open";
 }
 
-/** Dealers + Partnership-department users for the Forecast form. */
+/** Dealers + Partnership-department stakeholders for the Forecast form.
+ *
+ *  Source moved from `users` → `stakeholders` (matches what Settings →
+ *  Department → Stakeholders shows). The previous user-based lookup
+ *  required admin to assign user accounts to the Partnership
+ *  department; the new stakeholder source uses the names ops already
+ *  configured in Settings.
+ *
+ *  Field name on the public type stays `users` for backwards
+ *  compatibility with existing form code — the *contents* are now
+ *  stakeholder rows, not user rows.
+ */
 export async function getForecastFormOptions(): Promise<ForecastFormOptions> {
   const dealerRows = await db
     .select({ id: dealers.id, name: dealers.name })
     .from(dealers)
     .orderBy(asc(dealers.name));
 
-  // Resolve the Partnership department's id so we can filter users.
-  // Wrapped in try/catch so a missing `users.department_id` column
-  // doesn't 500 the page; admin runs
-  // /api/admin/ensure-user-department-column to enable the filter.
+  // Resolve the Partnership department's id. If the dept doesn't
+  // exist (fresh DB / typo), the dropdown stays empty and the form
+  // surfaces its "No Partnership members configured" hint.
   let partnershipDeptId: number | null = null;
   try {
     const rows = await db
@@ -141,40 +151,28 @@ export async function getForecastFormOptions(): Promise<ForecastFormOptions> {
     partnershipDeptId = null;
   }
 
-  let userRows: { id: number; name: string | null; username: string }[];
-  try {
-    if (partnershipDeptId != null) {
-      userRows = await db
-        .select({
-          id: users.id,
-          name: users.name,
-          username: users.username,
-        })
-        .from(users)
-        .where(eq(users.departmentId, partnershipDeptId))
-        .orderBy(asc(users.username));
-    } else {
-      userRows = await db
-        .select({ id: users.id, name: users.name, username: users.username })
-        .from(users)
-        .orderBy(asc(users.username));
+  let stakeholderRows: { id: number; name: string }[] = [];
+  if (partnershipDeptId != null) {
+    try {
+      stakeholderRows = await db
+        .select({ id: stakeholders.id, name: stakeholders.name })
+        .from(stakeholders)
+        .where(eq(stakeholders.departmentId, partnershipDeptId))
+        .orderBy(asc(stakeholders.name));
+    } catch (err) {
+      // Pre-migration / older deploy where the stakeholders table is
+      // missing — fall back to empty list, form surfaces the hint.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/no such (column|table)/i.test(msg)) throw err;
+      stakeholderRows = [];
     }
-  } catch (err) {
-    // Pre-migration DB: department_id column missing on users. Fall
-    // back to the unfiltered list so the form keeps working.
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!/no such column/i.test(msg)) throw err;
-    userRows = await db
-      .select({ id: users.id, name: users.name, username: users.username })
-      .from(users)
-      .orderBy(asc(users.username));
   }
 
   return {
     dealers: dealerRows,
-    users: userRows.map((u) => ({
-      id: u.id,
-      label: u.name ? `${u.name} (@${u.username})` : `@${u.username}`,
+    users: stakeholderRows.map((s) => ({
+      id: s.id,
+      label: s.name,
     })),
   };
 }

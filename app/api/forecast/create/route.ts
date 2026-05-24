@@ -26,7 +26,7 @@
  * expectedDate, submittedByUserId } still work — the validator
  * normalises to the v2 shape on entry.
  */
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
@@ -46,16 +46,32 @@ interface CreateBody {
   items: { city: string; quantity: number }[];
   expectedDeliveryDate: string;
   expectedPoSigningDate: string | null;
-  submittedByUserId: number;
+  /**
+   * Partnership stakeholder this Forecast is attributed to. Sourced
+   * from Settings → Department → Stakeholders (the names ops sees).
+   * Distinct from `submittedByUserId` (the auth user who clicked
+   * submit) — both can land on the row.
+   */
+  submittedByStakeholderId: number;
+  /** Optional legacy field — older callers still send submittedByUserId
+   *  for the auth user. Server fills it from the session anyway, so
+   *  this is accepted but ignored. */
+  submittedByUserId?: number;
 }
 
 function validate(body: unknown): { ok: true; data: CreateBody } | { ok: false; reason: string } {
   if (!body || typeof body !== "object") return { ok: false, reason: "Missing body" };
   const b = body as Record<string, unknown>;
 
-  // Submitter — required in both v1 + v2.
-  if (typeof b.submittedByUserId !== "number" || b.submittedByUserId <= 0)
-    return { ok: false, reason: "submittedByUserId is required" };
+  // Submitter — the dropdown now binds a Partnership stakeholder id.
+  // Legacy callers still send submittedByUserId; accept either, but
+  // require at least one positive integer so we know which row to
+  // attribute the Forecast to.
+  const stakeholderCandidate = typeof b.submittedByStakeholderId === "number"
+    ? b.submittedByStakeholderId
+    : (typeof b.submittedByUserId === "number" ? b.submittedByUserId : NaN);
+  if (!Number.isFinite(stakeholderCandidate) || stakeholderCandidate <= 0)
+    return { ok: false, reason: "submittedByStakeholderId is required" };
 
   // Dealer — accept either id OR name (new dealer).
   const hasDealerId   = typeof b.dealerId === "number"   && (b.dealerId   as number) > 0;
@@ -99,12 +115,12 @@ function validate(body: unknown): { ok: true; data: CreateBody } | { ok: false; 
   return {
     ok: true,
     data: {
-      dealerId:              hasDealerId ? (b.dealerId as number) : undefined,
-      dealerName:            hasDealerName ? (b.dealerName as string).trim() : undefined,
+      dealerId:                 hasDealerId ? (b.dealerId as number) : undefined,
+      dealerName:               hasDealerName ? (b.dealerName as string).trim() : undefined,
       items,
-      expectedDeliveryDate:  expectedDeliveryRaw,
-      expectedPoSigningDate: expectedPoRaw,
-      submittedByUserId:     b.submittedByUserId as number,
+      expectedDeliveryDate:     expectedDeliveryRaw,
+      expectedPoSigningDate:    expectedPoRaw,
+      submittedByStakeholderId: stakeholderCandidate,
     },
   };
 }
@@ -115,7 +131,15 @@ export async function POST(req: NextRequest) {
 
   const parsed = validate(await req.json().catch(() => null));
   if (!parsed.ok) return apiError(parsed.reason, 400);
-  const { dealerId, dealerName, items, expectedDeliveryDate, expectedPoSigningDate, submittedByUserId } = parsed.data;
+  const { dealerId, dealerName, items, expectedDeliveryDate, expectedPoSigningDate, submittedByStakeholderId } = parsed.data;
+
+  // `submittedByUserId` (FK to users) is the auth account that
+  // clicked submit — sourced from the session, not the form payload.
+  // The form's dropdown now binds a stakeholder, not a user.
+  const authUserId = Number(gate.user.id);
+  if (!Number.isInteger(authUserId) || authUserId <= 0) {
+    return apiError("Could not resolve the signed-in user id", 401);
+  }
 
   // Resolve dealer — existing id wins, otherwise create-or-find by name.
   let resolvedDealerId: number;
@@ -196,11 +220,30 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  await db.insert(batchForecasts).values({
+  // Insert the forecast row. submittedByUserId = the auth account
+  // (FK to users, NOT NULL). submitted_by_stakeholder_id = the
+  // Partnership stakeholder ops picked from the dropdown — written
+  // via raw SQL so the column doesn't need to live on the Drizzle
+  // schema (same pattern as batches.confirmed_quantity).
+  const [forecastRow] = await db.insert(batchForecasts).values({
     batchId:           batch.id,
     submittedAt:       today,
-    submittedByUserId,
-  });
+    submittedByUserId: authUserId,
+  }).returning({ id: batchForecasts.id });
+
+  try {
+    await db.run(sql`
+      UPDATE batch_forecasts
+      SET submitted_by_stakeholder_id = ${submittedByStakeholderId}
+      WHERE id = ${forecastRow.id}
+    `);
+  } catch (err) {
+    // Column not yet migrated → silently degrade. The forecast row
+    // still lands with the auth user; stakeholder attribution fills
+    // in once /api/admin/ensure-forecast-stakeholder-column has run.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such column/i.test(msg)) throw err;
+  }
 
   await db.insert(batchActions).values({
     batchId:      batch.id,
