@@ -1157,6 +1157,14 @@ function PoDrawer({
           )}
         </p>
 
+        {/* PO "story" — segmented phase bar + auto-generated narrative
+            sentence. Both pull from the same resolved PO object. The
+            chip strip below stays for deep-dive reading; the story
+            answers "what happened, where are we, where next" at a
+            glance. */}
+        <PoStoryBar po={po} />
+        <PoStorySentence po={po} />
+
         {/* Phase status chips + milestone timeline. Both pull from the
             same already-resolved PO object — no extra round-trips. */}
         <PoHeaderTimeline po={po} />
@@ -1703,6 +1711,294 @@ function ToggleBtn({ active, onClick, label }: { active: boolean; onClick: () =>
  * A "today" marker shows where we sit relative to those milestones.
  * Past milestones render green ✓; future ones grey ⏰.
  */
+/**
+ * Compose every PO state signal we already have into a small derived
+ * model both story components consume. Phase order matches the
+ * operational lifecycle. Each phase carries its own state machine
+ * (not_started / in_progress / done / overdue / blocked) so the
+ * downstream UI can colour + label uniformly.
+ */
+type PoPhaseState = "not_started" | "in_progress" | "done" | "overdue";
+
+interface PoPhase {
+  key:      "po_signed" | "internal" | "app_listed" | "vin_chase" | "delivery";
+  label:    string;
+  state:    PoPhaseState;
+  /** Done / total when applicable, null when binary. */
+  progress: { done: number; total: number } | null;
+  /** ISO date that anchors this phase's "when" (poDate, completedAt,
+   *  promisedDate, etc.) — null when the phase hasn't started. */
+  date:     string | null;
+}
+
+function derivePoPhases(po: PoNode, todayStr: string): PoPhase[] {
+  const counts = rollupPoCounts(po, todayStr);
+
+  // 1. PO signed — done the moment poDate exists. We treat the
+  //    absence as "in progress" only for pre_po POs that haven't
+  //    converted yet; real POs always have a date.
+  const poSigned: PoPhase = {
+    key:   "po_signed",
+    label: "PO signed",
+    state: po.poDate ? "done" : "in_progress",
+    progress: null,
+    date:  po.poDate ?? null,
+  };
+
+  // 2. Internal phase — done when every PO-scope action is settled.
+  const internal: PoPhase = {
+    key:   "internal",
+    label: "Internal phase",
+    state: counts.internal.total === 0
+      ? "not_started"
+      : counts.internal.done === counts.internal.total
+        ? "done"
+        : "in_progress",
+    progress: counts.internal.total === 0
+      ? null
+      : { done: counts.internal.done, total: counts.internal.total },
+    date:  null,
+  };
+
+  // 3. App listed — done when every batch under the PO has
+  //    appListedAt; partial = "in progress"; none = "not started".
+  const listing = po.appListingSummary;
+  const appListed: PoPhase = {
+    key:   "app_listed",
+    label: "App listed",
+    state: listing.total === 0
+      ? "not_started"
+      : listing.completedAt != null
+        ? "done"
+        : listing.listed > 0
+          ? "in_progress"
+          : "not_started",
+    progress: listing.total === 0
+      ? null
+      : { done: listing.listed, total: listing.total },
+    date:  listing.completedAt ? listing.completedAt.slice(0, 10) : null,
+  };
+
+  // 4. VIN chase — aggregate every wave-scope action's status. Done
+  //    when all wave actions are settled, in progress if any are
+  //    done OR any are blocked + the PO is post-internal-phase.
+  const waveActions = po.waves.flatMap((w) => w.actions);
+  const waveDone   = waveActions.filter((a) => a.status === "done" || a.status === "skipped").length;
+  const waveTotal  = waveActions.length;
+  const vinChase: PoPhase = {
+    key:   "vin_chase",
+    label: "VIN chase",
+    state: waveTotal === 0
+      ? "not_started"
+      : waveDone === waveTotal
+        ? "done"
+        : waveDone > 0
+          ? "in_progress"
+          : "not_started",
+    progress: waveTotal === 0
+      ? null
+      : { done: waveDone, total: waveTotal },
+    date:  null,
+  };
+
+  // 5. Delivery — done when every batch is closed-as-delivered.
+  //    Overdue when any wave's promised date is in the past and the
+  //    PO isn't fully delivered yet.
+  const allBatches    = po.waves.flatMap((w) => w.batches);
+  const delivered     = allBatches.filter((b) => b.closedAt != null && b.closureReason === "delivered").length;
+  const totalBatches  = allBatches.length;
+  const isFullyDelivered = totalBatches > 0 && delivered === totalBatches;
+  const overdueWindow = !isFullyDelivered && po.waves.some(
+    (w) => (w.opsExpectedDate ?? w.availabilityDate) < todayStr && (w.closedAt == null),
+  );
+  const delivery: PoPhase = {
+    key:   "delivery",
+    label: "Delivery",
+    state: totalBatches === 0
+      ? "not_started"
+      : isFullyDelivered
+        ? "done"
+        : overdueWindow
+          ? "overdue"
+          : delivered > 0
+            ? "in_progress"
+            : "not_started",
+    progress: totalBatches === 0
+      ? null
+      : { done: delivered, total: totalBatches },
+    date:  po.nextAvailability ?? null,
+  };
+
+  return [poSigned, internal, appListed, vinChase, delivery];
+}
+
+/**
+ * Story bar — horizontal segmented phase progression. One pill per
+ * phase, coloured by state. The pill currently in flight pulses; done
+ * pills get a check, future pills stay neutral, overdue pills go flame.
+ * Sits above the existing chip strip so ops sees the macro picture
+ * before drilling into the detail.
+ */
+function PoStoryBar({ po }: { po: PoNode }) {
+  const today  = todayIso();
+  const phases = derivePoPhases(po, today);
+  if (phases.length === 0) return null;
+
+  // First in-progress phase (left-to-right) is "current" — the one we
+  // pulse. Falls back to the last phase when everything is done.
+  const currentIdx = (() => {
+    const inProg = phases.findIndex((p) => p.state === "in_progress" || p.state === "overdue");
+    if (inProg !== -1) return inProg;
+    return phases.length - 1;
+  })();
+
+  return (
+    <ol className="flex flex-wrap items-stretch gap-1 text-[0.65rem]">
+      {phases.map((p, i) => {
+        const isCurrent = i === currentIdx;
+        const cls =
+          p.state === "done"        ? "border-green text-green-dark bg-green-pale/60" :
+          p.state === "overdue"     ? "border-flame text-flame-dark bg-flame-pale/60" :
+          p.state === "in_progress" ? "border-brand text-brand-dark bg-brand-pastel/60" :
+                                       "border-ink-200 text-ink-500 bg-white";
+        return (
+          <li key={p.key} className="flex items-center gap-1">
+            <span
+              className={cn(
+                "inline-flex items-center gap-1 border rounded-md px-2 py-1 font-medium",
+                cls,
+                isCurrent && p.state !== "done" && "ring-2 ring-brand/30",
+              )}
+              title={p.date ? `${p.label} · ${p.date}` : p.label}
+            >
+              <span aria-hidden>
+                {p.state === "done"
+                  ? "✓"
+                  : p.state === "overdue"
+                    ? "⚠"
+                    : p.state === "in_progress"
+                      ? "●"
+                      : "○"}
+              </span>
+              <span>{p.label}</span>
+              {p.progress && (
+                <span className="tabular-nums opacity-80">
+                  {p.progress.done}/{p.progress.total}
+                </span>
+              )}
+            </span>
+            {i < phases.length - 1 && (
+              <span aria-hidden className="text-ink-300">→</span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
+ * Story sentence — auto-generated 1-line narrative. Reads like a
+ * progress note: "Signed Nd ago · Internal 3/4 · App listing pending
+ * · VIN chase not started · Next milestone: App listing." Adapts to
+ * each PO state (open / partly delivered / fully delivered / etc.).
+ */
+function PoStorySentence({ po }: { po: PoNode }) {
+  const today  = todayIso();
+  const phases = derivePoPhases(po, today);
+
+  function daysAgo(iso: string): string {
+    const ms = (new Date(today).getTime() - new Date(iso).getTime()) / (24 * 60 * 60 * 1000);
+    const n = Math.round(ms);
+    if (n === 0)  return "today";
+    if (n > 0)    return `${n}d ago`;
+    return `in ${-n}d`;
+  }
+
+  const parts: { text: string; tone?: "neutral" | "good" | "warn" | "flame" }[] = [];
+
+  // 1. PO signing anchor
+  const poPhase = phases.find((p) => p.key === "po_signed");
+  if (poPhase?.date) {
+    parts.push({ text: `Signed ${daysAgo(poPhase.date)}`, tone: "neutral" });
+  } else {
+    parts.push({ text: "Pre-PO", tone: "neutral" });
+  }
+
+  // 2. Internal phase
+  const intl = phases.find((p) => p.key === "internal");
+  if (intl?.progress) {
+    parts.push({
+      text: `Internal ${intl.progress.done}/${intl.progress.total}`,
+      tone: intl.state === "done" ? "good" : "warn",
+    });
+  }
+
+  // 3. App listed
+  const app = phases.find((p) => p.key === "app_listed");
+  if (app?.progress) {
+    const label = app.state === "done"
+      ? "App listed"
+      : app.state === "in_progress"
+        ? `App listing ${app.progress.done}/${app.progress.total}`
+        : "App listing pending";
+    parts.push({ text: label, tone: app.state === "done" ? "good" : "warn" });
+  }
+
+  // 4. VIN chase
+  const vin = phases.find((p) => p.key === "vin_chase");
+  if (vin?.progress) {
+    const label = vin.state === "done"
+      ? "VIN chase done"
+      : vin.state === "in_progress"
+        ? `VIN chase ${vin.progress.done}/${vin.progress.total}`
+        : "VIN chase not started";
+    parts.push({ text: label, tone: vin.state === "done" ? "good" : "neutral" });
+  }
+
+  // 5. Delivery / outcome
+  const del = phases.find((p) => p.key === "delivery");
+  if (del?.state === "done") {
+    parts.push({ text: "✓ Delivered in full", tone: "good" });
+  } else if (del?.state === "overdue") {
+    parts.push({ text: "⚠ Delivery window overdue", tone: "flame" });
+  } else if (del?.progress && del.progress.done > 0) {
+    parts.push({
+      text: `Delivered ${del.progress.done}/${del.progress.total}`,
+      tone: "warn",
+    });
+  }
+
+  // Next milestone — the leftmost phase that's not done yet.
+  const nextPhase = phases.find((p) => p.state !== "done");
+  const nextLabel = nextPhase && nextPhase.state !== "done"
+    ? `Next: ${nextPhase.label}`
+    : null;
+
+  const toneCls = (t?: "neutral" | "good" | "warn" | "flame") =>
+    t === "good"  ? "text-green-dark font-medium" :
+    t === "warn"  ? "text-gold-dark font-medium"  :
+    t === "flame" ? "text-flame-dark font-semibold" :
+                    "text-ink-700";
+
+  return (
+    <p className="text-[0.7rem] leading-snug">
+      {parts.map((p, i) => (
+        <span key={i}>
+          <span className={toneCls(p.tone)}>{p.text}</span>
+          {i < parts.length - 1 && <span className="text-ink-300 mx-1.5">·</span>}
+        </span>
+      ))}
+      {nextLabel && (
+        <>
+          <span className="text-ink-300 mx-1.5">·</span>
+          <span className="text-brand-dark font-medium">→ {nextLabel}</span>
+        </>
+      )}
+    </p>
+  );
+}
+
 function PoHeaderTimeline({ po }: { po: PoNode }) {
   const today = todayIso();
 
