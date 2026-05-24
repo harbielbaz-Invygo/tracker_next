@@ -31,7 +31,7 @@ import { augmentActions, type Touchpoint } from "@/lib/action-flow-shared";
  */
 interface ShellCtx {
   onReassign: (actionId: number, stakeholderId: number | null) => Promise<void>;
-  onBulkSetAppListed: (batchIds: number[], setListed: boolean) => Promise<void>;
+  onBulkSetAppListed: (batchIds: number[], setListed: boolean, customStampIso?: string) => Promise<void>;
   busyBatchId: number | null;
   departments: DepartmentCatalog[];
   // Touchpoint flow — used only by the External-Phase chips on each
@@ -252,15 +252,23 @@ export default function ActionCenterTreeShell({ tree }: Props) {
 
   /**
    * Bulk-set the app-listing state across a list of batches. Used by
-   * the synthetic "App listed" step in Internal Phase — app-listing is
-   * a PO-wide commitment, not per-batch, so the operator flips the
-   * whole set in one click (or un-lists all the same way).
+   * the synthetic "App listed" step in Internal Phase — app-listing
+   * is per-delivery-window, so the picker batches up unlisted batches
+   * within the checked windows and fires this once. Optional
+   * `customStampIso` lets ops backdate the listing event (e.g.
+   * "actually went live last Friday at 3pm") — defaults to "now".
    */
-  async function bulkSetAppListed(batchIds: number[], setListed: boolean): Promise<void> {
+  async function bulkSetAppListed(
+    batchIds: number[],
+    setListed: boolean,
+    customStampIso?: string,
+  ): Promise<void> {
     if (batchIds.length === 0) return;
     setMutationError(null);
     setCascadeFlash(null);
-    const stamp = setListed ? new Date().toISOString() : null;
+    const stamp = setListed
+      ? (customStampIso ?? new Date().toISOString())
+      : null;
     try {
       for (const bid of batchIds) {
         setBusyBatchId(bid);
@@ -5288,6 +5296,11 @@ function AppListedBulkCta({ po }: { po: PoNode }) {
     return init;
   });
 
+  // Backdate input — datetime-local, default empty (= "now" at submit).
+  // The HTML input value is local-time without timezone, so we convert
+  // to ISO at submit time via `new Date(...).toISOString()`.
+  const [backdateLocal, setBackdateLocal] = useState<string>("");
+
   function toggleWave(id: number) {
     setChecked((prev) => {
       const next = new Set(prev);
@@ -5311,7 +5324,14 @@ function AppListedBulkCta({ po }: { po: PoNode }) {
       setOpen(false);
       return;
     }
-    onBulkSetAppListed(ids, true);
+    // Backdate path — convert datetime-local to ISO. Empty string =>
+    // "now" at submit (bulk helper picks the timestamp).
+    let customStamp: string | undefined;
+    if (backdateLocal.trim()) {
+      const parsed = new Date(backdateLocal);
+      if (!Number.isNaN(parsed.getTime())) customStamp = parsed.toISOString();
+    }
+    onBulkSetAppListed(ids, true, customStamp);
     setOpen(false);
   }
 
@@ -5415,6 +5435,33 @@ function AppListedBulkCta({ po }: { po: PoNode }) {
               );
             })}
           </ul>
+
+          {/* Backdate input — datetime-local, default empty = "now"
+              at submit. Use case: cars actually went live last Friday
+              at 3pm but ops is logging it Monday morning. Leave empty
+              for "now" — the bulk helper picks the timestamp. */}
+          <label className="flex flex-wrap items-baseline gap-1.5 text-[0.65rem] text-ink-600 pt-1 border-t border-brand/20">
+            <span className="font-medium">🕒 Listed at</span>
+            <input
+              type="datetime-local"
+              value={backdateLocal}
+              onChange={(e) => setBackdateLocal(e.target.value)}
+              className="text-[0.7rem] px-1.5 py-0.5 border border-ink-300 rounded bg-white tabular-nums"
+            />
+            <span className="text-[0.6rem] text-ink-500 italic">
+              {backdateLocal ? "backdating to this moment" : "(leave empty = now)"}
+            </span>
+            {backdateLocal && (
+              <button
+                type="button"
+                onClick={() => setBackdateLocal("")}
+                className="text-[0.6rem] text-ink-500 hover:text-midnight underline"
+              >
+                Clear
+              </button>
+            )}
+          </label>
+
           <div className="flex justify-end gap-1.5">
             <button
               type="button"
