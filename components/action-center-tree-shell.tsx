@@ -37,9 +37,13 @@ interface ShellCtx {
   // Touchpoint flow — used only by the External-Phase chips on each
   // batch row to surface metrics (📞 N · ↗ N · ⏱ Nd) and to fire
   // Log-contact / Escalate from a satellite row beneath the chip.
+  //
+  // The optional `actionLabel` arg is purely cosmetic: it ends up in
+  // the undo-toast headline so ops can see *which* chip they just
+  // poked ("📞 VIN — contact logged") before the 10s window closes.
   touchpointsByAction: Record<string, ActionTouchpoint[]>;
-  onLogContact:       (actionId: number) => Promise<void>;
-  onEscalate:         (actionId: number) => Promise<void>;
+  onLogContact:       (actionId: number, actionLabel?: string) => Promise<void>;
+  onEscalate:         (actionId: number, actionLabel?: string) => Promise<void>;
   busyTouchpointActionId: number | null;
 }
 const ShellContext = createContext<ShellCtx | null>(null);
@@ -434,7 +438,24 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   // satellite row in BatchRow can fire them without prop-drilling.
   const [busyTouchpointActionId, setBusyTouchpointActionId] = useState<number | null>(null);
 
-  async function logContactMutation(actionId: number): Promise<void> {
+  // Undo banner — captures the id of the last-inserted touchpoint so
+  // a single click on ↶ Undo can DELETE it within the 10s window. The
+  // tick interval drives the per-second countdown in the pill.
+  interface LastTouchpoint { id: number; label: string; expiresAt: number }
+  const [lastTouchpoint, setLastTouchpoint] = useState<LastTouchpoint | null>(null);
+  const [touchpointNow, setTouchpointNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    if (!lastTouchpoint) return;
+    const t = setInterval(() => setTouchpointNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [lastTouchpoint]);
+  useEffect(() => {
+    if (lastTouchpoint && touchpointNow >= lastTouchpoint.expiresAt) {
+      setLastTouchpoint(null);
+    }
+  }, [lastTouchpoint, touchpointNow]);
+
+  async function logContactMutation(actionId: number, actionLabel?: string): Promise<void> {
     setBusyTouchpointActionId(actionId);
     setMutationError(null);
     try {
@@ -450,6 +471,15 @@ export default function ActionCenterTreeShell({ tree }: Props) {
         }),
       });
       if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { touchpoint?: { id: number } };
+      if (data.touchpoint?.id) {
+        setLastTouchpoint({
+          id:        data.touchpoint.id,
+          label:     `📞 ${actionLabel ?? "contact"} — logged`,
+          expiresAt: Date.now() + 10_000,
+        });
+        setTouchpointNow(Date.now());
+      }
       router.refresh();
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e));
@@ -458,7 +488,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
     }
   }
 
-  async function escalateMutation(actionId: number): Promise<void> {
+  async function escalateMutation(actionId: number, actionLabel?: string): Promise<void> {
     setBusyTouchpointActionId(actionId);
     setMutationError(null);
     try {
@@ -476,11 +506,38 @@ export default function ActionCenterTreeShell({ tree }: Props) {
         }),
       });
       if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { touchpoint?: { id: number } };
+      if (data.touchpoint?.id) {
+        setLastTouchpoint({
+          id:        data.touchpoint.id,
+          label:     `↗ ${actionLabel ?? "action"} — escalated`,
+          expiresAt: Date.now() + 10_000,
+        });
+        setTouchpointNow(Date.now());
+      }
       router.refresh();
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusyTouchpointActionId(null);
+    }
+  }
+
+  async function undoLastTouchpoint(): Promise<void> {
+    if (!lastTouchpoint) return;
+    const id = lastTouchpoint.id;
+    setLastTouchpoint(null);
+    setMutationError(null);
+    try {
+      const res = await fetch("/api/action-touchpoint", {
+        method:  "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ id }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setMutationError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -506,6 +563,29 @@ export default function ActionCenterTreeShell({ tree }: Props) {
       >
         ⌨ ?
       </button>
+
+      {/* Undo toast for touchpoints — floats over the drawer at the
+          bottom-left so it doesn't fight with the help button (right)
+          or any inline form. Auto-dismisses after 10s; clicking the
+          ↶ button hits DELETE /api/action-touchpoint. */}
+      {lastTouchpoint && touchpointNow < lastTouchpoint.expiresAt && (
+        <div
+          role="status"
+          className="absolute bottom-2 left-2 z-10 flex items-center gap-2 text-xs bg-green-pale border border-green px-3 py-1.5 rounded-md shadow-sm"
+        >
+          <span>✓ {lastTouchpoint.label}</span>
+          <span className="text-ink-500 tabular-nums">
+            · {Math.max(0, Math.ceil((lastTouchpoint.expiresAt - touchpointNow) / 1000))}s
+          </span>
+          <button
+            type="button"
+            onClick={undoLastTouchpoint}
+            className="ml-1 text-[0.7rem] px-2 py-0.5 rounded border border-flame text-flame-dark hover:bg-flame-pale font-medium bg-white"
+          >
+            ↶ Undo
+          </button>
+        </div>
+      )}
 
       {helpOpen && (
         <div
@@ -4265,6 +4345,9 @@ function ExtPhaseChipWithFlow({
   const tpBusy = busyTouchpointActionId === action.id;
   const anyBusy = busy || tpBusy;
   const isDone = action.status === "done" || action.status === "skipped";
+  // Surface the chip's label in the undo toast so the user sees
+  // "📞 VIN — logged" instead of a generic "contact logged".
+  const actionLabel = action.doneLabel || action.waitingLabel;
   // Don't surface contact / escalate on synthetic rows.
   if (action.id < 0) return null;
 
@@ -4336,7 +4419,7 @@ function ExtPhaseChipWithFlow({
           <>
             <button
               type="button"
-              onClick={() => onLogContact(action.id)}
+              onClick={() => onLogContact(action.id, actionLabel)}
               disabled={anyBusy}
               title="Log a touchpoint (default: outbound, +1d follow-up)"
               className={cn(buttonW,
@@ -4347,7 +4430,7 @@ function ExtPhaseChipWithFlow({
             </button>
             <button
               type="button"
-              onClick={() => onEscalate(action.id)}
+              onClick={() => onEscalate(action.id, actionLabel)}
               disabled={anyBusy}
               title="Log an internal escalation (+2d follow-up)"
               className={cn(buttonW,
