@@ -16,6 +16,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
   InsightsData, ClosureSummary, ForecastReliabilityRow,
+  UpcomingAtRiskRow,
 } from "@/lib/insights-data";
 import type {
   DepartmentRow, StakeholderRow, DealerReliabilityRow, CityReliabilityRow,
@@ -85,6 +86,8 @@ export default function InsightsShell({ data, period }: Props) {
       </div>
 
       <ClosureStrip closure={data.closure} />
+
+      <UpcomingAtRiskBlock rows={data.upcomingAtRisk} />
 
       <CustomerImpactBlock impact={data.report.customerImpact} />
 
@@ -329,6 +332,105 @@ function HeroTile({
       })()}
       <p className="text-[0.65rem] text-ink-500 mt-0.5 leading-tight">{sub}</p>
     </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Upcoming at risk — proactive feed (Audit 3 #1 + #2)
+// ──────────────────────────────────────────────────────────────────
+
+function UpcomingAtRiskBlock({ rows }: { rows: UpcomingAtRiskRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <section className="card border-green/40 bg-green-pale/30">
+        <h2 className="text-base font-bold text-green-dark">🚨 Upcoming at risk (next 30 days)</h2>
+        <p className="text-sm text-ink-600 mt-2">
+          🎉 No batches in the next 30 days are flagged at risk — every open batch is
+          either post-VIN with comfortable runway or has a strong historical signal.
+        </p>
+      </section>
+    );
+  }
+
+  const levelChip = (level: UpcomingAtRiskRow["confidenceLevel"]) => {
+    const cls = {
+      critical: "bg-flame-pale text-flame-dark border-flame",
+      high:     "bg-gold-pale  text-gold-dark  border-gold",
+      medium:   "bg-blue-pale  text-blue-dark  border-blue",
+      low:      "bg-green-pale text-green-dark border-green",
+    }[level];
+    return (
+      <span className={cn(
+        "text-[0.6rem] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded border",
+        cls,
+      )}>{level}</span>
+    );
+  };
+
+  return (
+    <section className="card">
+      <div className="flex items-baseline justify-between gap-3 mb-1">
+        <h2 className="text-base font-bold text-midnight">🚨 Upcoming at risk (next 30 days)</h2>
+        <span className="text-[0.7rem] text-ink-500 tabular-nums">
+          {rows.length} batch{rows.length === 1 ? "" : "es"} · sorted by confidence ↑
+        </span>
+      </div>
+      <p className="text-xs text-ink-500 mb-3">
+        Open batches whose promise lands inside 30 days, scored 0–100 on a
+        composite of runway, VIN phase, current delay, and historical risk.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-[0.65rem] uppercase tracking-wide text-ink-500 border-b border-ink-200">
+              <th className="py-1.5 pr-2">Batch</th>
+              <th className="py-1.5 pr-2">Dealer / model</th>
+              <th className="py-1.5 pr-2 text-right tabular-nums">Qty</th>
+              <th className="py-1.5 pr-2 text-right tabular-nums">Promised</th>
+              <th className="py-1.5 pr-2 text-right tabular-nums">Days</th>
+              <th className="py-1.5 pr-2 text-right tabular-nums">Conf.</th>
+              <th className="py-1.5">Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.batchCode} className="border-b border-ink-100 last:border-b-0 align-top">
+                <td className="py-1.5 pr-2">
+                  <code className="font-mono text-midnight">{r.batchCode}</code>
+                  {r.poNumber && <div className="text-[0.6rem] text-ink-500">{r.poNumber}</div>}
+                </td>
+                <td className="py-1.5 pr-2">
+                  <div className="text-midnight">{r.dealerName}</div>
+                  <div className="text-[0.65rem] text-ink-500">{r.modelYear}</div>
+                </td>
+                <td className="py-1.5 pr-2 text-right tabular-nums">{r.quantity}</td>
+                <td className="py-1.5 pr-2 text-right tabular-nums text-ink-600">{r.promisedDate}</td>
+                <td className="py-1.5 pr-2 text-right tabular-nums">
+                  {r.daysToAvailability == null
+                    ? "—"
+                    : r.daysToAvailability < 0
+                      ? <span className="text-flame-dark">+{-r.daysToAvailability}d late</span>
+                      : <span className="text-ink-700">{r.daysToAvailability}d</span>}
+                </td>
+                <td className="py-1.5 pr-2 text-right tabular-nums">
+                  <div className="flex items-center justify-end gap-1.5">
+                    <span className="font-semibold text-midnight">{r.confidenceScore}</span>
+                    {levelChip(r.confidenceLevel)}
+                  </div>
+                </td>
+                <td className="py-1.5">
+                  <ul className="text-[0.65rem] text-ink-600 leading-snug space-y-0.5">
+                    {r.reasons.length === 0
+                      ? <li className="italic text-ink-400">—</li>
+                      : r.reasons.map((why, i) => <li key={i}>· {why}</li>)}
+                  </ul>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 

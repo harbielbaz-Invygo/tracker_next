@@ -15,6 +15,7 @@ import {
 } from "@/lib/db/schema";
 import { getDashboardRows, type DashboardRow } from "@/lib/dashboard-data";
 import { getPerformanceReport, type PerformanceReport } from "@/lib/reports-data";
+import { computeDeliveryConfidence, type ConfidenceLevel } from "@/lib/delivery-confidence";
 import type { ReportPeriod } from "@/lib/reports-period";
 
 export interface InsightsHero {
@@ -114,6 +115,31 @@ export interface ForecastReliabilityRow {
   avgDriftDays: number | null;
 }
 
+/**
+ * Audit 3 #1 — "🚨 Upcoming deliveries at risk" feed row.
+ *
+ * One per open batch whose effective availability date is within the
+ * next 30 days (already-overdue batches are included too — they're the
+ * highest priority by definition). Sorted by confidence score ASC so
+ * the most-at-risk lands first.
+ */
+export interface UpcomingAtRiskRow {
+  batchCode: string;
+  poNumber: string | null;
+  dealerName: string;
+  modelYear: string;
+  quantity: number;
+  promisedDate: string;
+  daysToAvailability: number | null;
+  vinPhase: "pre_vin" | "post_vin";
+  delayDays: number;
+  /** 0–100, higher = more confident. */
+  confidenceScore: number;
+  confidenceLevel: ConfidenceLevel;
+  /** Top human-readable reasons, capped to the worst 3. */
+  reasons: string[];
+}
+
 export interface InsightsData {
   generatedAt: string;
   hero: InsightsHero;
@@ -125,6 +151,13 @@ export interface InsightsData {
   closure: ClosureSummary;
   /** Per-Partnership-user Forecast reliability — feeds the Trust tab. */
   forecastReliability: ForecastReliabilityRow[];
+  /**
+   * "🚨 Upcoming at risk" feed (Audit 3 #1). Open batches whose
+   * effective availability date is within the next 30 days, sorted
+   * by delivery-confidence score ASC. Capped to 10 rows so the
+   * widget stays scannable.
+   */
+  upcomingAtRisk: UpcomingAtRiskRow[];
 }
 
 /** Period lower-bound ISO date. Duplicated from reports-data so we
@@ -479,6 +512,43 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     unlistedOverThreshold: listingSpeed.unlistedOverThreshold,
   };
 
+  // Audit 3 #1 — upcoming-at-risk feed. Score every open batch whose
+  // effective availability date is in (-∞, +30d], sort by confidence
+  // ASC (worst first), cap to 10 rows. Anything older than 30 days
+  // past-due is included too — those are usually the highest priority.
+  const upcomingAtRisk: UpcomingAtRiskRow[] = batchRows
+    .filter((r) =>
+      r.daysToAvailability != null
+      && r.daysToAvailability <= 30
+      // Drop closed-out batches. StatusBucket only flags "delivered"
+      // for closed rows; on_track / ahead / delayed are all in flight.
+      && r.status !== "delivered",
+    )
+    .map((r) => {
+      const c = computeDeliveryConfidence({
+        daysToAvailability: r.daysToAvailability,
+        vinPhase:           r.vinPhase,
+        delayDays:          r.delayDays,
+        legacyRisk:         r.risk,
+      });
+      return {
+        batchCode:          r.batchCode,
+        poNumber:           r.poNumber,
+        dealerName:         r.dealerName,
+        modelYear:          r.modelYear,
+        quantity:           r.quantity,
+        promisedDate:       r.promisedDate,
+        daysToAvailability: r.daysToAvailability,
+        vinPhase:           r.vinPhase,
+        delayDays:          r.delayDays,
+        confidenceScore:    c.score,
+        confidenceLevel:    c.level,
+        reasons:            c.reasons.slice(0, 3),
+      };
+    })
+    .sort((a, b) => a.confidenceScore - b.confidenceScore)
+    .slice(0, 10);
+
   return {
     generatedAt: report.generatedAt,
     hero,
@@ -486,6 +556,7 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     batchRows,
     closure,
     forecastReliability,
+    upcomingAtRisk,
   };
 }
 
