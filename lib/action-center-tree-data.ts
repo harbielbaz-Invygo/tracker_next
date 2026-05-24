@@ -38,6 +38,52 @@ type BatchRow = typeof batches.$inferSelect;
  * data until the admin migration endpoint runs.
  */
 /**
+ * Read every row in `action_touchpoints` via raw SQL — used by the
+ * Action Center to power the External-Phase chip metrics + the
+ * Log-contact/Escalate inline controls. Tolerant of the table being
+ * missing (pre-migration DBs return an empty Map).
+ *
+ * Sorted DESC by contactedAt, then by id, so consumers can treat
+ * `arr[0]` as "latest" and `arr[arr.length-1]` as "earliest".
+ */
+async function fetchTouchpointsByAction(): Promise<Record<string, ActionTouchpoint[]>> {
+  try {
+    const rows = await db.all<{
+      id: number; action_id: number; channel: string; direction: string;
+      outcome: string; note: string | null; contacted_at: string;
+      next_followup_at: string | null; logged_by: string | null;
+      escalated: number;
+    }>(sql`
+      SELECT id, action_id, channel, direction, outcome, note,
+             contacted_at, next_followup_at, logged_by, escalated
+      FROM action_touchpoints
+      ORDER BY contacted_at DESC, id DESC
+    `);
+    const grouped: Record<string, ActionTouchpoint[]> = {};
+    for (const r of rows) {
+      const key = String(r.action_id);
+      (grouped[key] ??= []).push({
+        id:             Number(r.id),
+        actionId:       Number(r.action_id),
+        channel:        r.channel,
+        direction:      r.direction,
+        outcome:        r.outcome,
+        note:           r.note,
+        contactedAt:    r.contacted_at,
+        nextFollowupAt: r.next_followup_at,
+        loggedBy:       r.logged_by,
+        escalated:      Boolean(r.escalated),
+      });
+    }
+    return grouped;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such (column|table)/i.test(msg)) return {};
+    throw err;
+  }
+}
+
+/**
  * Read `batches.confirmed_quantity` via raw SQL so callers don't have
  * to declare the column on the Drizzle schema (which would force
  * EVERY db.select().from(batches) anywhere to include it, breaking
@@ -336,8 +382,36 @@ export interface ActionCenterTree {
    * the picker filters by the action's current department.
    */
   departments: DepartmentCatalog[];
+  /**
+   * Per-action touchpoint history, keyed by action id (stringified).
+   * Sourced from `action_touchpoints` — used by the Action Center's
+   * External-Phase chips to surface 📞/↗/⏱ metrics + the
+   * Log-contact/Escalate inline controls. Empty when the touchpoints
+   * table hasn't been migrated yet.
+   */
+  touchpointsByAction: Record<string, ActionTouchpoint[]>;
   /** Generation timestamp — useful for the UI's stale-data indicator. */
   generatedAt: string;
+}
+
+/**
+ * Touchpoint row as the Action Center consumes it — JSON-serialisable
+ * subset of `action_touchpoints`. Keeping the type here (rather than
+ * pulling from action-flow-shared) keeps the dependency graph
+ * unidirectional: action-flow-shared imports FROM action-center-tree-
+ * data, never the other way.
+ */
+export interface ActionTouchpoint {
+  id:             number;
+  actionId:       number;
+  channel:        string;
+  direction:      string;
+  outcome:        string;
+  note:           string | null;
+  contactedAt:    string;
+  nextFollowupAt: string | null;
+  loggedBy:       string | null;
+  escalated:      boolean;
 }
 
 /**
@@ -350,11 +424,12 @@ export interface ActionCenterTree {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     fetchBatchesTolerant(),
     fetchConfirmedQtyByBatch(),
+    fetchTouchpointsByAction(),
     db
       .select({
         id:              actionsTable.id,
@@ -941,6 +1016,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
   return {
     dealers:     dealerNodes,
     departments: deptCatalog,
+    touchpointsByAction,
     generatedAt: new Date().toISOString(),
   };
 }
