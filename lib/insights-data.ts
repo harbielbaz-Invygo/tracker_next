@@ -61,6 +61,12 @@ export interface InsightsHero {
    * "how many are over the line today?".
    */
   unlistedOverThreshold: number;
+  /**
+   * Weekly median PO→Listed trend (Audit 2 #5), 12 weeks, oldest
+   * first. Null in weeks with no listings. Drives the sparkline next
+   * to the headline median.
+   */
+  medianDaysToListedWeekly: (number | null)[];
 }
 
 /**
@@ -133,6 +139,39 @@ export interface ForecastReliabilityRow {
  *   openCount              = waiting + blocked rows of this type.
  *   doneCount              = done rows of this type.
  */
+/**
+ * Audit 2 #6 — "Stuck stages right now" widget row.
+ *
+ * One row per action_type that has at least one open (waiting or
+ * blocked) action somewhere in the system, sorted by open count DESC.
+ * Answers "what's piling up RIGHT NOW" without needing the operator
+ * to drill into individual batches.
+ *
+ *   openCount       — waiting + blocked rows of this type
+ *   blockedCount    — subset of openCount that are 'blocked' (parent
+ *                     dep unmet). Useful to distinguish "nobody's
+ *                     working it" from "it can't be worked yet".
+ *   medianAgeDays   — median (today − action.createdAt) across open
+ *                     rows. Null when no rows have a creation
+ *                     timestamp.
+ *   oldestAgeDays   — max age across the open rows. Spotlights the
+ *                     single oldest row hidden inside an otherwise
+ *                     healthy queue.
+ *   scope           — "po" / "wave" / "batch" (matches actions.scope).
+ *                     Lets the UI separate internal-phase pile-ups
+ *                     from external-phase ones.
+ */
+export interface StuckStageRow {
+  actionTypeId:   number;
+  actionTypeName: string;
+  scope:          "po" | "wave" | "batch";
+  sortOrder:      number;
+  openCount:      number;
+  blockedCount:   number;
+  medianAgeDays:  number | null;
+  oldestAgeDays:  number | null;
+}
+
 export interface InternalPhaseActionStat {
   actionTypeId: number;
   actionTypeName: string;
@@ -193,6 +232,12 @@ export interface InsightsData {
    * order ops sees the chips in the Action Center.
    */
   internalPhaseStats: InternalPhaseActionStat[];
+  /**
+   * "Stuck stages right now" rollup (Audit 2 #6). One row per
+   * action_type with ≥ 1 open action, sorted by openCount DESC.
+   * Snapshot — not period-scoped, since "right now" is the point.
+   */
+  stuckStages: StuckStageRow[];
 }
 
 /** Period lower-bound ISO date. Duplicated from reports-data so we
@@ -425,6 +470,8 @@ async function getForecastReliability(period: ReportPeriod): Promise<ForecastRel
 async function getListingSpeed(period: ReportPeriod): Promise<{
   medianDaysToListed: number | null;
   unlistedOverThreshold: number;
+  /** Weekly median trend, 12 weeks oldest first. (Audit 2 #5.) */
+  medianDaysToListedWeekly: (number | null)[];
 }> {
   const fromIso = fromIsoForPeriod(period);
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -448,7 +495,11 @@ async function getListingSpeed(period: ReportPeriod): Promise<{
     if (/no such table|no such column/i.test(msg)) {
       // eslint-disable-next-line no-console
       console.warn("[insights-data] listing speed skipped — schema not migrated.");
-      return { medianDaysToListed: null, unlistedOverThreshold: 0 };
+      return {
+        medianDaysToListed: null,
+        unlistedOverThreshold: 0,
+        medianDaysToListedWeekly: Array.from({ length: 12 }, () => null),
+      };
     }
     throw err;
   }
@@ -480,17 +531,43 @@ async function getListingSpeed(period: ReportPeriod): Promise<{
     }
   }
 
-  const medianDaysToListed = daysSamples.length === 0
-    ? null
-    : (() => {
-        const sorted = daysSamples.slice().sort((a, b) => a - b);
-        const mid = Math.floor(sorted.length / 2);
-        return sorted.length % 2 === 0
-          ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
-          : sorted[mid];
-      })();
+  const median = (arr: number[]): number | null => {
+    if (arr.length === 0) return null;
+    const sorted = arr.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0
+      ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+      : sorted[mid];
+  };
+  const medianDaysToListed = median(daysSamples);
 
-  return { medianDaysToListed, unlistedOverThreshold: unlistedOver };
+  // Audit 2 #5 — weekly bucket the same (appListedAt − requestedAt)
+  // samples. Each bucket's median is independent of the period
+  // filter so the trend always reads 12 weeks back from today.
+  const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+  const todayMidnight = new Date(); todayMidnight.setHours(0, 0, 0, 0);
+  const daysSinceMonday = (todayMidnight.getDay() + 6) % 7;
+  const thisWeekStartMs = todayMidnight.getTime() - daysSinceMonday * 24 * 60 * 60 * 1000;
+  const bucketEdges = Array.from({ length: 12 }, (_, i) => thisWeekStartMs - (11 - i) * WEEK_MS);
+  const buckets: number[][] = Array.from({ length: 12 }, () => []);
+  for (const r of rows) {
+    if (r.lifecycleState !== "post_po") continue;
+    if (!r.requestedAt || !r.appListedAt) continue;
+    const listedTs = new Date(r.appListedAt.slice(0, 10)).getTime();
+    if (!Number.isFinite(listedTs)) continue;
+    for (let i = 11; i >= 0; i--) {
+      if (listedTs >= bucketEdges[i]) {
+        const days = Math.round(
+          (listedTs - new Date(r.requestedAt).getTime()) / (24 * 60 * 60 * 1000),
+        );
+        if (days >= 0) buckets[i].push(days);
+        break;
+      }
+    }
+  }
+  const medianDaysToListedWeekly = buckets.map((b) => median(b));
+
+  return { medianDaysToListed, unlistedOverThreshold: unlistedOver, medianDaysToListedWeekly };
 }
 
 export async function getInsightsData(period: ReportPeriod = "all"): Promise<InsightsData> {
@@ -543,8 +620,9 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     onTimeRateWeekly,
     cancelled:        report.totals.cancelled,
     rePromisesIssued: report.customerImpact.totals.totalRePromises,
-    medianDaysToListed:    listingSpeed.medianDaysToListed,
-    unlistedOverThreshold: listingSpeed.unlistedOverThreshold,
+    medianDaysToListed:       listingSpeed.medianDaysToListed,
+    medianDaysToListedWeekly: listingSpeed.medianDaysToListedWeekly,
+    unlistedOverThreshold:    listingSpeed.unlistedOverThreshold,
   };
 
   // Audit 3 #1 — upcoming-at-risk feed. Score every open batch whose
@@ -589,6 +667,9 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
   // since it doesn't need their results.
   const internalPhaseStats = await getInternalPhaseStats(period);
 
+  // Audit 2 #6 — stuck-stage snapshot (right now, not period-scoped).
+  const stuckStages = await getStuckStages();
+
   return {
     generatedAt: report.generatedAt,
     hero,
@@ -598,6 +679,7 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     forecastReliability,
     upcomingAtRisk,
     internalPhaseStats,
+    stuckStages,
   };
 }
 
@@ -830,4 +912,104 @@ async function getInternalPhaseStats(period: ReportPeriod): Promise<InternalPhas
       onTimeRate:     b.onTimeTotal === 0 ? null : Math.round((b.onTimeHits / b.onTimeTotal) * 100),
     }))
     .sort((a, b) => a.sortOrder - b.sortOrder);
+}
+
+/**
+ * Audit 2 #6 — "Stuck stages right now" snapshot.
+ *
+ * Aggregates every open (waiting / blocked) row in the `actions`
+ * table by action_type. Per type: open count, blocked-subset count,
+ * median + max age in days (today − createdAt).
+ *
+ * Snapshot, not period-scoped — "right now" is the point. Sorted by
+ * open count DESC so the biggest pile-ups land first.
+ */
+async function getStuckStages(): Promise<StuckStageRow[]> {
+  interface Row {
+    actionTypeId:   number;
+    actionTypeName: string;
+    sortOrder:      number;
+    scope:          "po" | "wave" | "batch";
+    status:         "waiting" | "blocked" | "done" | "skipped";
+    createdAt:      string | null;
+  }
+  let rows: Row[];
+  try {
+    rows = await db
+      .select({
+        actionTypeId:   actionsTable.actionTypeId,
+        actionTypeName: actionTypes.name,
+        sortOrder:      actionTypes.sortOrder,
+        scope:          actionsTable.scope,
+        status:         actionsTable.status,
+        createdAt:      actionsTable.createdAt,
+      })
+      .from(actionsTable)
+      .innerJoin(actionTypes, eq(actionsTable.actionTypeId, actionTypes.id));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such (table|column)/i.test(msg)) return [];
+    throw err;
+  }
+
+  const today = Date.now();
+  interface Bucket {
+    actionTypeId:   number;
+    actionTypeName: string;
+    sortOrder:      number;
+    scope:          "po" | "wave" | "batch";
+    openCount:      number;
+    blockedCount:   number;
+    ages:           number[];
+  }
+  // Key by `${typeId}|${scope}` — same action type can exist at
+  // multiple scopes (e.g. "App Listing" is PO-scope here, but a
+  // future redesign might add a batch-scope copy). Keep them split.
+  const buckets = new Map<string, Bucket>();
+  for (const r of rows) {
+    if (r.status !== "waiting" && r.status !== "blocked") continue;
+    const key = `${r.actionTypeId}|${r.scope}`;
+    let b = buckets.get(key);
+    if (!b) {
+      b = {
+        actionTypeId:   r.actionTypeId,
+        actionTypeName: r.actionTypeName,
+        sortOrder:      r.sortOrder,
+        scope:          r.scope,
+        openCount: 0, blockedCount: 0, ages: [],
+      };
+      buckets.set(key, b);
+    }
+    b.openCount++;
+    if (r.status === "blocked") b.blockedCount++;
+    if (r.createdAt) {
+      const ts = new Date(r.createdAt).getTime();
+      if (Number.isFinite(ts)) {
+        const days = Math.round((today - ts) / (24 * 60 * 60 * 1000));
+        if (days >= 0) b.ages.push(days);
+      }
+    }
+  }
+
+  function median(arr: number[]): number | null {
+    if (arr.length === 0) return null;
+    const sorted = arr.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0
+      ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+      : sorted[mid];
+  }
+
+  return Array.from(buckets.values())
+    .map((b): StuckStageRow => ({
+      actionTypeId:   b.actionTypeId,
+      actionTypeName: b.actionTypeName,
+      scope:          b.scope,
+      sortOrder:      b.sortOrder,
+      openCount:      b.openCount,
+      blockedCount:   b.blockedCount,
+      medianAgeDays:  median(b.ages),
+      oldestAgeDays:  b.ages.length === 0 ? null : Math.max(...b.ages),
+    }))
+    .sort((a, b) => b.openCount - a.openCount || a.sortOrder - b.sortOrder);
 }

@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
   InsightsData, ClosureSummary, ForecastReliabilityRow,
-  UpcomingAtRiskRow, InternalPhaseActionStat,
+  UpcomingAtRiskRow, InternalPhaseActionStat, StuckStageRow,
 } from "@/lib/insights-data";
 import type {
   DepartmentRow, StakeholderRow, DealerReliabilityRow, CityReliabilityRow,
@@ -90,6 +90,8 @@ export default function InsightsShell({ data, period }: Props) {
       <UpcomingAtRiskBlock rows={data.upcomingAtRisk} />
 
       <InternalPhaseBreakdown stats={data.internalPhaseStats} />
+
+      <StuckStagesBlock rows={data.stuckStages} />
 
       <CustomerImpactBlock impact={data.report.customerImpact} />
 
@@ -185,6 +187,11 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
         sub={hero.unlistedOverThreshold > 0
           ? `median · ${hero.unlistedOverThreshold} unlisted > 14d`
           : "median across listed batches"}
+        trend={{
+          values:    hero.medianDaysToListedWeekly,
+          domain:    "auto",
+          ariaLabel: "Median days PO → Listed — last 12 weeks",
+        }}
       />
     </section>
   );
@@ -509,6 +516,104 @@ function InternalPhaseBreakdown({ stats }: { stats: InternalPhaseActionStat[] })
                       : s.onTimeRate >= 60
                         ? <span className="text-gold-dark font-semibold">{s.onTimeRate}%</span>
                         : <span className="text-flame-dark font-semibold">{s.onTimeRate}%</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Stuck stages right now (Audit 2 #6)
+// ──────────────────────────────────────────────────────────────────
+
+function StuckStagesBlock({ rows }: { rows: StuckStageRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <section className="card border-green/40 bg-green-pale/30">
+        <h2 className="text-base font-bold text-green-dark">🧱 Stuck stages right now</h2>
+        <p className="text-sm text-ink-600 mt-2">
+          🎉 No open actions in the system. Either nothing's in flight or
+          every chip has landed — either way, no pile-ups.
+        </p>
+      </section>
+    );
+  }
+
+  const scopeLabel = (s: StuckStageRow["scope"]) =>
+    s === "po" ? "Internal" : s === "wave" ? "VIN chase" : "Batch close";
+  const scopeTone = (s: StuckStageRow["scope"]) =>
+    s === "po"    ? "bg-brand-pastel/40 text-brand-dark border-brand" :
+    s === "wave"  ? "bg-gold-pale       text-gold-dark  border-gold"  :
+                    "bg-ink-50          text-ink-700    border-ink-300";
+
+  return (
+    <section className="card">
+      <div className="flex items-baseline justify-between gap-3 mb-1">
+        <h2 className="text-base font-bold text-midnight">🧱 Stuck stages right now</h2>
+        <span className="text-[0.7rem] text-ink-500">
+          {rows.length} type{rows.length === 1 ? "" : "s"} with open work · sorted by pile-up size
+        </span>
+      </div>
+      <p className="text-xs text-ink-500 mb-3">
+        Snapshot of every action_type with at least one open (waiting or blocked) row.
+        Median + oldest age tell you whether a backlog is fresh churn or a long-standing pile.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-[0.65rem] uppercase tracking-wide text-ink-500 border-b border-ink-200">
+              <th className="py-1.5 pr-3">Stage</th>
+              <th className="py-1.5 pr-3">Phase</th>
+              <th className="py-1.5 pr-3 text-right tabular-nums">Open</th>
+              <th className="py-1.5 pr-3 text-right tabular-nums">Blocked</th>
+              <th className="py-1.5 pr-3 text-right tabular-nums">Median age</th>
+              <th className="py-1.5 pr-3 text-right tabular-nums">Oldest</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={`${r.actionTypeId}-${r.scope}`} className="border-b border-ink-100 last:border-b-0">
+                <td className="py-1.5 pr-3 text-midnight">{r.actionTypeName}</td>
+                <td className="py-1.5 pr-3">
+                  <span className={cn(
+                    "text-[0.6rem] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded border",
+                    scopeTone(r.scope),
+                  )}>
+                    {scopeLabel(r.scope)}
+                  </span>
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">
+                  <span className={cn(
+                    "font-semibold",
+                    r.openCount >= 10 ? "text-flame-dark" :
+                    r.openCount >= 5  ? "text-gold-dark"  :
+                    "text-ink-700",
+                  )}>{r.openCount}</span>
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">
+                  {r.blockedCount === 0
+                    ? <span className="text-ink-400">0</span>
+                    : <span className="text-flame-dark font-semibold">{r.blockedCount}</span>}
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">
+                  {r.medianAgeDays == null
+                    ? <span className="text-ink-400">—</span>
+                    : r.medianAgeDays >= 14
+                      ? <span className="text-flame-dark font-semibold">{r.medianAgeDays}d</span>
+                      : r.medianAgeDays >= 7
+                        ? <span className="text-gold-dark font-semibold">{r.medianAgeDays}d</span>
+                        : <span className="text-ink-700">{r.medianAgeDays}d</span>}
+                </td>
+                <td className="py-1.5 pr-3 text-right tabular-nums">
+                  {r.oldestAgeDays == null
+                    ? <span className="text-ink-400">—</span>
+                    : r.oldestAgeDays >= 21
+                      ? <span className="text-flame-dark">{r.oldestAgeDays}d</span>
+                      : <span className="text-ink-600">{r.oldestAgeDays}d</span>}
                 </td>
               </tr>
             ))}
