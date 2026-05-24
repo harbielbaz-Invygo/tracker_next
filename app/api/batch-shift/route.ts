@@ -32,11 +32,28 @@ import { requireAuth, apiError } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 
+/** Audit 3 #4 — categorical reason taxonomy. The free-text `reason`
+ *  is kept for nuance; the category drives the "Avoidable delays"
+ *  breakdown on Insights. */
+type DelayReasonCategory =
+  | "dealer_supply"
+  | "internal_specs"
+  | "customs"
+  | "logistics"
+  | "demand_change"
+  | "other";
+const ALLOWED_CATEGORIES: DelayReasonCategory[] = [
+  "dealer_supply", "internal_specs", "customs", "logistics", "demand_change", "other",
+];
+
 interface ShiftBody {
   batchId: number;
   newProjectedDate: string;
   bookingsAtShift?: number;
   reason?: string | null;
+  /** Audit 3 #4 — categorical attribution. Persisted via raw SQL
+   *  through the new delay_reason_category column. */
+  delayReasonCategory?: DelayReasonCategory | null;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -71,6 +88,11 @@ export async function POST(req: NextRequest) {
     ? Math.max(0, Math.floor(body.bookingsAtShift!))
     : 0;
   const reason = body.reason?.trim() || null;
+  // Validate the optional category against the enum so we don't write
+  // garbage. Null is allowed (legacy clients, optional field).
+  const delayReasonCategory = body.delayReasonCategory && ALLOWED_CATEGORIES.includes(body.delayReasonCategory)
+    ? body.delayReasonCategory
+    : null;
 
   // Fetch current state to compute the delta + drive wave moves.
   // The previous wave's id + its availabilityDate together decide
@@ -114,7 +136,7 @@ export async function POST(req: NextRequest) {
   await db.transaction(async (tx) => {
     // 1. Write the revision row.
     try {
-      await tx.insert(batchDateRevisions).values({
+      const [insertedRevision] = await tx.insert(batchDateRevisions).values({
         batchId:               body.batchId,
         revisedBy:             gate.user.username,
         previousProjectedDate: previous,
@@ -122,7 +144,28 @@ export async function POST(req: NextRequest) {
         delayDays,
         bookingsAtShift:       bookings,
         reason,
-      });
+      }).returning({ id: batchDateRevisions.id });
+
+      // Audit 3 #4 — patch the categorical reason via raw SQL so the
+      // column doesn't need to live on the Drizzle schema. Same
+      // missing-column tolerance as the other ensure-* columns.
+      if (delayReasonCategory && insertedRevision?.id) {
+        try {
+          await tx.run(sql`
+            UPDATE batch_date_revisions
+            SET delay_reason_category = ${delayReasonCategory}
+            WHERE id = ${insertedRevision.id}
+          `);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!/no such column/i.test(msg)) throw err;
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[batch-shift] delay_reason_category column missing — " +
+            "category dropped. Run /api/admin/ensure-shift-reason-category-column to migrate.",
+          );
+        }
+      }
     } catch (err) {
       if (isMissingTableError(err)) {
         // Migration not yet run — keep going, but flag back.

@@ -3837,17 +3837,34 @@ function WaveOpsDateForm({
   );
 }
 
+// Audit 3 #4 — categorical reason taxonomy. Six buckets chosen so
+// every realistic slip cause finds a home without forcing ops to
+// pick "other" unless the cause is truly novel. The "avoidable"
+// flag splits delays we could have prevented from systemic ones.
+const REASON_CATEGORIES: { value: ShiftReasonCategory; label: string; avoidable: boolean }[] = [
+  { value: "dealer_supply",   label: "🏭 Dealer supply (VIN / production / stock)", avoidable: false },
+  { value: "internal_specs",  label: "📋 Internal specs / pricing / SKU",            avoidable: true  },
+  { value: "customs",         label: "🛃 Customs / import / shipping",                avoidable: false },
+  { value: "logistics",       label: "🚚 Logistics / showroom / inspection",         avoidable: true  },
+  { value: "demand_change",   label: "🔁 Demand change / dealer renegotiation",      avoidable: false },
+  { value: "other",           label: "· Other",                                      avoidable: false },
+];
+type ShiftReasonCategory =
+  | "dealer_supply" | "internal_specs" | "customs"
+  | "logistics" | "demand_change" | "other";
+
 function ShiftDateForm({
   batch: b, busy, onSubmit, onCancel,
 }: {
   batch: BatchNode;
   busy: boolean;
-  onSubmit: (payload: { batchId: number; newProjectedDate: string; reason: string | null; bookingsAtShift: number }) => void;
+  onSubmit: (payload: { batchId: number; newProjectedDate: string; reason: string | null; bookingsAtShift: number; delayReasonCategory: ShiftReasonCategory | null }) => void;
   onCancel: () => void;
 }) {
   const [date, setDate] = useState<string>("");
   const [reason, setReason] = useState<string>("");
   const [bookings, setBookings] = useState<string>("0");
+  const [category, setCategory] = useState<ShiftReasonCategory | "">("");
   const [error, setError] = useState<string | null>(null);
 
   // Audit 3 #3 — customer-impact preview.
@@ -3878,10 +3895,11 @@ function ShiftDateForm({
     }
     const n = parseInt(bookings, 10);
     onSubmit({
-      batchId:          b.id,
-      newProjectedDate: date,
-      reason:           reason.trim() || null,
-      bookingsAtShift:  Number.isFinite(n) && n >= 0 ? n : 0,
+      batchId:             b.id,
+      newProjectedDate:    date,
+      reason:              reason.trim() || null,
+      bookingsAtShift:     Number.isFinite(n) && n >= 0 ? n : 0,
+      delayReasonCategory: category === "" ? null : category,
     });
   }
 
@@ -3910,12 +3928,27 @@ function ShiftDateForm({
           />
         </label>
         <label className="text-[0.65rem] text-ink-600 flex flex-col sm:col-span-3">
-          Reason (optional)
+          {/* Audit 3 #4 — categorical attribution. Drives the
+              "Avoidable delays" breakdown on Insights. */}
+          Reason category (optional)
+          <select
+            value={category}
+            onChange={(e) => setCategory(e.target.value as ShiftReasonCategory | "")}
+            className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5 bg-white"
+          >
+            <option value="">— Pick a category —</option>
+            {REASON_CATEGORIES.map((c) => (
+              <option key={c.value} value={c.value}>{c.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[0.65rem] text-ink-600 flex flex-col sm:col-span-3">
+          Reason details (optional)
           <input
             type="text"
             value={reason}
             onChange={(e) => setReason(e.target.value)}
-            placeholder="e.g. Dealer VIN delayed by 5 days"
+            placeholder="e.g. Dealer VIN delayed by 5 days — supplier OEM allocation slipped"
             className="text-xs px-2 py-1 border border-ink-300 rounded mt-0.5"
           />
         </label>
