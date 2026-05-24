@@ -337,19 +337,48 @@ function extractDeliverySplits(text: string): DeliverySplit[] {
   const yearMatch = text.match(/\b(20[2-3][0-9])\b/);
   const year = yearMatch ? parseInt(yearMatch[1], 10) : new Date().getFullYear();
 
-  const re = /(\d+)\s+cars?\s+in\s+([A-Z][A-Za-z]+)\s+on\s+(\w+)\s+(\d+)(?:st|nd|rd|th)?/gi;
+  // Two-step parse, matching the two PO formats we see in the wild:
+  //
+  //   A) "20 cars in Riyadh on May 5th."          (city + date inline per item)
+  //   B) "20 in Riyadh, 20 in Jeddah, 10 in       (cities grouped, single date)
+  //       Dammam on May 20th. 20 in Riyadh,
+  //       20 in Jeddah, 10 in Dammam on June 25th."
+  //
+  // Strategy: walk every "<prefix> on <Month> <day>" group (non-greedy
+  // so we stop at the next 'on Month day' anchor or the next sentence
+  // boundary). Within each prefix, extract every "<qty> [cars?] in
+  // <City>" pair and assign the group's date to each.
+  //
+  // The `cars?` token is optional — format B drops it. The prefix is
+  // upper-bounded by a period or a previous date anchor to keep one
+  // wave's cities from leaking into the next.
+  const groupRe = /([^.]+?)\s+on\s+([A-Z][a-z]+)\s+(\d+)(?:st|nd|rd|th)?/g;
+  const itemRe  = /(\d+)\s+(?:cars?\s+)?in\s+([A-Z][A-Za-z]+)/g;
+
   const seen = new Set<string>();
   const out: DeliverySplit[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const qty = parseInt(m[1], 10);
-    const city = m[2].charAt(0).toUpperCase() + m[2].slice(1).toLowerCase();
-    const dateIso = maybeDate(`${m[4]} ${m[3]} ${year}`);
+
+  let g: RegExpExecArray | null;
+  while ((g = groupRe.exec(text)) !== null) {
+    const dateIso = maybeDate(`${g[3]} ${g[2]} ${year}`);
     if (!dateIso) continue;
-    const key = `${qty}|${city}|${dateIso}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ quantity: qty, city, date: dateIso });
+    // Trim prefix to the *current* wave only: chop off anything up
+    // to the previous date anchor inside the prefix (handles the
+    // case where format A appears alongside format B and the
+    // non-greedy regex still ate too much).
+    const prefix = g[1].split(/\bon\s+[A-Z][a-z]+\s+\d+(?:st|nd|rd|th)?/).pop() ?? g[1];
+
+    itemRe.lastIndex = 0;
+    let im: RegExpExecArray | null;
+    while ((im = itemRe.exec(prefix)) !== null) {
+      const qty = parseInt(im[1], 10);
+      const cityRaw = im[2];
+      const city = cityRaw.charAt(0).toUpperCase() + cityRaw.slice(1).toLowerCase();
+      const key = `${qty}|${city}|${dateIso}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ quantity: qty, city, date: dateIso });
+    }
   }
   return out;
 }
