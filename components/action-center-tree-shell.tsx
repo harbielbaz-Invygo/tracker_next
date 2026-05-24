@@ -2287,6 +2287,26 @@ function WaveSection({
   const blockedCount = wave.actions.filter((a) => a.status === "blocked").length;
   const waitingCount = wave.actions.filter((a) => a.status === "waiting").length;
 
+  // Audit 1 #3 — wave "Partially confirmed" badge. The Confirmation
+  // chip stays green on N>0 (matches dealer reality: yes, partial),
+  // but the wave header surfaces the qty gap so it stays visible at
+  // the macro level. Only counts when at least one batch has captured
+  // a confirmation > 0 AND the total falls short of the requested.
+  const waveConfirmation = (() => {
+    let confirmed = 0;
+    let requested = 0;
+    let anyCaptured = false;
+    for (const b of wave.batches) {
+      const c = b.confirmedQuantity ?? 0;
+      if (c > 0) anyCaptured = true;
+      confirmed += c;
+      requested += b.requestedQuantity;
+    }
+    if (!anyCaptured || requested === 0) return null;
+    if (confirmed >= requested) return { state: "full" as const, confirmed, requested };
+    return { state: "partial" as const, confirmed, requested };
+  })();
+
   // "Ops hasn't committed to a window date yet" = the wave's
   // ops_expected_date equals the PO availability date (the intake
   // default) OR is null. Once ops sets a real projection, the CTA
@@ -2377,6 +2397,26 @@ function WaveSection({
         <span className="text-xs text-ink-500 tabular-nums">
           {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
         </span>
+        {/* Audit 1 #3 — wave confirmation state. Chips green when
+            partially confirmed land but the window total falls short
+            of the requested, surfacing the gap at the macro level
+            without dropping the per-batch chip back to flame. */}
+        {waveConfirmation?.state === "partial" && (
+          <span
+            className="text-[0.65rem] font-semibold tabular-nums px-1.5 py-0.5 rounded border border-gold text-gold-dark bg-gold-pale"
+            title={`${waveConfirmation.confirmed} of ${waveConfirmation.requested} cars confirmed across the window's batches`}
+          >
+            ⚠ Partially confirmed {waveConfirmation.confirmed}/{waveConfirmation.requested}
+          </span>
+        )}
+        {waveConfirmation?.state === "full" && (
+          <span
+            className="text-[0.65rem] font-semibold tabular-nums px-1.5 py-0.5 rounded border border-green text-green-dark bg-green-pale"
+            title="Every batch in this window has full dealer confirmation"
+          >
+            ✓ Fully confirmed
+          </span>
+        )}
         {wave.actions.length > 0 && (
           <span className="text-[0.65rem] text-ink-500 tabular-nums">
             · {doneCount}/{wave.actions.length} done
@@ -3417,6 +3457,23 @@ function BatchRow({
                   🔑 {vinsReceived}/{b.requestedQuantity} VINs
                 </span>
               )}
+              {/* Audit 1 #2 — customer-impact chip. Peak bookings
+                  exposed to a shift on this batch. Only renders when
+                  > 0 so an unbooked batch row stays clean. */}
+              {(() => {
+                const peakBookings = b.shiftHistory.reduce(
+                  (max, r) => Math.max(max, r.bookingsAtShift ?? 0), 0,
+                );
+                if (peakBookings === 0) return null;
+                return (
+                  <span
+                    className="text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded text-flame-dark bg-flame-pale"
+                    title={`Peak ${peakBookings} customers exposed to a shift on this batch`}
+                  >
+                    🧑 {peakBookings}
+                  </span>
+                );
+              })()}
               {b.closedAt && (
                 <span className={cn(
                   "ml-auto text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
