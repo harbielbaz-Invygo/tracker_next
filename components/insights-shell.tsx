@@ -28,6 +28,8 @@ import CompactMetric from "./compact-metric";
 import PageHeader from "./page-header";
 import TimelineSvg from "./timeline-svg";
 import { PeriodSelect } from "./period-select";
+import { Sparkline } from "./sparkline";
+import { Brand } from "@/lib/brand";
 import { REPORT_PERIODS, type ReportPeriod } from "@/lib/reports-period";
 import { cn } from "@/lib/utils";
 // Fluent UI v9 — first integration test, scoped to the Insights page
@@ -115,6 +117,11 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
         accent="flame"
         emphasis
         sub="North Star — total slip × bookings"
+        trend={{
+          values:    hero.customerDaysLostWeekly,
+          domain:    "auto",
+          ariaLabel: "Customer-days lost — last 12 weeks",
+        }}
       />
       <HeroTile
         label="Active batches"
@@ -137,6 +144,11 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
             : "flame"
         }
         sub="delivered on/before promise"
+        trend={{
+          values:    hero.onTimeRateWeekly,
+          domain:    "rate",
+          ariaLabel: "On-time rate — last 12 weeks",
+        }}
       />
       <HeroTile
         label="Re-promises"
@@ -245,19 +257,37 @@ function ClosureStrip({ closure }: { closure: ClosureSummary }) {
 }
 
 function HeroTile({
-  label, value, sub, accent = "neutral", emphasis = false,
+  label, value, sub, accent = "neutral", emphasis = false, trend,
 }: {
   label: string;
   value: string;
   sub: string;
   accent?: "neutral" | "green" | "gold" | "flame";
   emphasis?: boolean;
+  /**
+   * Optional weekly trend (12 buckets, oldest first). When supplied,
+   * renders a small sparkline beneath the headline value.
+   * `domain` controls the y-axis: "rate" = 0-100, "auto" scales to
+   * the max value in the series. (Audit 3 #7 + #10.)
+   */
+  trend?: {
+    values: (number | null)[];
+    domain: "rate" | "auto";
+    ariaLabel: string;
+  };
 }) {
   const valueCls = {
     neutral: "text-midnight",
     green:   "text-green-dark",
     gold:    "text-gold-dark",
     flame:   "text-flame-dark",
+  }[accent];
+
+  const strokeForAccent = {
+    neutral: Brand.MIDNIGHT,
+    green:   Brand.GREEN,
+    gold:    Brand.YELLOW,
+    flame:   Brand.ORANGE,
   }[accent];
 
   return (
@@ -275,6 +305,28 @@ function HeroTile({
       )}>
         {value}
       </p>
+      {trend && (() => {
+        // Auto-domain: pick [0, max(1, max(values))] so a flat-zero
+        // series doesn't crash the sparkline's range math.
+        const nums = trend.values.filter((v): v is number => v != null);
+        const max  = nums.length > 0 ? Math.max(...nums) : 0;
+        const domain: [number, number] = trend.domain === "rate"
+          ? [0, 100]
+          : [0, Math.max(1, max)];
+        return (
+          <div className="mt-1">
+            <Sparkline
+              values={trend.values}
+              stroke={strokeForAccent}
+              domain={domain}
+              baseline={trend.domain === "rate" ? 80 : null}
+              width={120}
+              height={20}
+              ariaLabel={trend.ariaLabel}
+            />
+          </div>
+        );
+      })()}
       <p className="text-[0.65rem] text-ink-500 mt-0.5 leading-tight">{sub}</p>
     </div>
   );

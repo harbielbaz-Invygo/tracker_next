@@ -263,6 +263,10 @@ export interface BatchNode {
     previousDate: string;
     newDate:      string;
     reason:       string | null;
+    /** newProjectedDate - previousProjectedDate (signed; positive=delay). */
+    delayDays:    number;
+    /** Bookings against this batch at the moment of the shift. */
+    bookingsAtShift: number;
   }[];
   actions:            ScopedActionDetail[]; // scope='batch' for this batch
 }
@@ -516,6 +520,10 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           previousProjectedDate: batchDateRevisions.previousProjectedDate,
           newProjectedDate:      batchDateRevisions.newProjectedDate,
           reason:                batchDateRevisions.reason,
+          // Audit 3 #3 — surface customer impact per shift so the
+          // ShiftDateForm can show "M customer-days lost so far".
+          delayDays:             batchDateRevisions.delayDays,
+          bookingsAtShift:       batchDateRevisions.bookingsAtShift,
         })
           .from(batchDateRevisions)
           .orderBy(asc(batchDateRevisions.revisedAt));
@@ -531,6 +539,8 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
             batchId: number; revisedAt: string | null;
             previousProjectedDate: string; newProjectedDate: string;
             reason: string | null;
+            delayDays: number;
+            bookingsAtShift: number;
           }[];
         }
         throw err;
@@ -560,6 +570,8 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       previousDate: r.previousProjectedDate,
       newDate:      r.newProjectedDate,
       reason:       r.reason ?? null,
+      delayDays:    r.delayDays ?? 0,
+      bookingsAtShift: r.bookingsAtShift ?? 0,
     });
     shiftHistoryByBatch.set(r.batchId, arr);
   }

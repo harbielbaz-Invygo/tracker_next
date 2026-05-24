@@ -3793,6 +3793,26 @@ function ShiftDateForm({
   const [bookings, setBookings] = useState<string>("0");
   const [error, setError] = useState<string | null>(null);
 
+  // Audit 3 #3 — customer-impact preview.
+  // historicalImpact = customer-days lost on PRIOR shifts on this batch
+  //   (sum of bookings × delayDays across past revisions).
+  // pendingImpact    = customer-days this shift is about to add
+  //   (live preview: typed bookings × computed delayDays).
+  const historicalImpact = b.shiftHistory.reduce(
+    (sum, r) => sum + (r.bookingsAtShift ?? 0) * (r.delayDays ?? 0),
+    0,
+  );
+  const previousProjected = b.currentProjectedDeliveryDate ?? b.promisedDate;
+  const previewDelayDays = (() => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    const ms = new Date(date).getTime() - new Date(previousProjected).getTime();
+    return Math.round(ms / (24 * 60 * 60 * 1000));
+  })();
+  const previewBookings = Math.max(0, parseInt(bookings, 10) || 0);
+  const pendingImpact = previewDelayDays != null && previewDelayDays > 0
+    ? previewBookings * previewDelayDays
+    : 0;
+
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -3844,6 +3864,37 @@ function ShiftDateForm({
         </label>
       </div>
       {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
+
+      {/* Customer-impact preview (Audit 3 #3). Lives above the
+          confirm button so ops sees who they're affecting BEFORE
+          clicking save. Renders even when previewDelayDays is null
+          (date not picked yet) so the historical context is visible
+          the moment the form opens. */}
+      <div className={cn(
+        "text-[0.65rem] px-2 py-1 rounded border tabular-nums",
+        pendingImpact > 0
+          ? "border-flame bg-flame-pale/40 text-flame-dark"
+          : "border-ink-200 bg-ink-50 text-ink-600",
+      )}>
+        {previewDelayDays == null ? (
+          <>Pick a date to preview customer impact.</>
+        ) : previewDelayDays > 0 ? (
+          <>
+            🧑 <span className="font-semibold">{previewBookings}</span> customer{previewBookings === 1 ? "" : "s"} will be affected
+            {" · "}+<span className="font-semibold">{pendingImpact}</span> customer-day{pendingImpact === 1 ? "" : "s"} this shift
+          </>
+        ) : previewDelayDays === 0 ? (
+          <>No date change — no new customer impact.</>
+        ) : (
+          <>↑ Pulling delivery in by {-previewDelayDays}d — no negative customer impact.</>
+        )}
+        {historicalImpact > 0 && (
+          <span className="block text-[0.6rem] text-ink-500 mt-0.5">
+            Prior shifts on this batch: <span className="font-medium">{historicalImpact}</span> customer-day{historicalImpact === 1 ? "" : "s"} already lost ({b.shiftHistory.length} shift{b.shiftHistory.length === 1 ? "" : "s"}).
+          </span>
+        )}
+      </div>
+
       <div className="flex justify-end gap-1.5">
         <button
           type="button"

@@ -11,6 +11,7 @@ import { gte, or, isNull, eq, and, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   batches, batchForecasts, users, batchActions, actionTypes,
+  batchDateRevisions,
 } from "@/lib/db/schema";
 import { getDashboardRows, type DashboardRow } from "@/lib/dashboard-data";
 import { getPerformanceReport, type PerformanceReport } from "@/lib/reports-data";
@@ -19,6 +20,14 @@ import type { ReportPeriod } from "@/lib/reports-period";
 export interface InsightsHero {
   /** North Star — total customer-days lost across all affected batches. */
   customerDaysLost: number;
+  /**
+   * Weekly customer-days-lost trend, last 12 weeks (oldest first).
+   * Each entry is the sum of bookingsAtShift × delayDays across
+   * shift events in that week. 0 in weeks with no shift events.
+   * Drives the sparkline next to the Customer-days-lost hero tile.
+   * (Audit 3 #7.)
+   */
+  customerDaysLostWeekly: number[];
   /** Open batches in the system. */
   activeBatches: number;
   /** Pre-VIN batches with ≤ 14 days to availability — needs ops attention now. */
@@ -28,6 +37,12 @@ export interface InsightsHero {
    * nothing has been delivered yet (avoid showing 0% on a fresh setup).
    */
   onTimeRate: number | null;
+  /**
+   * On-time rate per week, last 12 weeks (oldest first). null in
+   * weeks with no deliveries. Drives the sparkline next to the
+   * On-time rate hero tile. (Audit 3 #10.)
+   */
+  onTimeRateWeekly: (number | null)[];
   /** Cancelled batches count — surfaces dealer commitment breaches. */
   cancelled: number;
   /** Sum of revision counts across affected batches — trust erosion signal. */
@@ -442,11 +457,22 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
   // post_po batches still unlisted past the 14-day threshold.
   const listingSpeed = await getListingSpeed(period);
 
+  // Audit 3 #7 — weekly customer-days-lost trend, last 12 weeks
+  // (oldest first). Bucket batch_date_revisions by revisedAt.
+  const customerDaysLostWeekly = await getCustomerDaysLostWeekly();
+
+  // Audit 3 #10 — surface the existing per-week on-time rate from
+  // the report. Reshape to a plain number-or-null array matching
+  // customerDaysLostWeekly's cadence.
+  const onTimeRateWeekly = report.onTimeRateWeekly.map((w) => w.rate);
+
   const hero: InsightsHero = {
     customerDaysLost: report.customerImpact.totals.customerDaysLost,
+    customerDaysLostWeekly,
     activeBatches:    report.totals.open,
     preVinCritical,
     onTimeRate,
+    onTimeRateWeekly,
     cancelled:        report.totals.cancelled,
     rePromisesIssued: report.customerImpact.totals.totalRePromises,
     medianDaysToListed:    listingSpeed.medianDaysToListed,
@@ -461,4 +487,52 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     closure,
     forecastReliability,
   };
+}
+
+/**
+ * Weekly customer-days-lost trend (Audit 3 #7), oldest first, 12
+ * weeks. Each bucket = Σ(bookingsAtShift × delayDays) of shift events
+ * whose `revisedAt` falls in that week.
+ *
+ * Tolerant of `batch_date_revisions` being missing on a fresh DB —
+ * returns 12 zeros so the sparkline renders flat instead of crashing.
+ */
+async function getCustomerDaysLostWeekly(): Promise<number[]> {
+  const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+  const todayMidnight = new Date(); todayMidnight.setHours(0, 0, 0, 0);
+  const daysSinceMonday = (todayMidnight.getDay() + 6) % 7;
+  const thisWeekStartMs = todayMidnight.getTime() - daysSinceMonday * 24 * 60 * 60 * 1000;
+  const bucketEdges = Array.from({ length: 12 }, (_, i) => thisWeekStartMs - (11 - i) * WEEK_MS);
+  const buckets = Array.from({ length: 12 }, () => 0);
+
+  let rows: { revisedAt: string | null; delayDays: number; bookingsAtShift: number }[];
+  try {
+    rows = await db
+      .select({
+        revisedAt:       batchDateRevisions.revisedAt,
+        delayDays:       batchDateRevisions.delayDays,
+        bookingsAtShift: batchDateRevisions.bookingsAtShift,
+      })
+      .from(batchDateRevisions);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such (table|column)/i.test(msg)) return buckets;
+    throw err;
+  }
+
+  for (const r of rows) {
+    if (!r.revisedAt) continue;
+    const ts = new Date(r.revisedAt).getTime();
+    if (!Number.isFinite(ts)) continue;
+    // Find bucket whose edge ≤ ts < edge + WEEK_MS.
+    for (let i = 11; i >= 0; i--) {
+      if (ts >= bucketEdges[i]) {
+        const impact = (r.bookingsAtShift ?? 0) * (r.delayDays ?? 0);
+        // Only positive shifts (delays) count toward "lost" days.
+        if (impact > 0) buckets[i] += impact;
+        break;
+      }
+    }
+  }
+  return buckets;
 }
