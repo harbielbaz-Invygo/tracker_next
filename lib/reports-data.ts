@@ -28,6 +28,7 @@ import {
   computePoReliability,
   type ReliabilityBatch,
 } from "@/lib/po-reliability";
+import { derivePoClosureOutcome } from "@/lib/po-closure";
 import { daysBetween } from "@/lib/expected-date";
 
 export interface DepartmentRow {
@@ -128,6 +129,22 @@ export interface DealerReliabilityRow {
    * fails to honour the PO entirely.
    */
   cancellationRate: number | null;
+
+  /**
+   * 5. Listing speed (Audit 2 #4) — answers "which dealers slow our
+   * listings?" Median (appListedAt − requestedAt) in days across this
+   * dealer's post_po batches that have been listed. Null when none
+   * have been listed yet.
+   */
+  medianDaysToListed: number | null;
+
+  /**
+   * 6. Listing on-time rate (Audit 2 #4 companion).
+   * % of this dealer's listed post_po batches where days-to-listed
+   * ≤ 14. Same threshold as the global `unlistedOverThreshold`.
+   * Null when no batches have been listed.
+   */
+  listingOnTimeRate: number | null;
 }
 
 /**
@@ -314,6 +331,15 @@ export interface PoReliabilityRowFull {
     cancelledBatches: number;
     shiftCount:       number;
   };
+  /**
+   * Closure outcome (Audit 1 #4) — derived, not stored. Categorical
+   * end-state for the PO once every batch under it closes:
+   *   - open                 → still in flight
+   *   - delivered_in_full    → every batch delivered, qty met
+   *   - partly_delivered     → at least one delivered, qty short
+   *   - cancelled_mid_flight → no batch delivered
+   */
+  closureOutcome: import("@/lib/po-closure").PoClosureOutcome;
 }
 
 /**
@@ -643,6 +669,9 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
         poNumber:                       batches.poNumber,
         poExpectedDateAtLock:           batches.poExpectedDateAtLock,
         opsProjectedDeliveryDateAtLock: batches.opsProjectedDeliveryDateAtLock,
+        // Audit 2 #4 — supplier listing-delay needs these.
+        requestedAt:                    batches.requestedAt,
+        appListedAt:                    batches.appListedAt,
       })
       .from(batches)
       .leftJoin(dealers, eq(batches.dealerId, dealers.id))
@@ -675,6 +704,8 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
           deliveredQty:  batches.deliveredQuantity,
           revisionCount: batches.deliveryDateRevisionCount,
           poNumber:      batches.poNumber,
+          requestedAt:   batches.requestedAt,
+          appListedAt:   batches.appListedAt,
         })
         .from(batches)
         .leftJoin(dealers, eq(batches.dealerId, dealers.id))
@@ -858,6 +889,10 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     totalRequestedQty: number;
     /** deliveredQty sum across all batches. */
     totalDeliveredQty: number;
+    /** Audit 2 #4 — days-to-listed samples for the dealer's listed batches. */
+    listingDays: number[];
+    /** Count of listed batches with days-to-listed ≤ 14 (the SLA). */
+    listingOnTimeCount: number;
   }
 
   const dealerAcc = new Map<number, DealerAcc>();
@@ -868,6 +903,8 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
         total: 0, open: 0, delivered: 0, cancelled: 0,
         dateVariances: [],
         totalRequestedQty: 0, totalDeliveredQty: 0,
+        listingDays: [],
+        listingOnTimeCount: 0,
       });
     }
     return dealerAcc.get(id)!;
@@ -889,6 +926,20 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       const variance = daysBetween(b.closedAt, b.promisedDate);
       acc.dateVariances.push(variance);
     }
+
+    // Audit 2 #4 — listing speed. Only counts batches actually listed
+    // (we need both anchors). Same metric the hero uses globally,
+    // bucketed per dealer here.
+    if (b.appListedAt && b.requestedAt) {
+      const days = Math.round(
+        (new Date(b.appListedAt.slice(0, 10)).getTime() - new Date(b.requestedAt).getTime())
+          / (24 * 60 * 60 * 1000),
+      );
+      if (days >= 0) {
+        acc.listingDays.push(days);
+        if (days <= 14) acc.listingOnTimeCount++;
+      }
+    }
   }
 
   // Color matrix: sum confirmed vs requested per dealer.
@@ -908,6 +959,7 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     const acc = dealerAcc.get(d.id) ?? {
       total: 0, open: 0, delivered: 0, cancelled: 0,
       dateVariances: [], totalRequestedQty: 0, totalDeliveredQty: 0,
+      listingDays: [], listingOnTimeCount: 0,
     };
     const color = colorByDealer.get(d.id);
 
@@ -937,6 +989,19 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       ? Math.round((acc.cancelled / acc.total) * 1000) / 10
       : null;
 
+    // Audit 2 #4 — listing speed per dealer.
+    let medianDaysToListed: number | null = null;
+    if (acc.listingDays.length > 0) {
+      const sorted = acc.listingDays.slice().sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      medianDaysToListed = sorted.length % 2 === 0
+        ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+        : sorted[mid];
+    }
+    const listingOnTimeRate = acc.listingDays.length > 0
+      ? Math.round((acc.listingOnTimeCount / acc.listingDays.length) * 100)
+      : null;
+
     return {
       dealerId:   d.id,
       dealerName: d.name,
@@ -950,6 +1015,8 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       qtyFulfillmentRate,
       colorReliabilityRate,
       cancellationRate,
+      medianDaysToListed,
+      listingOnTimeRate,
     };
   });
 
@@ -1261,6 +1328,12 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
         cancelledBatches: scored.po.raw.cancelledBatches,
         shiftCount:       scored.po.raw.shiftCount,
       },
+      closureOutcome: derivePoClosureOutcome(batchesForPo.map((b) => ({
+        closedAt:          b.closedAt,
+        closureReason:     (b.closureReason ?? null) as "delivered" | "cancelled" | null,
+        requestedQuantity: b.requestedQty,
+        deliveredQuantity: b.deliveredQty ?? 0,
+      }))),
     });
   }
   // Sort: lowest composite first (problematic POs surface to the
