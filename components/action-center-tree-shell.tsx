@@ -24,6 +24,7 @@ import type {
 } from "@/lib/action-center-tree-data";
 import { augmentActions, type Touchpoint } from "@/lib/action-flow-shared";
 import ConfirmDialog from "./confirm-dialog";
+import InputDialog from "./input-dialog";
 import { useConfirmDialog } from "./use-confirm-dialog";
 
 /**
@@ -55,6 +56,7 @@ interface ShellCtx {
    */
   confirm: ReturnType<typeof useConfirmDialog>["confirm"];
   alert:   ReturnType<typeof useConfirmDialog>["alert"];
+  prompt:  ReturnType<typeof useConfirmDialog>["prompt"];
 }
 const ShellContext = createContext<ShellCtx | null>(null);
 function useShell(): ShellCtx {
@@ -183,7 +185,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   // Audit 6 #1+#10 — promise-based branded confirm/alert. Exposed
   // through ShellContext so nested components can call them without
   // each instantiating their own dialog state.
-  const { confirm, alert, dialogProps } = useConfirmDialog();
+  const { confirm, alert, prompt, dialogProps, inputProps } = useConfirmDialog();
   /**
    * Set of expanded wave ids — lifted from WaveSection so a router.refresh
    * doesn't collapse waves the operator was working in. Persists for the
@@ -587,8 +589,10 @@ export default function ActionCenterTreeShell({ tree }: Props) {
       busyTouchpointActionId,
       confirm,
       alert,
+      prompt,
     }}>
     <ConfirmDialog {...dialogProps} />
+    <InputDialog   {...inputProps} />
     <div className="relative grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]">
       {/* Floating help button — bottom-right of the grid container. */}
       <button
@@ -2586,19 +2590,23 @@ function PrePoLegsSection({
   }
 
   async function setBookings(legId: number, qty: number) {
-    const input = window.prompt(
-      `Set the booking count for this row (0 – ${qty}):`,
-    );
+    const input = await shell.prompt({
+      title: "Set booking count",
+      description: `Enter the new total customer-booking count for this row. Capped at the row's quantity.`,
+      inputLabel: `Booking count (0 – ${qty})`,
+      inputType: "number",
+      required: true,
+      validate: (val) => {
+        const v = Number(val);
+        if (!Number.isFinite(v) || !Number.isInteger(v))
+          return "Enter a whole number.";
+        if (v < 0 || v > qty) return `Must be between 0 and ${qty}.`;
+        return null;
+      },
+      confirmLabel: "Save",
+    });
     if (input == null) return;
-    const v = Number(input.trim());
-    if (!Number.isFinite(v) || v < 0 || v > qty) {
-      await shell.alert({
-        title: "Invalid booking count",
-        description: `Enter a whole number between 0 and ${qty}. Cancelled.`,
-        danger: true,
-      });
-      return;
-    }
+    const v = Number(input);
     setBusyLegId(legId);
     setError(null);
     try {
@@ -3120,7 +3128,15 @@ function WindowActionBar({
       danger: true,
     });
     if (!ok) return;
-    const note = window.prompt("Cancellation note (optional, applied to every batch):") || null;
+    const noteInput = await shell.prompt({
+      title: "Cancellation note (optional)",
+      description: "Applied to every cancelled batch in this window. Leave blank to skip.",
+      inputLabel: "Note",
+      placeholder: "e.g. Dealer pulled the order after sample inspection",
+      confirmLabel: "Save & cancel batches",
+    });
+    if (noteInput == null) return; // user backed out of the note step
+    const note = noteInput.trim() || null;
     for (const b of openBatches) {
       await onBatchOp(b.id, "/api/batch-close", {
         batchId: b.id,
@@ -3132,24 +3148,35 @@ function WindowActionBar({
 
   async function handleShiftWindow() {
     if (openBatches.length === 0) return;
-    const next = window.prompt(
-      `New projected availability date for every open batch in this window (yyyy-mm-dd):`,
-    );
-    if (!next) return;
-    const trimmed = next.trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-      // Audit 6 #10 — branded alert instead of native (rest of the
-      // flow keeps window.prompt for now; promoting the prompt to a
-      // branded input dialog is a larger surface change out of scope).
-      await shell.alert({
-        title: "Invalid date format",
-        description: "Date must be in yyyy-mm-dd format. The shift was cancelled.",
-        confirmLabel: "Got it",
-        danger: true,
-      });
-      return;
-    }
-    const reason = window.prompt("Reason for the shift (optional):") || null;
+    // Step 1 — pick the new projected date. InputDialog's date type
+    // surfaces a native date picker; required + inline validation
+    // means we can drop the separate "invalid date" alert that the
+    // window.prompt flow used to need.
+    const nextInput = await shell.prompt({
+      title: "Shift availability for this window",
+      description: `Applies to every open batch (${openBatches.length}) in this window.`,
+      inputLabel: "New projected availability date",
+      inputType: "date",
+      required: true,
+      validate: (val) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(val) ? null : "Pick a valid date.",
+      confirmLabel: "Continue",
+    });
+    if (nextInput == null) return;
+    const trimmed = nextInput.trim();
+
+    // Step 2 — optional reason. Cancel here aborts the whole flow so
+    // an accidental Escape doesn't shift without context.
+    const reasonInput = await shell.prompt({
+      title: "Reason for the shift (optional)",
+      description: "Free-text. Categorical reason can be picked from each batch's shift form individually.",
+      inputLabel: "Reason",
+      placeholder: "e.g. Dealer flagged customs delay this week",
+      confirmLabel: "Shift batches",
+    });
+    if (reasonInput == null) return;
+    const reason = reasonInput.trim() || null;
+
     for (const b of openBatches) {
       await onBatchOp(b.id, "/api/batch-shift", {
         batchId: b.id,
