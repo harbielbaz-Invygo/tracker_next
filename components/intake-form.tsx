@@ -463,6 +463,50 @@ export default function IntakeForm({ options, initialForecastBatchId = null }: P
     return true;
   }, [poNumber, dealerId, dealerName, items]);
 
+  // Audit 6 #6 — surface WHY the submit button is disabled so the
+  // operator doesn't have to hunt. Returns null when the form is ready
+  // to submit; otherwise the first blocking gate as a short message.
+  // The message powers both the button's `title` (hover) and an inline
+  // status line next to the button.
+  const blockReason = useMemo<string | null>(() => {
+    if (!poNumber.trim()) return "Add a PO number to enable submit.";
+    if (!dealerId && !dealerName.trim())
+      return "Pick or enter a dealer to enable submit.";
+    if (items.length === 0)
+      return "Add at least one model/year row to enable submit.";
+    if (items.some((it) => it.splits.length === 0))
+      return "Every model needs at least one delivery split (city + date + qty).";
+    if (items.some((it) => it.splits.some((s) => !s.date)))
+      return "Some delivery splits are missing a date.";
+    if (items.some((it) => it.splits.some((s) => !(s.quantity > 0))))
+      return "Some delivery splits have qty ≤ 0 — set a positive number.";
+    return null;
+  }, [poNumber, dealerId, dealerName, items]);
+
+  // Audit 6 #4 — warn before unloading the page when the operator has
+  // typed work that hasn't been submitted. Triggers the browser's
+  // native "Leave site?" prompt. Skipped post-submit (summary set) so
+  // the operator can navigate away cleanly after a successful create.
+  const isDirty = useMemo(() => {
+    if (summary) return false; // success — nothing to lose
+    if (poNumber.trim() || reference.trim() || notes.trim()) return true;
+    if (dealerId !== null || dealerName.trim()) return true;
+    if (items.length > 0) return true;
+    return false;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summary, poNumber, reference, notes, dealerId, dealerName, items]);
+  useEffect(() => {
+    if (!isDirty) return;
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      e.preventDefault();
+      // Modern browsers ignore the message but require either a
+      // returnValue assignment or `preventDefault` to trigger the prompt.
+      e.returnValue = "";
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty]);
+
   // Map each checked action to its Slack-ready shape (label + dept + stakeholder).
   // Lookups are O(1) via two pre-built indices.
   const slackActions = useMemo<SlackAction[]>(() => {
@@ -772,14 +816,28 @@ export default function IntakeForm({ options, initialForecastBatchId = null }: P
               <p className="text-xs text-ink-500">
                 {countSummary(items, actions)}
               </p>
-              <button
-                type="button"
-                onClick={onSubmit}
-                disabled={!canSubmit || submitting}
-                className="btn btn-primary"
-              >
-                {submitting ? "Creating…" : "Create batches"}
-              </button>
+              <div className="flex items-center gap-3">
+                {/* Audit 6 #6 — surface the disabled reason inline so the
+                    operator doesn't have to guess what's blocking submit. */}
+                {blockReason && !submitting && (
+                  <span
+                    className="text-[0.7rem] text-flame-dark max-w-xs leading-snug"
+                    role="status"
+                  >
+                    {blockReason}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={onSubmit}
+                  disabled={!canSubmit || submitting}
+                  title={blockReason ?? undefined}
+                  aria-describedby={blockReason ? "intake-submit-reason" : undefined}
+                  className="btn btn-primary"
+                >
+                  {submitting ? "Creating…" : "Create batches"}
+                </button>
+              </div>
             </div>
             {submitError && (
               <p
