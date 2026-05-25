@@ -32,6 +32,21 @@ import {
 import { derivePoClosureOutcome } from "@/lib/po-closure";
 import { daysBetween } from "@/lib/expected-date";
 
+/**
+ * Audit 2 #3 — per-phase performance slice for a department row.
+ * Same shape as the top-level totals but scoped to a single phase so
+ * a dept lead can see "we're 95% on-time on Internal but only 60% on
+ * External" instead of a single blended number that hides the gap.
+ */
+export interface DepartmentPhaseStats {
+  totalActions: number;
+  doneActions: number;
+  activeActions: number;
+  skippedActions: number;
+  onTimeRate: number | null;
+  avgDelayDays: number | null;
+}
+
 export interface DepartmentRow {
   id: number;
   name: string;
@@ -55,6 +70,17 @@ export interface DepartmentRow {
    * tiny sparkline in the Performance table row.
    */
   onTimeRateWeekly: (number | null)[];
+  /**
+   * Audit 2 #3 — per-phase split. `internal` covers PO-scope actions
+   * (specs, pricing, App Listing — anything that runs before the
+   * customer-facing app goes live). `external` covers wave-scope and
+   * batch-scope actions (VIN chase, customs, logistics, delivery —
+   * the dealer-side execution after listing). Lets a dept lead see
+   * which side they're failing without doing the math from the
+   * Action Center.
+   */
+  internal: DepartmentPhaseStats;
+  external: DepartmentPhaseStats;
 }
 
 export interface StakeholderRow {
@@ -460,6 +486,12 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
 
   const todayIso = new Date().toISOString().slice(0, 10);
   const departmentAcc = new Map<number, AggregateAccumulator>();
+  // Audit 2 #3 — per-phase department accumulators. Same shape as
+  // the top-level dept accumulator; one map per phase keeps the
+  // bumpScoped() helper reusable without per-row branching on a
+  // discriminator inside the accumulator itself.
+  const departmentInternalAcc = new Map<number, AggregateAccumulator>();
+  const departmentExternalAcc = new Map<number, AggregateAccumulator>();
   const stakeholderAcc = new Map<number, AggregateAccumulator>();
 
   // Weekly on-time/late counters per owner, for the 12-week sparkline.
@@ -580,6 +612,19 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
         if (delayDays <= 0) wk[bucketIdx].onTime++; else wk[bucketIdx].late++;
         departmentWeekly.set(r.deptId, wk);
       }
+      // Audit 2 #3 — also bucket into per-phase accumulators so the
+      // department row can carry an internal/external split alongside
+      // its blended totals. Phase rule mirrors the Action Center tabs:
+      //   po-scope    → internal phase
+      //   wave-scope + batch-scope → external phase
+      // The same delayDays / on-time / late counts get applied; the
+      // weekly trend stays blended (one sparkline per dept) since
+      // per-phase weekly trends would clutter the UI.
+      const phaseBucket = r.scope === "po" ? "internal" : "external";
+      const phaseMap = phaseBucket === "internal" ? departmentInternalAcc : departmentExternalAcc;
+      const phaseAcc = phaseMap.get(r.deptId) ?? emptyAcc();
+      bumpScoped(phaseAcc);
+      phaseMap.set(r.deptId, phaseAcc);
     }
     if (r.stakeholderId != null) {
       const acc = stakeholderAcc.get(r.stakeholderId) ?? emptyAcc();
@@ -604,9 +649,28 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     });
   }
 
+  // Helper: shape a per-phase accumulator into the DepartmentPhaseStats
+  // payload. Drops worstDelayDays + delayedBatchesOwned compared to the
+  // top-level row — those signals are about distinct-batch coverage,
+  // which doesn't add value at the phase grain (same batch can be late
+  // on both phases independently).
+  function phaseStatsFromAcc(acc: AggregateAccumulator): DepartmentPhaseStats {
+    const { onTimeRate, avgDelayDays } = summarizeAcc(acc);
+    return {
+      totalActions:   acc.totalActions,
+      doneActions:    acc.doneActions,
+      activeActions:  acc.activeActions,
+      skippedActions: acc.skippedActions,
+      onTimeRate,
+      avgDelayDays,
+    };
+  }
+
   // Build department rows. Include zero-action departments at the bottom.
   const departmentsList: DepartmentRow[] = allDepts.map((d) => {
-    const acc = departmentAcc.get(d.id) ?? emptyAcc();
+    const acc         = departmentAcc.get(d.id)         ?? emptyAcc();
+    const internalAcc = departmentInternalAcc.get(d.id) ?? emptyAcc();
+    const externalAcc = departmentExternalAcc.get(d.id) ?? emptyAcc();
     return {
       id:   d.id,
       name: d.name,
@@ -617,6 +681,8 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       delayedBatchesOwned: acc.delayedBatchIds.size,
       onTimeRateWeekly: ratesFromWeekly(departmentWeekly.get(d.id)),
       ...summarizeAcc(acc),
+      internal: phaseStatsFromAcc(internalAcc),
+      external: phaseStatsFromAcc(externalAcc),
     };
   });
 
