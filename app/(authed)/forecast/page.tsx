@@ -19,14 +19,21 @@
 import AccessGate from "@/components/access-gate";
 import PageHeader from "@/components/page-header";
 import ForecastShell from "@/components/forecast-shell";
-import { getForecastRows, getForecastFormOptions } from "@/lib/forecast-data";
+import {
+  getForecastRows,
+  getForecastFormOptions,
+  getForecastLinkCandidates,
+} from "@/lib/forecast-data";
 
 export const dynamic = "force-dynamic";
 
 export default async function ForecastPage() {
-  const [rows, options] = await Promise.all([
+  const [rows, options, linkCandidates] = await Promise.all([
     getForecastRows(),
     getForecastFormOptions(),
+    // All recent post-PO batches; client filters to same-dealer when
+    // the operator opens the link dialog on a specific Forecast row.
+    getForecastLinkCandidates(null),
   ]);
 
   return (
@@ -50,7 +57,7 @@ export default async function ForecastPage() {
           </p>
         </div>
 
-        <ForecastShell rows={rows} options={options} />
+        <ForecastShell rows={rows} options={options} linkCandidates={linkCandidates} />
       </div>
     </AccessGate>
   );

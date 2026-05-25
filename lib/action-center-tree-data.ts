@@ -362,6 +362,21 @@ export interface PoNode {
     expectedPoSigningDate: string | null;
     submittedAt: string;
     submittedByName: string | null;
+    /**
+     * Per-row pre-PO listing data for the drawer's row table. Captures
+     * what was committed to customers in the app before the PO arrived
+     * — city × model × qty × listing date × bookings counter. Empty
+     * on legacy forecasts created before the per-row migration.
+     */
+    legs: {
+      legId: number;
+      city: string;
+      carModel: string | null;
+      quantity: number;
+      listedAt: string | null;
+      promisedAvailabilityDate: string | null;
+      bookingsCount: number;
+    }[];
   } | null;
 }
 
@@ -947,6 +962,47 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     prePoForecastIndex = new Map();
   }
 
+  // Pre-PO leg data with the listing-extension columns. Bucketed by
+  // batch id for cheap per-virtual-node lookup. Wrapped because the
+  // extension columns are new (car_model, listed_at, bookings_count) —
+  // pre-migration DBs return [].
+  const prePoLegsByBatch = new Map<number, {
+    legId: number; city: string; carModel: string | null; quantity: number;
+    listedAt: string | null; promisedAvailabilityDate: string | null; bookingsCount: number;
+  }[]>();
+  try {
+    const prePoBatchIds = new Set(prePoBatches.map((b) => b.id));
+    if (prePoBatchIds.size > 0) {
+      const legRows = await db.select({
+        legId:                    batchDeliveryLegs.id,
+        batchId:                  batchDeliveryLegs.batchId,
+        city:                     batchDeliveryLegs.city,
+        carModel:                 batchDeliveryLegs.carModel,
+        requestedQuantity:        batchDeliveryLegs.requestedQuantity,
+        listedAt:                 batchDeliveryLegs.listedAt,
+        promisedAvailabilityDate: batchDeliveryLegs.promisedAvailabilityDate,
+        bookingsCount:            batchDeliveryLegs.bookingsCount,
+      }).from(batchDeliveryLegs);
+      for (const r of legRows) {
+        if (!prePoBatchIds.has(r.batchId)) continue;
+        const arr = prePoLegsByBatch.get(r.batchId) ?? [];
+        arr.push({
+          legId:                    r.legId,
+          city:                     r.city,
+          carModel:                 r.carModel ?? null,
+          quantity:                 r.requestedQuantity,
+          listedAt:                 r.listedAt ?? null,
+          promisedAvailabilityDate: r.promisedAvailabilityDate ?? null,
+          bookingsCount:            r.bookingsCount ?? 0,
+        });
+        prePoLegsByBatch.set(r.batchId, arr);
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such column/i.test(msg)) throw err;
+  }
+
   for (const b of prePoBatches) {
     const batchActions = actionsByKey.get(`batch:${b.id}`) ?? [];
     const summary = prePoForecastIndex.get(b.id) ?? null;
@@ -986,6 +1042,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         expectedPoSigningDate: (b as { expectedPoDate?: string | null }).expectedPoDate ?? null,
         submittedAt:           summary?.submittedAt ?? "—",
         submittedByName:       summary?.submittedByName ?? null,
+        legs:                  prePoLegsByBatch.get(b.id) ?? [],
       },
     };
     // Stash the pre_po batch's actions on the virtualPoNode for the
