@@ -8,7 +8,7 @@
  * round-trips. Timeline data for the drawer is fetched once per selection
  * via /api/timeline?code=...
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DashboardRow, StatusBucket, TimelineData, TimelineActivity,
 } from "@/lib/dashboard-data";
@@ -70,6 +70,54 @@ export default function DashboardShell({ rows, totals, lateWeekly, period }: Pro
   const [timeline,  setTimeline]  = useState<TimelineData | null>(null);
   const [tlBusy,    setTlBusy]    = useState<boolean>(false);
   const [tlError,   setTlError]   = useState<string | null>(null);
+
+  // Audit 5 #6 — let the Pre-VIN-critical tile apply its own filter
+  // and scroll the table into view. `tableRef` anchors the scroll;
+  // the filter dispatcher is reused by the hero swap below too.
+  const tableRef = useRef<HTMLDivElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const focusPreVinCritical = () => {
+    setVinPhaseFilter("pre_vin");
+    setActiveOnly(true);
+    setStatusFilter("all");
+    setRiskFilter("all");
+    setTimeout(() => {
+      tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  };
+
+  // Audit 6 #9 — keyboard shortcuts borrowed from Action Center.
+  //   /     focus the search box (industry-standard search hotkey)
+  //   Esc   clear the search box when it has focus, else blur it
+  // Shortcuts pause while typing in any other input so they don't
+  // hijack normal text entry.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toLowerCase();
+      const isTyping = tag === "input" || tag === "textarea" || tag === "select"
+        || (t?.isContentEditable ?? false);
+
+      if (e.key === "Escape" && isTyping && t === searchRef.current) {
+        if (search) {
+          e.preventDefault();
+          setSearch("");
+          return;
+        }
+        searchRef.current?.blur();
+        return;
+      }
+      if (isTyping) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "/") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [search]);
 
   // ── Filter option pools (derived from full data) ────────────
   const dealerOptions = useMemo(
@@ -143,43 +191,98 @@ export default function DashboardShell({ rows, totals, lateWeekly, period }: Pro
         <PeriodSelect active={period} />
       </div>
 
-      {/* Metric hierarchy — one HERO, two secondary, two compact.
-          The audit's "2-second" rule: what should a user see first?
-          On a Dashboard, the at-a-glance signal of HEALTH is the
-          number of delayed batches — that's the alert. Active and
-          On-track are secondary context. Delivered + Pre-VIN
-          critical are background data ops can drill into. */}
+      {/* Audit 5 #1 — Hero swap. The 2-second rule asks "what should
+          the user see first?" When something is delayed, that IS the
+          alert — keep Delayed as the hero. When delayed=0 but pre-VIN
+          critical batches exist, those are the next-most-urgent signal
+          and become the hero instead ("we've got nothing late today
+          BUT 3 batches are about to be"). When BOTH are 0, the hero
+          flips to a green "All clear" so the empty state actually
+          communicates health rather than reading as "deserted page".
+          Active + On-track are always the secondary context. */}
       <div className="grid grid-cols-1 md:grid-cols-[2fr,1fr,1fr] gap-4 mb-3">
-        <HeroMetric
-          label="Delayed"
-          value={totals.delayed}
-          tone={totals.delayed > 0 ? "alert" : "ok"}
-          title={totals.delayed > 0
-            ? `${totals.delayed} batches are past their dealer-promised availability date`
-            : "No batches are past their promised date"}
-          sparkValues={lateWeekly}
-          sparkLabel="late deliveries per week, last 12 weeks"
-        />
+        {totals.delayed > 0 ? (
+          <HeroMetric
+            label="Delayed"
+            value={totals.delayed}
+            tone="alert"
+            title={`${totals.delayed} batches are past their dealer-promised availability date`}
+            sparkValues={lateWeekly}
+            sparkLabel="late deliveries per week · last 12 weeks (independent of period filter)"
+            sparkCaption="Last 12 weeks"
+          />
+        ) : totals.highRisk > 0 ? (
+          <HeroMetric
+            label="⚠️ Pre-VIN critical"
+            value={totals.highRisk}
+            tone="alert"
+            title="No batches are past their promised date today — but these pre-VIN batches are ≤ 14d away from availability. Act now to keep them on track."
+            onClick={focusPreVinCritical}
+            clickHint="Filter table"
+          />
+        ) : (
+          <HeroMetric
+            label="✓ All clear"
+            value={totals.active}
+            tone="ok"
+            title="No delayed batches and no pre-VIN-critical batches. Counter shows active batches in flight."
+            valueOverrideLabel="active in flight"
+          />
+        )}
         <Metric label="Active batches" value={totals.active} valueColor="text-midnight" />
         <Metric label="On track"       value={totals.onTrack} valueColor="text-green-dark" />
       </div>
-      {/* Compact second-tier — context, not alerts. */}
+      {/* Compact second-tier — context plus secondary alerts. The
+          Pre-VIN tile is clickable (Audit 5 #6); when delayed > 0
+          we still want it visible since the hero is occupied. */}
       <div className="grid grid-cols-2 gap-4 mb-6">
         <CompactMetric label="Delivered"        value={totals.delivered} />
-        <CompactMetric
-          label="⚠️ Pre-VIN critical"
-          value={totals.highRisk}
-          valueColor={totals.highRisk > 0 ? "text-flame-dark" : "text-ink-500"}
-          title="Active batches that are pre-VIN with ≤ 14 days to availability — need immediate action"
-        />
+        <button
+          type="button"
+          onClick={focusPreVinCritical}
+          disabled={totals.highRisk === 0}
+          aria-label={totals.highRisk > 0
+            ? `Show ${totals.highRisk} pre-VIN-critical batches in the table`
+            : "No pre-VIN-critical batches"}
+          className={cn(
+            "flex items-baseline justify-between gap-3 px-3 py-2 rounded-md",
+            "bg-ink-50 border border-ink-100 text-left transition-colors",
+            totals.highRisk > 0
+              ? "hover:bg-flame-pale/40 hover:border-flame focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-flame cursor-pointer"
+              : "cursor-default",
+          )}
+          title={totals.highRisk > 0
+            ? "Click to filter the table to pre-VIN-critical batches (≤ 14d to availability, no VIN yet)."
+            : "Active batches that are pre-VIN with ≤ 14 days to availability — need immediate action"}
+        >
+          <span className="text-xs font-medium text-ink-600">
+            ⚠️ Pre-VIN critical
+            {totals.highRisk > 0 && (
+              <span className="ml-1 text-[0.6rem] font-normal text-ink-500">→ filter</span>
+            )}
+          </span>
+          <span className={cn(
+            "text-lg font-semibold tabular-nums",
+            totals.highRisk > 0 ? "text-flame-dark" : "text-ink-500",
+          )}>
+            {totals.highRisk}
+          </span>
+        </button>
       </div>
 
       {/* Top-level filters */}
       <div className="card mb-4 space-y-3">
         <label className="block">
-          <span className="block text-xs font-medium text-ink-600 mb-1">🔎 Search</span>
+          <span className="block text-xs font-medium text-ink-600 mb-1">
+            🔎 Search
+            <kbd className="ml-2 font-mono px-1 py-0 rounded border border-ink-300 bg-ink-50 text-ink-500 text-[0.6rem] font-normal align-middle">
+              /
+            </kbd>
+          </span>
           <div className="relative">
             <input
+              ref={searchRef}
+              type="search"
               className="input pr-9"
               placeholder="PO number, dealer, model — partial matches OK"
               value={search}
@@ -254,13 +357,16 @@ export default function DashboardShell({ rows, totals, lateWeekly, period }: Pro
         </div>
       </div>
 
-      {/* Table */}
-      <BatchTable
-        rows={filtered}
-        selectedCode={selected}
-        onSelect={(code) => setSelected((cur) => (cur === code ? null : code))}
-        totalCount={rows.length}
-      />
+      {/* Table — wrapped in a scroll-target div so the Pre-VIN-critical
+          tile's click handler (Audit 5 #6) can bring the table into view. */}
+      <div ref={tableRef} className="scroll-mt-4">
+        <BatchTable
+          rows={filtered}
+          selectedCode={selected}
+          onSelect={(code) => setSelected((cur) => (cur === code ? null : code))}
+          totalCount={rows.length}
+        />
+      </div>
 
       {/* Timeline drawer — appears below the table */}
       <div className="mt-6">
@@ -309,7 +415,8 @@ function Metric({
  * the Dashboard). Tone-coloured accent border + larger digit.
  */
 function HeroMetric({
-  label, value, tone, title, sparkValues, sparkLabel,
+  label, value, tone, title, sparkValues, sparkLabel, sparkCaption,
+  onClick, clickHint, valueOverrideLabel,
 }: {
   label: string;
   value: number;
@@ -324,27 +431,45 @@ function HeroMetric({
   sparkValues?: number[];
   /** aria-label for the sparkline; surfaces in screen readers + native tooltips. */
   sparkLabel?: string;
+  /**
+   * Audit 5 #9 — a short caption rendered under the sparkline (e.g.
+   * "Last 12 weeks") so the reader knows the trend's domain
+   * independent of any period filter on the rest of the page.
+   */
+  sparkCaption?: string;
+  /**
+   * Audit 5 #6 — when supplied, the tile renders as a button. Clicking
+   * fires the handler (typically apply-filter + scroll-to-table) so
+   * the hero metric is actionable rather than read-only.
+   */
+  onClick?: () => void;
+  /** Tiny inline hint shown next to the label when `onClick` is set. */
+  clickHint?: string;
+  /**
+   * Audit 5 #1 — when the hero is in the "All clear" green state and
+   * `value` is reused as a context number (e.g. active batches in flight),
+   * this label sits under the digit to explain what the number means.
+   */
+  valueOverrideLabel?: string;
 }) {
   const ok = tone === "ok" || value === 0;
-  // Auto-scale the sparkline domain — count series can have any
-  // magnitude. Use max-or-1 to avoid divide-by-zero on flat-zero
-  // series; nudge max up by 20% so peaks aren't pinned to the top edge.
   const sparkMax = sparkValues && sparkValues.length > 0
     ? Math.max(1, ...sparkValues) * 1.2
     : 1;
-  const sparkStroke = ok ? "#5C8A2B" : "#A87600"; // green-dark | gold-dark
-  return (
-    <div
-      title={title}
-      className={cn(
-        "card border-l-4 px-5 py-4 flex flex-col gap-1",
-        ok ? "border-l-green bg-green-pale/30" : "border-l-gold bg-gold-pale/30",
-      )}
-    >
+  const sparkStroke = ok ? "#5C8A2B" : "#A87600";
+
+  const interactive = typeof onClick === "function";
+  const Inner = (
+    <>
       <div className="flex items-end justify-between gap-3">
         <div>
           <span className="text-xs font-semibold uppercase tracking-wide text-ink-600 block">
             {label}
+            {interactive && clickHint && (
+              <span className="ml-2 text-[0.6rem] font-normal text-ink-500 normal-case">
+                → {clickHint}
+              </span>
+            )}
           </span>
           <span className={cn(
             "text-4xl font-bold tabular-nums leading-none inline-block mt-1",
@@ -352,19 +477,47 @@ function HeroMetric({
           )}>
             {value}
           </span>
+          {valueOverrideLabel && (
+            <span className="ml-2 text-[0.7rem] text-ink-500 align-baseline">
+              {valueOverrideLabel}
+            </span>
+          )}
         </div>
         {sparkValues && sparkValues.length > 0 && (
-          <Sparkline
-            values={sparkValues}
-            stroke={sparkStroke}
-            width={80}
-            height={20}
-            domain={[0, sparkMax]}
-            baseline={null}
-            ariaLabel={sparkLabel ?? "trend"}
-          />
+          <div className="flex flex-col items-end gap-0.5">
+            <Sparkline
+              values={sparkValues}
+              stroke={sparkStroke}
+              width={80}
+              height={20}
+              domain={[0, sparkMax]}
+              baseline={null}
+              ariaLabel={sparkLabel ?? "trend"}
+            />
+            {sparkCaption && (
+              <span className="text-[0.6rem] text-ink-500 leading-none">
+                {sparkCaption}
+              </span>
+            )}
+          </div>
         )}
       </div>
+    </>
+  );
+
+  const cls = cn(
+    "card border-l-4 px-5 py-4 flex flex-col gap-1 text-left w-full",
+    ok ? "border-l-green bg-green-pale/30" : "border-l-gold bg-gold-pale/30",
+    interactive && "transition-colors cursor-pointer hover:bg-gold-pale/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-gold",
+  );
+
+  return interactive ? (
+    <button type="button" onClick={onClick} title={title} className={cls}>
+      {Inner}
+    </button>
+  ) : (
+    <div title={title} className={cls}>
+      {Inner}
     </div>
   );
 }

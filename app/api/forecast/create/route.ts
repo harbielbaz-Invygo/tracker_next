@@ -43,7 +43,23 @@ const PRE_PO_APP_LISTING = "Pre-PO App Listing";
 interface CreateBody {
   dealerId?: number;
   dealerName?: string;
-  items: { city: string; quantity: number }[];
+  /**
+   * Per-row commitment-to-customer data. The Forecast tab is the
+   * exception flow — Partnership lists cars in the app BEFORE the PO
+   * is signed — so each row carries the car model, listing date, and
+   * per-row promised availability date that customers actually saw.
+   *
+   * `carModel`, `listedAt`, and `promisedAvailabilityDate` are
+   * optional for back-compat with the original Forecast shape that
+   * only knew about city + qty.
+   */
+  items: {
+    city: string;
+    quantity: number;
+    carModel?: string | null;
+    listedAt?: string | null;
+    promisedAvailabilityDate?: string | null;
+  }[];
   expectedDeliveryDate: string;
   expectedPoSigningDate: string | null;
   /**
@@ -80,7 +96,16 @@ function validate(body: unknown): { ok: true; data: CreateBody } | { ok: false; 
     return { ok: false, reason: "dealerId or dealerName is required" };
 
   // Items — v2 array, OR legacy single { city, quantity } at top level.
-  let items: { city: string; quantity: number }[] = [];
+  // v3 (Forecast pre-PO listing) adds optional carModel, listedAt, and
+  // promisedAvailabilityDate per row; absent fields fall back to PO-
+  // wide defaults so older callers and tests keep working.
+  let items: CreateBody["items"] = [];
+  const isoDateOrNull = (val: unknown, label: string): string | null | { error: string } => {
+    if (val === undefined || val === null || val === "") return null;
+    if (typeof val !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(val))
+      return { error: `${label} must be yyyy-mm-dd` };
+    return val;
+  };
   if (Array.isArray(b.items)) {
     for (const [i, raw] of b.items.entries()) {
       if (!raw || typeof raw !== "object") return { ok: false, reason: `items[${i}] must be an object` };
@@ -88,7 +113,20 @@ function validate(body: unknown): { ok: true; data: CreateBody } | { ok: false; 
       if (typeof it.city !== "string" || !it.city.trim()) return { ok: false, reason: `items[${i}].city is required` };
       if (typeof it.quantity !== "number" || it.quantity <= 0 || !Number.isInteger(it.quantity))
         return { ok: false, reason: `items[${i}].quantity must be a positive integer` };
-      items.push({ city: it.city.trim(), quantity: it.quantity });
+      const carModel = typeof it.carModel === "string" && it.carModel.trim()
+        ? it.carModel.trim()
+        : null;
+      const listedAt = isoDateOrNull(it.listedAt, `items[${i}].listedAt`);
+      if (listedAt && typeof listedAt !== "string") return { ok: false, reason: listedAt.error };
+      const promisedAv = isoDateOrNull(it.promisedAvailabilityDate, `items[${i}].promisedAvailabilityDate`);
+      if (promisedAv && typeof promisedAv !== "string") return { ok: false, reason: promisedAv.error };
+      items.push({
+        city: it.city.trim(),
+        quantity: it.quantity,
+        carModel,
+        listedAt: (listedAt as string | null),
+        promisedAvailabilityDate: (promisedAv as string | null),
+      });
     }
   } else if (typeof b.city === "string" && typeof b.quantity === "number") {
     if (!b.city.trim()) return { ok: false, reason: "city is required" };
@@ -211,13 +249,36 @@ export async function POST(req: NextRequest) {
   }).returning();
 
   // Per-city legs. Each item becomes one row so multi-city forecasts
-  // are tracked the same way post-PO multi-leg batches are.
+  // are tracked the same way post-PO multi-leg batches are. The Pre-
+  // PO listing extension columns (car model, listing date, per-row
+  // promised availability) are written when the caller supplies them
+  // — they're nullable on the schema so legacy callers don't break.
+  // Wrapped per-row insert so a deployment that hasn't run the
+  // migration adding those columns still succeeds with just the
+  // original (city, qty) shape.
   for (const it of items) {
-    await db.insert(batchDeliveryLegs).values({
-      batchId:           batch.id,
-      city:              it.city,
-      requestedQuantity: it.quantity,
-    });
+    try {
+      await db.insert(batchDeliveryLegs).values({
+        batchId:                  batch.id,
+        city:                     it.city,
+        requestedQuantity:        it.quantity,
+        carModel:                 it.carModel ?? null,
+        listedAt:                 it.listedAt ?? null,
+        promisedAvailabilityDate: it.promisedAvailabilityDate ?? null,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/no such column/i.test(msg)) {
+        // Pre-migration DB. Insert the original shape only.
+        await db.insert(batchDeliveryLegs).values({
+          batchId:           batch.id,
+          city:              it.city,
+          requestedQuantity: it.quantity,
+        });
+      } else {
+        throw err;
+      }
+    }
   }
 
   // Insert the forecast row. submittedByUserId = the auth account

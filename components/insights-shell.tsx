@@ -141,28 +141,68 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
         accent={hero.preVinCritical > 0 ? "flame" : "neutral"}
         sub="≤ 14d to avail, no VIN"
       />
-      <HeroTile
-        label="On-time rate"
-        value={hero.onTimeRate === null ? "—" : `${hero.onTimeRate}%`}
-        accent={
-          hero.onTimeRate === null ? "neutral"
-            : hero.onTimeRate >= 80 ? "green"
-            : hero.onTimeRate >= 60 ? "gold"
-            : "flame"
-        }
-        sub="delivered on/before promise"
-        trend={{
-          values:    hero.onTimeRateWeekly,
-          domain:    "rate",
-          ariaLabel: "On-time rate — last 12 weeks",
-        }}
-      />
-      <HeroTile
-        label="Re-promises"
-        value={hero.rePromisesIssued.toLocaleString()}
-        accent={hero.rePromisesIssued > 0 ? "gold" : "neutral"}
-        sub="date shifts issued"
-      />
+      {(() => {
+        // Audit 5 #3 — surface the commitment-honor-rate gap when it
+        // materially diverges from the raw on-time rate (cancellation
+        // drag). Subtitle shows both numbers so leadership can't miss
+        // a clean on-time rate hiding a high cancellation share.
+        const gap = hero.onTimeRate != null && hero.commitmentHonorRate != null
+          && hero.onTimeRate - hero.commitmentHonorRate >= 3
+          ? hero.commitmentHonorRate
+          : null;
+        return (
+          <HeroTile
+            label="On-time rate"
+            value={hero.onTimeRate === null ? "—" : `${hero.onTimeRate}%`}
+            accent={
+              hero.onTimeRate === null ? "neutral"
+                : hero.onTimeRate >= 80 ? "green"
+                : hero.onTimeRate >= 60 ? "gold"
+                : "flame"
+            }
+            sub={gap !== null
+              ? `delivered on time · honoring ${gap}% incl. cancellations`
+              : "delivered on/before promise"}
+            title={gap !== null
+              ? `Raw on-time rate excludes cancellations from the denominator. The 'honor rate' (${gap}%) counts cancellations as missed commitments — the gap shows how much trust the cancellation rate is silently eating.`
+              : "% of delivered batches that landed on or before the dealer-promised availability date."}
+            trend={{
+              values:    hero.onTimeRateWeekly,
+              domain:    "rate",
+              ariaLabel: "On-time rate — last 12 weeks",
+            }}
+          />
+        );
+      })()}
+      {(() => {
+        // Audit 5 #5 — Re-promises split by booking state. When the
+        // split is available, the HEADLINE becomes the post-booking
+        // count (the trust-erosion number) and the subtitle keeps the
+        // pre-booking count for context. Falls back to the unsplit
+        // batch-level total on pre-migration DBs.
+        const hasSplit = hero.rePromisesPreBooking !== null && hero.rePromisesPostBooking !== null;
+        const headline = hasSplit ? hero.rePromisesPostBooking! : hero.rePromisesIssued;
+        const sub = hasSplit
+          ? hero.rePromisesPreBooking! > 0
+            ? `after booking · ${hero.rePromisesPreBooking} before booking (internal)`
+            : "after booking · no internal churn"
+          : "date shifts issued";
+        const accent = hasSplit
+          ? hero.rePromisesPostBooking! > 0 ? "flame" : "neutral"
+          : hero.rePromisesIssued > 0 ? "gold" : "neutral";
+        const tipTitle = hasSplit
+          ? `Date-shift events split by whether customer bookings existed at the moment of the shift. The headline is post-booking re-promises — the broken-trust number that drives customer-days lost. Pre-booking shifts (in the subtitle) are operationally normal: ops re-projecting before any customer was on the hook.`
+          : "Sum of revision-count across all affected batches — every re-promise is trust erosion.";
+        return (
+          <HeroTile
+            label="Re-promises"
+            value={headline.toLocaleString()}
+            accent={accent}
+            sub={sub}
+            title={tipTitle}
+          />
+        );
+      })()}
       <HeroTile
         label="🚫 Cancelled"
         value={hero.cancelled.toLocaleString()}
@@ -184,9 +224,20 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
             : hero.medianDaysToListed <= 14
               ? "gold"
               : "flame"}
-        sub={hero.unlistedOverThreshold > 0
-          ? `median · ${hero.unlistedOverThreshold} unlisted > 14d`
-          : "median across listed batches"}
+        // Audit 5 #4 — pair median with p90 to expose tail risk that
+        // a healthy median can hide; surface the actionable unlisted
+        // count when there is one.
+        sub={(() => {
+          const parts: string[] = ["median"];
+          if (hero.p90DaysToListed !== null) parts.push(`p90 ${hero.p90DaysToListed}d`);
+          if (hero.unlistedOverThreshold > 0) {
+            parts.push(`${hero.unlistedOverThreshold} unlisted > 14d`);
+          }
+          return parts.length === 1 ? "median across listed batches" : parts.join(" · ");
+        })()}
+        title={hero.p90DaysToListed !== null
+          ? `Median (typical) PO → app-listing days vs. p90 (slow tail). A healthy median with a large p90 means most batches list quickly but a minority take significantly longer — investigate those.`
+          : "Median days from PO submission to App Listing across batches listed in scope."}
         trend={{
           values:    hero.medianDaysToListedWeekly,
           domain:    "auto",
@@ -269,7 +320,7 @@ function ClosureStrip({ closure }: { closure: ClosureSummary }) {
 }
 
 function HeroTile({
-  label, value, sub, accent = "neutral", emphasis = false, trend,
+  label, value, sub, accent = "neutral", emphasis = false, trend, title,
 }: {
   label: string;
   value: string;
@@ -287,6 +338,8 @@ function HeroTile({
     domain: "rate" | "auto";
     ariaLabel: string;
   };
+  /** Audit 5 — native tooltip surfaces the canonical metric definition. */
+  title?: string;
 }) {
   const valueCls = {
     neutral: "text-midnight",
@@ -303,10 +356,13 @@ function HeroTile({
   }[accent];
 
   return (
-    <div className={cn(
-      "rounded-md border bg-white px-3 py-2.5",
-      emphasis ? "border-flame border-2" : "border-ink-200",
-    )}>
+    <div
+      title={title}
+      className={cn(
+        "rounded-md border bg-white px-3 py-2.5",
+        emphasis ? "border-flame border-2" : "border-ink-200",
+      )}
+    >
       <p className="text-[0.65rem] font-medium text-ink-500 uppercase tracking-wide">
         {label}
       </p>
@@ -910,6 +966,7 @@ function DealerTab({ rows }: { rows: DealerReliabilityRow[] }) {
             <Th align="right">Cancel %</Th>
             <Th align="right">List d</Th>
             <Th align="right">List on-time</Th>
+            <Th align="right">PO Score</Th>
           </tr>
         </thead>
         <tbody>
@@ -964,6 +1021,13 @@ function DealerTab({ rows }: { rows: DealerReliabilityRow[] }) {
                     )}>{d.medianDaysToListed}d</span>}
               </Td>
               <Td align="right" tabular><RateChip rate={d.listingOnTimeRate} /></Td>
+              <Td align="right" tabular>
+                <DealerPoScoreCell
+                  mean={d.poReliabilityMean}
+                  weighted={d.poReliabilityCarWeighted}
+                  n={d.poReliabilityPoCount}
+                />
+              </Td>
             </tr>
           ))}
         </tbody>
@@ -978,6 +1042,49 @@ function RateChip({ rate, invert = false }: { rate: number | null; invert?: bool
     ? (rate === 0 ? "text-green-dark" : rate <= 10 ? "text-gold-dark" : "text-flame-dark")
     : (rate >= 90 ? "text-green-dark" : rate >= 70 ? "text-gold-dark" : "text-flame-dark");
   return <span className={cn("font-medium", cls)}>{rate}%</span>;
+}
+
+/**
+ * Audit 4 #2 — Dealer PO Reliability rollup cell.
+ *
+ * Headline is the car-weighted composite — the number leadership
+ * should trust, since it can't be inflated by a handful of tiny
+ * perfect POs. Secondary mention of the unweighted mean appears
+ * when the two diverge by ≥ 3 points (uneven PO sizes signal). The
+ * `n=2` style hint flags small-sample cells so a one-PO dealer
+ * isn't read as authoritative.
+ */
+function DealerPoScoreCell({
+  mean, weighted, n,
+}: { mean: number | null; weighted: number | null; n: number }) {
+  if (weighted == null || n === 0) return <span className="text-ink-400">—</span>;
+  const cls =
+    weighted >= 80 ? "text-green-dark font-semibold" :
+    weighted >= 60 ? "text-brand-dark font-medium" :
+    weighted >= 40 ? "text-gold-dark font-medium" :
+    "text-flame-dark font-semibold";
+  const showDelta = mean != null && Math.abs(mean - weighted) >= 3;
+  const title =
+    `Car-weighted mean across ${n} PO${n === 1 ? "" : "s"} (large POs carry more weight)` +
+    (showDelta && mean != null
+      ? `. Unweighted mean: ${mean}. The gap means this dealer's PO sizes are uneven — trust the car-weighted number.`
+      : ".") +
+    (n < 3 ? " ⚠ Small sample — interpret with caution." : "");
+  return (
+    <span className={cn("tabular-nums", cls)} title={title}>
+      {weighted}
+      {showDelta && mean != null && (
+        <span className="text-[0.65rem] text-ink-400 ml-0.5 font-normal">
+          (mean {mean})
+        </span>
+      )}
+      {n < 3 && (
+        <span className="text-[0.6rem] text-gold-dark ml-0.5 font-normal italic">
+          n={n}
+        </span>
+      )}
+    </span>
+  );
 }
 
 // Tab 2 — Ops performance (departments + stakeholders)

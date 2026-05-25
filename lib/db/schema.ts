@@ -333,6 +333,39 @@ export const batchDeliveryLegs = sqliteTable("batch_delivery_legs", {
   vinsReceivedQuantity: integer("vins_received_quantity").notNull().default(0),
   /** Optional per-leg note (transit problems, address issues, etc.). */
   notes:               text("notes"),
+  // ── Pre-PO listing extension (Forecast-flow) ─────────────────────
+  // The Forecast tab covers the *exception* path: Partnership listed
+  // cars in the customer app BEFORE a real PO was signed. These
+  // columns capture the row-level facts that are committed-to-customers
+  // before the PO arrives, so the diff vs. the eventual signed PO is
+  // auditable. All four are nullable on standard post-PO legs.
+  /**
+   * Car model committed-to-customer for this row. Distinct from
+   * `batches.model` because a Forecast can list multiple models in
+   * different cities under one submission. On standard post-PO legs
+   * this stays null (the batch-level model is canonical).
+   */
+  carModel:                 text("car_model"),
+  /**
+   * ISO date the cars in this row went live in the customer app.
+   * Drives the "Listed → PO signed" lag metric on Forecast Reliability.
+   * Null on post-PO legs that never had a pre-PO listing event.
+   */
+  listedAt:                 text("listed_at"),
+  /**
+   * Per-row promised-availability date. Each city × model row in a
+   * Forecast can commit a different availability date to customers
+   * (Jeddah might be promised earlier than Riyadh). Falls back to
+   * `batches.dealerPromisedDeliveryDate` when null.
+   */
+  promisedAvailabilityDate: text("promised_availability_date"),
+  /**
+   * Running count of customer bookings received against this row
+   * while the batch is in pre-PO state. Manually incremented by ops
+   * through the Action Center pre-PO drawer. Caps the "if we cancel
+   * this Forecast, how many customers do we have to call?" question.
+   */
+  bookingsCount:            integer("bookings_count").notNull().default(0),
   createdAt:           text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
 }, (t) => ({
   byBatch: index("batch_delivery_legs_batch_idx").on(t.batchId),

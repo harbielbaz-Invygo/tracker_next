@@ -23,6 +23,8 @@ import type {
   DepartmentCatalog, ActionTouchpoint,
 } from "@/lib/action-center-tree-data";
 import { augmentActions, type Touchpoint } from "@/lib/action-flow-shared";
+import ConfirmDialog from "./confirm-dialog";
+import { useConfirmDialog } from "./use-confirm-dialog";
 
 /**
  * Shell context — gives every nested card access to the reassign
@@ -45,6 +47,14 @@ interface ShellCtx {
   onLogContact:       (actionId: number, actionLabel?: string) => Promise<void>;
   onEscalate:         (actionId: number, actionLabel?: string) => Promise<void>;
   busyTouchpointActionId: number | null;
+  /**
+   * Audit 6 #1+#10 — branded replacements for window.confirm / window.alert.
+   * Promise-based so async mutation handlers stay flat. Always prefer
+   * these over the native dialogs (unbranded + a11y-poor + can't show
+   * preview lists of affected items).
+   */
+  confirm: ReturnType<typeof useConfirmDialog>["confirm"];
+  alert:   ReturnType<typeof useConfirmDialog>["alert"];
 }
 const ShellContext = createContext<ShellCtx | null>(null);
 function useShell(): ShellCtx {
@@ -156,8 +166,24 @@ export default function ActionCenterTreeShell({ tree }: Props) {
   const [busyActionId,  setBusyActionId]  = useState<number | null>(null);
   const [busyBatchId,   setBusyBatchId]   = useState<number | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
-  /** Cascade flash sticks until the next action fires (no 4 s timer). */
+  /**
+   * Cascade flash auto-dismisses after 5 s (Audit 6 #3) so a lingering
+   * green banner doesn't stay after the operator has visually confirmed
+   * the outcome. Still dismissable via Escape or the ✕ button before
+   * the timer fires. Errors do NOT auto-dismiss — those need explicit
+   * acknowledgement.
+   */
   const [cascadeFlash,  setCascadeFlash]  = useState<string | null>(null);
+  useEffect(() => {
+    if (!cascadeFlash) return;
+    const t = setTimeout(() => setCascadeFlash(null), 5000);
+    return () => clearTimeout(t);
+  }, [cascadeFlash]);
+
+  // Audit 6 #1+#10 — promise-based branded confirm/alert. Exposed
+  // through ShellContext so nested components can call them without
+  // each instantiating their own dialog state.
+  const { confirm, alert, dialogProps } = useConfirmDialog();
   /**
    * Set of expanded wave ids — lifted from WaveSection so a router.refresh
    * doesn't collapse waves the operator was working in. Persists for the
@@ -559,7 +585,10 @@ export default function ActionCenterTreeShell({ tree }: Props) {
       onLogContact:           logContactMutation,
       onEscalate:             escalateMutation,
       busyTouchpointActionId,
+      confirm,
+      alert,
     }}>
+    <ConfirmDialog {...dialogProps} />
     <div className="relative grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]">
       {/* Floating help button — bottom-right of the grid container. */}
       <button
@@ -2482,6 +2511,14 @@ function PrePoFollowUpView({
         )}
       </section>
 
+      {/* Per-row listing + bookings — the Forecast exception flow.
+          Each row shows city × model × qty × listing date and a +/-
+          control for the running booking counter. Hidden when the
+          batch has no legs (legacy pre-migration forecasts). */}
+      {summary && summary.legs.length > 0 && (
+        <PrePoLegsSection legs={summary.legs} />
+      )}
+
       {/* Link-to-Intake CTA. When the real PO arrives, ops drops the
           PDF here — the Intake page reads the query string and
           pre-binds the new PO to this Pre-PO so all the partnership
@@ -2506,6 +2543,180 @@ function PrePoFollowUpView({
         </section>
       )}
     </div>
+  );
+}
+
+/**
+ * Per-row pre-PO listing section — only renders inside PrePoFollowUpView
+ * when the parent batch has `batch_delivery_legs` rows populated with
+ * the Forecast pre-PO extension columns (carModel, listedAt,
+ * promisedAvailabilityDate, bookingsCount).
+ *
+ * The booking counter is the single editable surface — +/- bumps the
+ * count by 1, "Set…" prompts for an absolute value when ops gets a
+ * batched import from the customer-facing app. Busy state is local
+ * per-row so quick consecutive +1s don't all spin together.
+ */
+function PrePoLegsSection({
+  legs,
+}: {
+  legs: NonNullable<PoNode["prePoSummary"]>["legs"];
+}) {
+  const router = useRouter();
+  const shell = useShell();
+  const [busyLegId, setBusyLegId] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function bumpBookings(legId: number, delta: number) {
+    setBusyLegId(legId);
+    setError(null);
+    try {
+      const res = await fetch("/api/forecast/update-bookings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ legId, delta }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyLegId(null);
+    }
+  }
+
+  async function setBookings(legId: number, qty: number) {
+    const input = window.prompt(
+      `Set the booking count for this row (0 – ${qty}):`,
+    );
+    if (input == null) return;
+    const v = Number(input.trim());
+    if (!Number.isFinite(v) || v < 0 || v > qty) {
+      await shell.alert({
+        title: "Invalid booking count",
+        description: `Enter a whole number between 0 and ${qty}. Cancelled.`,
+        danger: true,
+      });
+      return;
+    }
+    setBusyLegId(legId);
+    setError(null);
+    try {
+      const res = await fetch("/api/forecast/update-bookings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ legId, value: Math.round(v) }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyLegId(null);
+    }
+  }
+
+  const totalBookings = legs.reduce((s, l) => s + l.bookingsCount, 0);
+  const totalQty      = legs.reduce((s, l) => s + l.quantity, 0);
+
+  return (
+    <section className="space-y-2">
+      <div className="flex items-baseline justify-between">
+        <p className="text-[0.7rem] font-medium uppercase tracking-wide text-ink-500">
+          Pre-PO listed rows · {legs.length}
+        </p>
+        <p className="text-[0.7rem] text-ink-600 tabular-nums">
+          Bookings <span className="text-midnight font-semibold">{totalBookings}</span>
+          <span className="text-ink-400 mx-0.5">/</span>
+          {totalQty} cars
+        </p>
+      </div>
+      <div className="border border-ink-200 rounded-md overflow-hidden">
+        <table className="w-full text-xs">
+          <thead className="bg-ink-50 text-[0.65rem] text-ink-500 uppercase tracking-wide">
+            <tr>
+              <th className="text-left px-3 py-1.5">City</th>
+              <th className="text-left px-3 py-1.5">Model</th>
+              <th className="text-right px-3 py-1.5">Qty</th>
+              <th className="text-left px-3 py-1.5">Listed</th>
+              <th className="text-left px-3 py-1.5">Avail.</th>
+              <th className="text-right px-3 py-1.5">Bookings</th>
+              <th className="text-right px-3 py-1.5"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {legs.map((leg) => {
+              const busy = busyLegId === leg.legId;
+              const atCap = leg.bookingsCount >= leg.quantity;
+              return (
+                <tr key={leg.legId} className="border-t border-ink-200/60">
+                  <td className="px-3 py-1.5 text-midnight">{leg.city}</td>
+                  <td className="px-3 py-1.5 text-midnight">
+                    {leg.carModel ?? <span className="text-ink-400">—</span>}
+                  </td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{leg.quantity}</td>
+                  <td className="px-3 py-1.5 tabular-nums text-ink-600">
+                    {leg.listedAt ?? <span className="text-ink-400">—</span>}
+                  </td>
+                  <td className="px-3 py-1.5 tabular-nums text-ink-600">
+                    {leg.promisedAvailabilityDate ?? <span className="text-ink-400">—</span>}
+                  </td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">
+                    <span className={cn(
+                      "font-semibold",
+                      leg.bookingsCount === 0 ? "text-ink-400"
+                        : atCap ? "text-flame-dark"
+                        : "text-gold-dark",
+                    )}>
+                      {leg.bookingsCount}
+                    </span>
+                    <span className="text-ink-300 ml-0.5">/ {leg.quantity}</span>
+                  </td>
+                  <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => bumpBookings(leg.legId, -1)}
+                      disabled={busy || leg.bookingsCount === 0}
+                      title="Decrement bookings"
+                      className="text-[0.7rem] px-1.5 py-0.5 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      −
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => bumpBookings(leg.legId, +1)}
+                      disabled={busy || atCap}
+                      title={atCap ? "At capacity — can't book more than listed qty" : "Add one booking"}
+                      className="text-[0.7rem] px-1.5 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel/40 disabled:opacity-40 disabled:cursor-not-allowed ml-1"
+                    >
+                      +
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBookings(leg.legId, leg.quantity)}
+                      disabled={busy}
+                      title="Set the booking count to a specific value"
+                      className="text-[0.7rem] px-1.5 py-0.5 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 disabled:opacity-40 disabled:cursor-not-allowed ml-1"
+                    >
+                      Set…
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {error && (
+        <p role="alert" className="text-[0.7rem] text-flame-dark">
+          {error}
+        </p>
+      )}
+      <p className="text-[0.65rem] text-ink-500 leading-snug">
+        Bookings are pre-PO only. Once the Forecast is linked to a signed PO,
+        these counts become read-only and the post-PO booking flow takes over.
+      </p>
+    </section>
   );
 }
 
@@ -2555,6 +2766,9 @@ function WaveSection({
   & BatchOpProps
   & UiStateProps
 ) {
+  // Pull the branded confirm/alert from the shell so this section can
+  // gate destructive bulk ops through ConfirmDialog instead of native.
+  const shell = useShell();
   // Expansion state is lifted to the top-level shell so router.refresh()
   // after a mutation doesn't collapse the wave the operator is working in.
   const expanded = expandedWaveIds.has(wave.id);
@@ -2619,18 +2833,24 @@ function WaveSection({
     }
   }
 
-  function handleMarkAllDone(e: React.MouseEvent) {
+  async function handleMarkAllDone(e: React.MouseEvent) {
     // Stop the click from also toggling the wave's expanded state —
     // the button is logically nested inside the toggle row.
     e.stopPropagation();
-    const ids = wave.actions
-      .filter((a) => a.status === "waiting")
-      .map((a) => a.id);
+    const waiting = wave.actions.filter((a) => a.status === "waiting");
+    const ids = waiting.map((a) => a.id);
     if (ids.length === 0) return;
-    const ok = window.confirm(
-      `Mark ${ids.length} waiting External-Phase action${ids.length === 1 ? "" : "s"} done in this window?\n\n` +
-      `Blocked rows are excluded — unblock them first if they should also flip.`,
-    );
+    // Audit 6 #1+#5 — branded confirm with the action labels listed so
+    // the operator can verify the set before flipping 10+ rows at once.
+    const ok = await shell.confirm({
+      title: `Mark ${ids.length} action${ids.length === 1 ? "" : "s"} done?`,
+      description:
+        `These ${ids.length} waiting External-Phase action${ids.length === 1 ? "" : "s"} will be marked done in this window. ` +
+        `Blocked rows are excluded — unblock them first if they should also flip.`,
+      previewItems: waiting.map((a) => a.doneLabel || a.actionTypeName),
+      previewLabel: "Actions to mark done",
+      confirmLabel: "Mark done",
+    });
     if (ok) onBulkSetStatus(ids, "done");
   }
 
@@ -2838,6 +3058,8 @@ function WindowActionBar({
   & BatchOpProps
   & Pick<UiStateProps, "onOpenInlineForm">
 ) {
+  // Pull confirm/alert from the shell for branded bulk-op dialogs.
+  const shell = useShell();
   // Collapsed by default. Bulk controls + window-wide chips live
   // inside this card; per-batch action is the more common operation,
   // so we keep the bulk surface tucked away until ops explicitly
@@ -2868,9 +3090,16 @@ function WindowActionBar({
 
   async function handleMarkAllDelivered() {
     if (!canMarkAllDelivered) return;
-    if (!window.confirm(
-      `Mark all ${openBatches.length} open batch${openBatches.length === 1 ? "" : "es"} in this window as delivered? This closes them.`,
-    )) return;
+    // Audit 6 #1+#5 — preview-list confirm so ops sees which batches.
+    const ok = await shell.confirm({
+      title: `Mark ${openBatches.length} batch${openBatches.length === 1 ? "" : "es"} delivered?`,
+      description:
+        `Every open batch in this window will have its Delivery action marked done and the batch closed. This action affects the PO Reliability score and is irreversible.`,
+      previewItems: openBatches.map((b) => b.batchCode),
+      previewLabel: "Batches to deliver",
+      confirmLabel: "Mark all delivered",
+    });
+    if (!ok) return;
     for (const b of openBatches) {
       const delivery = b.actions.find((a) => a.actionTypeName === "Delivery");
       if (delivery) onChangeStatus(delivery.id, "done");
@@ -2881,10 +3110,15 @@ function WindowActionBar({
 
   async function handleCancelWindow() {
     if (openBatches.length === 0) return;
-    const codes = openBatches.map((b) => b.batchCode).join(", ");
-    const ok = window.confirm(
-      `Cancel every open batch in this window?\n\n${codes}\n\nThis closes them as cancelled.`,
-    );
+    const ok = await shell.confirm({
+      title: `Cancel ${openBatches.length} batch${openBatches.length === 1 ? "" : "es"}?`,
+      description:
+        `Every open batch in this window will close as cancelled. This counts as a missed commitment on the PO Reliability score and is irreversible.`,
+      previewItems: openBatches.map((b) => b.batchCode),
+      previewLabel: "Batches to cancel",
+      confirmLabel: "Cancel all batches",
+      danger: true,
+    });
     if (!ok) return;
     const note = window.prompt("Cancellation note (optional, applied to every batch):") || null;
     for (const b of openBatches) {
@@ -2904,7 +3138,15 @@ function WindowActionBar({
     if (!next) return;
     const trimmed = next.trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-      window.alert("Date must be yyyy-mm-dd. Cancelled.");
+      // Audit 6 #10 — branded alert instead of native (rest of the
+      // flow keeps window.prompt for now; promoting the prompt to a
+      // branded input dialog is a larger surface change out of scope).
+      await shell.alert({
+        title: "Invalid date format",
+        description: "Date must be in yyyy-mm-dd format. The shift was cancelled.",
+        confirmLabel: "Got it",
+        danger: true,
+      });
       return;
     }
     const reason = window.prompt("Reason for the shift (optional):") || null;
@@ -5124,6 +5366,8 @@ function ActionCard({
    *  bulk-listing CTA instead of being read-only. */
   poForAppListing?: PoNode;
 }) {
+  // Shell handle for the branded skip-cascade confirm.
+  const shell = useShell();
   // Synthetic rows (id < 0) like the derived "App listed" row are
   // read-only by default. The exception: when the parent passes
   // `poForAppListing`, the App-listed row gets a bulk-listing CTA
@@ -5228,18 +5472,24 @@ function ActionCard({
             label="⏭ Skip"
             tone="ink"
             busy={busy}
-            onClick={() => {
+            onClick={async () => {
               // Skip silently satisfies the cascade (children promote
               // from blocked → waiting), which can mask "we never
               // actually did this work" mistakes. When there are
               // pending dependents on the same scope, confirm with
               // ops first so they see the downstream impact.
+              // Audit 6 #5 — preview list shows the exact dependent
+              // names so ops doesn't trust the count blindly.
               if (action.pendingDependentNames.length > 0) {
-                const confirmed = window.confirm(
-                  `Skipping "${action.doneLabel || action.actionTypeName}" will unblock these dependent actions:\n\n` +
-                  action.pendingDependentNames.map((n) => `  • ${n}`).join("\n") +
-                  `\n\nProceed?`,
-                );
+                const confirmed = await shell.confirm({
+                  title: `Skip will unblock ${action.pendingDependentNames.length} dependent${action.pendingDependentNames.length === 1 ? "" : "s"}`,
+                  description:
+                    `Skipping "${action.doneLabel || action.actionTypeName}" silently satisfies the cascade — the dependent actions below will move from Blocked → Waiting without anyone doing the work this action represents. Proceed only if the skip is intentional.`,
+                  previewItems: action.pendingDependentNames,
+                  previewLabel: "Actions that will unblock",
+                  confirmLabel: "Skip anyway",
+                  danger: true,
+                });
                 if (!confirmed) return;
               }
               onChangeStatus(action.id, "skipped");
