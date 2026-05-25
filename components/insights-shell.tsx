@@ -13,7 +13,7 @@
  * /reports pages. Period filter is a UI scaffold today (always "All time")
  * — wire it through the data layer in a follow-up once the shape lands.
  */
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import type {
   InsightsData, ClosureSummary, ForecastReliabilityRow,
   UpcomingAtRiskRow, InternalPhaseActionStat, StuckStageRow,
@@ -756,6 +756,19 @@ function SeverityBar({
 
 function CustomerImpactTable({ batches }: { batches: CustomerImpactBatch[] }) {
   const top = batches.slice(0, 10);
+  // Audit 3 #9 — multi-leg expand state. Only batches with >1 leg are
+  // expandable; single-leg batches show no chevron. Storing the open
+  // set on the table component (not per-row) keeps the toggle stateful
+  // across the re-renders that period switching triggers.
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  function toggle(batchId: number) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(batchId)) next.delete(batchId);
+      else next.add(batchId);
+      return next;
+    });
+  }
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -771,37 +784,132 @@ function CustomerImpactTable({ batches }: { batches: CustomerImpactBatch[] }) {
           </tr>
         </thead>
         <tbody>
-          {top.map((b) => (
-            <tr key={b.batchId} className="border-b border-ink-200/60">
-              <Td><code className="font-mono text-midnight text-xs">{b.batchCode}</code></Td>
-              <Td>
-                <div className="font-medium">{b.dealerName}</div>
-                <div className="text-[0.7rem] text-ink-500">{b.modelYear}</div>
-              </Td>
-              <Td align="right" tabular>{b.quantity}</Td>
-              <Td align="right" tabular>
-                <span className="font-semibold text-gold-dark">+{b.delayDays}d</span>
-              </Td>
-              <Td align="right" tabular>
-                <span className="font-bold text-gold-dark">{b.customerDaysImpact.toLocaleString()}</span>
-              </Td>
-              <Td align="right" tabular>
-                {b.revisionCount > 0
-                  ? <span className="font-medium text-gold-dark">{b.revisionCount}</span>
-                  : <span className="text-ink-400">0</span>}
-              </Td>
-              <Td>
-                <span className={cn(
-                  "inline-block px-2 py-0.5 rounded-md text-[0.7rem] font-medium border whitespace-nowrap",
-                  b.state === "delivered_late"
-                    ? "bg-ink-100 text-ink-700 border-ink-300"
-                    : "bg-gold-pale text-gold-dark border-gold",
-                )}>
-                  {b.state === "delivered_late" ? "Delivered late" : "Projected late"}
-                </span>
-              </Td>
-            </tr>
-          ))}
+          {top.map((b) => {
+            const hasLegs = b.legs.length > 1;
+            const isOpen = expanded.has(b.batchId);
+            return (
+              <React.Fragment key={b.batchId}>
+                <tr className="border-b border-ink-200/60">
+                  <Td>
+                    <div className="flex items-center gap-1.5">
+                      {hasLegs && (
+                        <button
+                          type="button"
+                          onClick={() => toggle(b.batchId)}
+                          aria-expanded={isOpen}
+                          aria-label={isOpen ? "Hide leg breakdown" : "Show leg breakdown"}
+                          className="text-ink-400 hover:text-midnight text-[0.65rem] w-3 shrink-0"
+                          title={isOpen ? "Hide per-city breakdown" : `Show per-city breakdown (${b.legs.length} legs)`}
+                        >
+                          {isOpen ? "▾" : "▸"}
+                        </button>
+                      )}
+                      <code className="font-mono text-midnight text-xs">{b.batchCode}</code>
+                      {hasLegs && !isOpen && (
+                        <span
+                          className="text-[0.6rem] text-ink-500"
+                          title="Multi-city batch — click ▸ to see per-city breakdown."
+                        >
+                          {b.legs.length} legs
+                        </span>
+                      )}
+                    </div>
+                  </Td>
+                  <Td>
+                    <div className="font-medium">{b.dealerName}</div>
+                    <div className="text-[0.7rem] text-ink-500">{b.modelYear}</div>
+                  </Td>
+                  <Td align="right" tabular>{b.quantity}</Td>
+                  <Td align="right" tabular>
+                    <span className="font-semibold text-gold-dark">+{b.delayDays}d</span>
+                  </Td>
+                  <Td align="right" tabular>
+                    <span className="font-bold text-gold-dark">{b.customerDaysImpact.toLocaleString()}</span>
+                  </Td>
+                  <Td align="right" tabular>
+                    {b.revisionCount > 0
+                      ? <span className="font-medium text-gold-dark">{b.revisionCount}</span>
+                      : <span className="text-ink-400">0</span>}
+                  </Td>
+                  <Td>
+                    <span className={cn(
+                      "inline-block px-2 py-0.5 rounded-md text-[0.7rem] font-medium border whitespace-nowrap",
+                      b.state === "delivered_late"
+                        ? "bg-ink-100 text-ink-700 border-ink-300"
+                        : "bg-gold-pale text-gold-dark border-gold",
+                    )}>
+                      {b.state === "delivered_late" ? "Delivered late" : "Projected late"}
+                    </span>
+                  </Td>
+                </tr>
+                {hasLegs && isOpen && (
+                  <tr className="bg-ink-50/40 border-b border-ink-200/60">
+                    <td colSpan={7} className="px-4 py-2">
+                      <p className="text-[0.6rem] font-semibold uppercase tracking-wide text-ink-500 mb-1.5">
+                        Per-city breakdown — bottleneck is the row with the most pending cars
+                      </p>
+                      <table className="w-full text-[0.7rem]">
+                        <thead className="text-ink-500">
+                          <tr className="text-left">
+                            <th className="px-2 py-1 font-medium">City</th>
+                            <th className="px-2 py-1 font-medium text-right">Requested</th>
+                            <th className="px-2 py-1 font-medium text-right">Delivered</th>
+                            <th className="px-2 py-1 font-medium text-right">Pending</th>
+                            <th className="px-2 py-1 font-medium text-right">Fulfilment</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {b.legs
+                            // Sort by pending descending — biggest bottleneck first.
+                            .slice()
+                            .sort((x, y) => y.pendingQuantity - x.pendingQuantity)
+                            .map((leg) => {
+                              const fulfilment = leg.requestedQuantity === 0
+                                ? null
+                                : Math.round((leg.deliveredQuantity / leg.requestedQuantity) * 100);
+                              const isStuck = leg.pendingQuantity > 0 && b.state === "projected_late";
+                              return (
+                                <tr key={leg.city} className="border-t border-ink-200/60">
+                                  <td className={cn(
+                                    "px-2 py-1",
+                                    isStuck ? "text-flame-dark font-medium" : "text-midnight",
+                                  )}>
+                                    {leg.city}
+                                  </td>
+                                  <td className="px-2 py-1 text-right tabular-nums text-ink-600">
+                                    {leg.requestedQuantity}
+                                  </td>
+                                  <td className="px-2 py-1 text-right tabular-nums">
+                                    {leg.deliveredQuantity > 0
+                                      ? <span className="text-green-dark font-medium">{leg.deliveredQuantity}</span>
+                                      : <span className="text-ink-400">0</span>}
+                                  </td>
+                                  <td className="px-2 py-1 text-right tabular-nums">
+                                    {leg.pendingQuantity === 0
+                                      ? <span className="text-green-dark">0</span>
+                                      : <span className="text-flame-dark font-semibold">{leg.pendingQuantity}</span>}
+                                  </td>
+                                  <td className="px-2 py-1 text-right tabular-nums">
+                                    {fulfilment == null
+                                      ? <span className="text-ink-400">—</span>
+                                      : <span className={cn(
+                                          "font-medium",
+                                          fulfilment === 100 ? "text-green-dark"
+                                            : fulfilment >= 50 ? "text-gold-dark"
+                                            : "text-flame-dark",
+                                        )}>{fulfilment}%</span>}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                        </tbody>
+                      </table>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
         </tbody>
       </table>
       {batches.length > 10 && (
@@ -1358,6 +1466,7 @@ function CitiesTab({ rows }: { rows: CityReliabilityRow[] }) {
             <Th align="right">Qty %</Th>
             <Th align="right">Date %</Th>
             <Th align="right">Variance</Th>
+            <Th align="right">Pending</Th>
           </tr>
         </thead>
         <tbody>
@@ -1406,10 +1515,35 @@ function CitiesTab({ rows }: { rows: CityReliabilityRow[] }) {
                       {c.avgDateVarianceDays > 0 ? `+${c.avgDateVarianceDays}` : c.avgDateVarianceDays}d
                     </span>}
               </Td>
+              <Td align="right" tabular>
+                {/* Audit 3 #9 — pending cars + open batches. Surfaces
+                    in-flight backlog so leadership can spot which
+                    cities are absorbing the most undelivered inventory
+                    right now (not just historical fulfilment rates). */}
+                {c.pendingCars === 0
+                  ? <span className="text-ink-400">0</span>
+                  : <span
+                      title={`${c.pendingCars} car${c.pendingCars === 1 ? "" : "s"} pending across ${c.pendingBatches} open batch${c.pendingBatches === 1 ? "" : "es"}.`}
+                      className={cn(
+                        "font-semibold",
+                        c.pendingCars >= 20 ? "text-flame-dark"
+                          : c.pendingCars >= 5 ? "text-gold-dark"
+                          : "text-ink-700",
+                      )}
+                    >
+                      {c.pendingCars}
+                      <span className="text-[0.65rem] text-ink-400 ml-0.5 font-normal">
+                        / {c.pendingBatches}b
+                      </span>
+                    </span>}
+              </Td>
             </tr>
           ))}
         </tbody>
       </table>
+      <p className="px-4 py-2 text-[0.65rem] text-ink-500 bg-ink-50/40 border-t border-ink-200">
+        <strong>Pending</strong> = cars committed to this city on still-open batches, with the count of distinct open batches after the slash. Drives the "which city has the most stuck inventory" lens.
+      </p>
     </div>
   );
 }
