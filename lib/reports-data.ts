@@ -26,6 +26,7 @@ import {
 } from "@/lib/db/schema";
 import {
   computePoReliability,
+  aggregateDealerReliability,
   type ReliabilityBatch,
 } from "@/lib/po-reliability";
 import { derivePoClosureOutcome } from "@/lib/po-closure";
@@ -145,6 +146,20 @@ export interface DealerReliabilityRow {
    * Null when no batches have been listed.
    */
   listingOnTimeRate: number | null;
+
+  /**
+   * 7. PO Reliability rollup (Audit 4 #2). Composite PO score across
+   * the dealer's closed POs, in two flavours:
+   *   - `poReliabilityMean`        — simple unweighted average per PO
+   *   - `poReliabilityCarWeighted` — weighted by requestedCars per PO,
+   *     so one large failed PO can't be masked by a handful of tiny
+   *     perfect ones (the number leadership should trust)
+   * Both null when the dealer has zero scored POs in the period.
+   */
+  poReliabilityMean: number | null;
+  poReliabilityCarWeighted: number | null;
+  /** PO count that contributed to the means above. */
+  poReliabilityPoCount: number;
 }
 
 /**
@@ -1017,6 +1032,10 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       cancellationRate,
       medianDaysToListed,
       listingOnTimeRate,
+      // Audit 4 #2 rollup — patched in after the poReliability loop runs.
+      poReliabilityMean:        null,
+      poReliabilityCarWeighted: null,
+      poReliabilityPoCount:     0,
     };
   });
 
@@ -1336,6 +1355,26 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       }))),
     });
   }
+  // Audit 4 #2 — dealer PO Reliability rollup. Bucket the per-PO
+  // scores by dealer, then run the pure aggregator. Patches the
+  // (mean, carWeightedMean, count) onto the dealer rows that were
+  // built earlier. Doing this after the per-PO loop avoids a second
+  // pass over batches.
+  const scoresByDealer = new Map<number, { composite: number; requestedCars: number }[]>();
+  for (const p of poReliability) {
+    const arr = scoresByDealer.get(p.dealerId) ?? [];
+    arr.push({ composite: p.po.composite, requestedCars: p.raw.requestedCars });
+    scoresByDealer.set(p.dealerId, arr);
+  }
+  for (const row of dealerReliability) {
+    const scores = scoresByDealer.get(row.dealerId);
+    if (!scores || scores.length === 0) continue;
+    const rollup = aggregateDealerReliability(scores);
+    row.poReliabilityMean        = rollup.mean;
+    row.poReliabilityCarWeighted = rollup.carWeightedMean;
+    row.poReliabilityPoCount     = rollup.n;
+  }
+
   // Sort: lowest composite first (problematic POs surface to the
   // top — same pattern as the customer impact table).
   poReliability.sort((a, b) => a.po.composite - b.po.composite);

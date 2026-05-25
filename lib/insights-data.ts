@@ -37,8 +37,20 @@ export interface InsightsHero {
   /**
    * % of delivered batches that landed on or before promised. Null when
    * nothing has been delivered yet (avoid showing 0% on a fresh setup).
+   *
+   * NOTE: this is the NARROW rate — cancellations are excluded from
+   * the denominator. See `commitmentHonorRate` below (Audit 5 #3) for
+   * the broader trust signal that counts cancellations as misses.
    */
   onTimeRate: number | null;
+  /**
+   * Audit 5 #3 — Commitment honor rate including cancellations.
+   *   deliveredOnTime / (deliveredOnTime + deliveredLate + cancelled)
+   * A dealer who cancels 40% of POs and delivers the rest on time gets
+   * a 60% honor rate (vs. 100% raw on-time rate). The number leadership
+   * should track to expose cancellation drag.
+   */
+  commitmentHonorRate: number | null;
   /**
    * On-time rate per week, last 12 weeks (oldest first). null in
    * weeks with no deliveries. Drives the sparkline next to the
@@ -50,11 +62,31 @@ export interface InsightsHero {
   /** Sum of revision counts across affected batches — trust erosion signal. */
   rePromisesIssued: number;
   /**
+   * Audit 5 #5 — Re-promises BEFORE customers booked (bookingsAtShift = 0
+   * at the moment of the shift). Internal-only churn; ops adjusting
+   * dates while the batch is still pre-listing. Operationally normal.
+   * Null when `batch_date_revisions` hasn't been migrated yet.
+   */
+  rePromisesPreBooking: number | null;
+  /**
+   * Audit 5 #5 — Re-promises AFTER at least one customer was booked
+   * against the batch (bookingsAtShift > 0). Broken promises to real
+   * customers — the alarming number that drives customer-days lost.
+   */
+  rePromisesPostBooking: number | null;
+  /**
    * Median days from PO submission → app listing across batches that
    * were listed in the period. Null until at least one batch in the
    * cohort has been listed. Primary "PO → Listed" KPI.
    */
   medianDaysToListed: number | null;
+  /**
+   * Audit 5 #4 — 90th-percentile days PO→Listed across the same cohort
+   * as the median. Pairs with median to expose tail risk: a healthy
+   * median can hide a long tail of slow batches. Null when fewer than
+   * 3 samples (percentile is meaningless on tiny n).
+   */
+  p90DaysToListed: number | null;
   /**
    * Count of post_po batches still unlisted whose submission is older
    * than 14 days. The actionable companion to medianDaysToListed —
@@ -469,6 +501,8 @@ async function getForecastReliability(period: ReportPeriod): Promise<ForecastRel
  */
 async function getListingSpeed(period: ReportPeriod): Promise<{
   medianDaysToListed: number | null;
+  /** Audit 5 #4 — 90th percentile of the same cohort, surfaces tail risk. */
+  p90DaysToListed: number | null;
   unlistedOverThreshold: number;
   /** Weekly median trend, 12 weeks oldest first. (Audit 2 #5.) */
   medianDaysToListedWeekly: (number | null)[];
@@ -497,6 +531,7 @@ async function getListingSpeed(period: ReportPeriod): Promise<{
       console.warn("[insights-data] listing speed skipped — schema not migrated.");
       return {
         medianDaysToListed: null,
+        p90DaysToListed: null,
         unlistedOverThreshold: 0,
         medianDaysToListedWeekly: Array.from({ length: 12 }, () => null),
       };
@@ -567,7 +602,58 @@ async function getListingSpeed(period: ReportPeriod): Promise<{
   }
   const medianDaysToListedWeekly = buckets.map((b) => median(b));
 
-  return { medianDaysToListed, unlistedOverThreshold: unlistedOver, medianDaysToListedWeekly };
+  // Audit 5 #4 — nearest-rank p90 on the same cohort. Requires ≥ 3
+  // samples; otherwise a single outlier becomes "p90" (noise, not signal).
+  let p90DaysToListed: number | null = null;
+  if (daysSamples.length >= 3) {
+    const sortedAsc = daysSamples.slice().sort((a, b) => a - b);
+    const idx = Math.min(sortedAsc.length - 1, Math.max(0, Math.ceil(0.9 * sortedAsc.length) - 1));
+    p90DaysToListed = sortedAsc[idx];
+  }
+
+  return {
+    medianDaysToListed,
+    p90DaysToListed,
+    unlistedOverThreshold: unlistedOver,
+    medianDaysToListedWeekly,
+  };
+}
+
+/**
+ * Audit 5 #5 — split the re-promise count by whether customer
+ * bookings existed at the moment of each shift event.
+ *   pre  = revisions with bookingsAtShift = 0 (internal churn)
+ *   post = revisions with bookingsAtShift > 0 (broken customer trust)
+ * Period-scoped via `revisedAt` so a long-running batch contributes
+ * only the shifts that fell in the window. Returns null/null on
+ * pre-migration DBs; caller falls back to the unsplit headline.
+ */
+async function getRePromiseSplit(period: ReportPeriod): Promise<{
+  pre: number | null;
+  post: number | null;
+}> {
+  const fromIso = fromIsoForPeriod(period);
+  let rows: { revisedAt: string | null; bookingsAtShift: number }[];
+  try {
+    rows = await db
+      .select({
+        revisedAt:       batchDateRevisions.revisedAt,
+        bookingsAtShift: batchDateRevisions.bookingsAtShift,
+      })
+      .from(batchDateRevisions);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such table/i.test(msg)) return { pre: null, post: null };
+    throw err;
+  }
+  let pre = 0;
+  let post = 0;
+  for (const r of rows) {
+    if (fromIso && r.revisedAt && r.revisedAt.slice(0, 10) < fromIso) continue;
+    if ((r.bookingsAtShift ?? 0) > 0) post++;
+    else pre++;
+  }
+  return { pre, post };
 }
 
 export async function getInsightsData(period: ReportPeriod = "all"): Promise<InsightsData> {
@@ -597,14 +683,28 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     ? Math.round((report.totals.deliveredOnTime / totalDelivered) * 100)
     : null;
 
-  // Listing-speed KPI (Review #2 R1). Median days PO → Listed across
-  // batches that have already been listed; companion count of open
-  // post_po batches still unlisted past the 14-day threshold.
+  // Audit 5 #3 — commitment honor rate (cancellations as misses). The
+  // denominator widens to include cancelled batches so dealers can't
+  // hide cancellation drag behind a clean on-time rate.
+  const totalCommitments = report.totals.deliveredOnTime
+                         + report.totals.deliveredLate
+                         + report.totals.cancelled;
+  const commitmentHonorRate = totalCommitments > 0
+    ? Math.round((report.totals.deliveredOnTime / totalCommitments) * 100)
+    : null;
+
+  // Listing-speed KPI (Review #2 R1). Median + p90 PO → Listed,
+  // weekly median trend, and the count of overdue (>14d unlisted)
+  // post_po batches still in flight.
   const listingSpeed = await getListingSpeed(period);
 
-  // Audit 3 #7 — weekly customer-days-lost trend, last 12 weeks
-  // (oldest first). Bucket batch_date_revisions by revisedAt.
-  const customerDaysLostWeekly = await getCustomerDaysLostWeekly();
+  // Audit 5 #5 — re-promise split by pre/post customer-booking. Runs
+  // in parallel with the weekly-trend query since both hit the same
+  // revisions table.
+  const [customerDaysLostWeekly, rePromiseSplit] = await Promise.all([
+    getCustomerDaysLostWeekly(),
+    getRePromiseSplit(period),
+  ]);
 
   // Audit 3 #10 — surface the existing per-week on-time rate from
   // the report. Reshape to a plain number-or-null array matching
@@ -617,10 +717,14 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     activeBatches:    report.totals.open,
     preVinCritical,
     onTimeRate,
+    commitmentHonorRate,
     onTimeRateWeekly,
     cancelled:        report.totals.cancelled,
-    rePromisesIssued: report.customerImpact.totals.totalRePromises,
+    rePromisesIssued:      report.customerImpact.totals.totalRePromises,
+    rePromisesPreBooking:  rePromiseSplit.pre,
+    rePromisesPostBooking: rePromiseSplit.post,
     medianDaysToListed:       listingSpeed.medianDaysToListed,
+    p90DaysToListed:          listingSpeed.p90DaysToListed,
     medianDaysToListedWeekly: listingSpeed.medianDaysToListedWeekly,
     unlistedOverThreshold:    listingSpeed.unlistedOverThreshold,
   };
