@@ -422,6 +422,17 @@ function DetailForm({
     requestedAt: batch.requestedAt,
     dealerPromisedDeliveryDate: batch.dealerPromisedDeliveryDate,
     currentProjectedDeliveryDate: batch.currentProjectedDeliveryDate,
+    appListedAt: batch.appListedAt,
+    vinReceivingDate: batch.vinReceivingDate,
+    poExpectedDateAtLock: batch.poExpectedDateAtLock,
+    opsProjectedDeliveryDateAtLock: batch.opsProjectedDeliveryDateAtLock,
+
+    vinsReceivedQuantity: batch.vinsReceivedQuantity,
+    vinReceivedAtIntake: batch.vinReceivedAtIntake,
+
+    closedAt: batch.closedAt,
+    closureReason: batch.closureReason,
+    cancellationNote: batch.cancellationNote,
 
     currentStage: batch.currentStage,
     lifecycleState: batch.lifecycleState,
@@ -573,6 +584,17 @@ function DetailForm({
             <input type="number" className="input tabular-nums" value={draft.deliveredQuantity ?? ""}
                    onChange={(e) => set("deliveredQuantity", numOrZero(e.target.value))} />
           </Field>
+          <Field label="VINs received" hint="caps delivered at close">
+            <input type="number" className="input tabular-nums" value={draft.vinsReceivedQuantity ?? ""}
+                   onChange={(e) => set("vinsReceivedQuantity", numOrZero(e.target.value))} />
+          </Field>
+          <Field label="VIN received at intake" hint="skips early VIN-chase steps">
+            <select className="input" value={draft.vinReceivedAtIntake ? "yes" : "no"}
+                    onChange={(e) => set("vinReceivedAtIntake", e.target.value === "yes")}>
+              <option value="no">No</option>
+              <option value="yes">Yes</option>
+            </select>
+          </Field>
           <Field label="Receiving City">
             <input className="input" value={draft.dealerReceivingCity ?? ""}
                    onChange={(e) => set("dealerReceivingCity", e.target.value || null)} />
@@ -599,6 +621,22 @@ function DetailForm({
             <input type="date" className="input" value={draft.currentProjectedDeliveryDate ?? ""}
                    onChange={(e) => set("currentProjectedDeliveryDate", e.target.value || null)} />
           </Field>
+          <Field label="App listed" hint="when cars went live in-app · drives PO→Listed">
+            <input type="date" className="input" value={draft.appListedAt ?? ""}
+                   onChange={(e) => set("appListedAt", e.target.value || null)} />
+          </Field>
+          <Field label="VIN receiving date" hint="dealer's commitment to share VINs">
+            <input type="date" className="input" value={draft.vinReceivingDate ?? ""}
+                   onChange={(e) => set("vinReceivingDate", e.target.value || null)} />
+          </Field>
+          <Field label="PO expected @ lock" hint="baseline · affects variance">
+            <input type="date" className="input" value={draft.poExpectedDateAtLock ?? ""}
+                   onChange={(e) => set("poExpectedDateAtLock", e.target.value || null)} />
+          </Field>
+          <Field label="Ops projected @ lock" hint="baseline · affects variance">
+            <input type="date" className="input" value={draft.opsProjectedDeliveryDateAtLock ?? ""}
+                   onChange={(e) => set("opsProjectedDeliveryDateAtLock", e.target.value || null)} />
+          </Field>
           <Field label="Target PO date" hint="computed from promised − lead time">
             <input className="input bg-ink-100" value={batch.targetPoDate ?? "—"} disabled />
           </Field>
@@ -624,6 +662,33 @@ function DetailForm({
                 <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
               ))}
             </select>
+          </Field>
+        </FieldGrid>
+      </Section>
+
+      {/* Closure — realised outcome. Drives on-time rate, delivered % and
+          customer-days on Insights. closedAt without closureReason="delivered"
+          is "closed but not counted as delivered". */}
+      <Section title="Closure"
+               warning={draft.closedAt && !draft.closureReason
+                 ? "Closed date set without a closure reason — set 'delivered' for it to count as an on-time delivery on Insights."
+                 : undefined}>
+        <FieldGrid>
+          <Field label="Closed / actual availability" hint="realised delivery date">
+            <input type="date" className="input" value={draft.closedAt ?? ""}
+                   onChange={(e) => set("closedAt", e.target.value || null)} />
+          </Field>
+          <Field label="Closure reason">
+            <select className="input" value={draft.closureReason ?? ""}
+                    onChange={(e) => set("closureReason", (e.target.value || null) as BatchEditRow["closureReason"])}>
+              <option value="">— open —</option>
+              <option value="delivered">delivered</option>
+              <option value="cancelled">cancelled</option>
+            </select>
+          </Field>
+          <Field label="Cancellation note">
+            <input className="input" value={draft.cancellationNote ?? ""}
+                   onChange={(e) => set("cancellationNote", e.target.value || null)} />
           </Field>
         </FieldGrid>
       </Section>
