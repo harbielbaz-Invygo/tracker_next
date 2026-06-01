@@ -2670,27 +2670,32 @@ function WaveSection({
   const expanded = expandedWaveIds.has(wave.id);
   const setExpanded = () => onToggleWave(wave.id);
   const totalCars = wave.batches.reduce((s, b) => s + b.requestedQuantity, 0);
-  // Blocked count for the collapsed-header indicator (the done/waiting
-  // counts were dropped — window progress is the "{extDone}/{extTotal}
-  // done" chip, and per-action state shows on each chip).
+  // Blocked count for the collapsed-header indicator.
   const blockedCount = wave.actions.filter((a) => a.status === "blocked").length;
 
-  // Per-window informational rollups surfaced in the collapsed header
-  // (moved here from the PO header so it stays PO-level only):
-  //   • External-phase progress — the collapsed-header priority status.
-  //     Counts wave + batch external actions, excluding the synthetic
-  //     Delivery row (that's its own phase / the Mark-delivered button).
+  // Per-window informational rollups surfaced in the collapsed header:
+  //   • Wave-level External-Phase progress ("0/7") — only the wave-scope
+  //     action rows, NOT the per-batch copies (per ops preference).
   //   • App-listed — how many of the window's batches are live in-app.
   //   • VIN — cars with a VIN received vs. the cars requested.
-  const extActions = [
-    ...wave.actions,
-    ...wave.batches.flatMap((b) => b.actions),
-  ].filter((a) => a.actionTypeName !== "Delivery");
-  const extDone  = extActions.filter((a) => a.status === "done").length;
-  const extTotal = extActions.length;
+  const waveDone  = wave.actions.filter((a) => a.status === "done").length;
+  const waveTotal = wave.actions.length;
   const listedCount = wave.batches.filter((b) => b.appListedAt != null).length;
   const batchCount  = wave.batches.length;
   const vinsReceived = wave.batches.reduce((s, b) => s + (b.vinsReceivedQuantity ?? 0), 0);
+
+  // Days until / past this window's date (ops projection wins), shown
+  // per-window in the header (visible collapsed AND expanded). Suppressed
+  // once the window is fully delivered so an on-time window never reads
+  // "overdue".
+  const today = todayIso();
+  const windowClosed = wave.closedAt != null
+    || (wave.batches.length > 0 && wave.batches.every((b) => b.closedAt != null));
+  const windowHeadlineDate = wave.opsExpectedDate ?? wave.availabilityDate;
+  const windowDaysDelta = Math.round(
+    (new Date(windowHeadlineDate).getTime() - new Date(today).getTime())
+    / (24 * 60 * 60 * 1000),
+  );
 
   // Audit 1 #3 — wave "Partially confirmed" badge. The Confirmation
   // chip stays green on N>0 (matches dealer reality: yes, partial),
@@ -2786,18 +2791,35 @@ function WaveSection({
         <span className="text-xs text-ink-500 tabular-nums">
           {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
         </span>
-        {/* External-phase progress — the collapsed-header priority. */}
+        {/* Wave-level External-Phase progress — the collapsed-header
+            priority. Counts only the wave-scope action rows ("0/7"). */}
         <span
           className={cn(
             "text-[0.65rem] font-semibold tabular-nums px-1.5 py-0.5 rounded border",
-            extTotal > 0 && extDone === extTotal
+            waveTotal > 0 && waveDone === waveTotal
               ? "border-green text-green-dark bg-green-pale"
               : "border-ink-300 text-ink-600 bg-white",
           )}
-          title="External-phase actions done across this window (excludes Delivery)"
+          title="Wave-level External-Phase actions done for this delivery window"
         >
-          {extDone}/{extTotal} done
+          {waveDone}/{waveTotal} done
         </span>
+        {/* Per-window countdown — days until / past this window's date. */}
+        {!windowClosed && (
+          <span
+            className={cn(
+              "text-[0.65rem] font-medium tabular-nums",
+              windowDaysDelta < 0 ? "text-flame-dark" : "text-ink-600",
+            )}
+            title="Days until (or past) this window's expected date"
+          >
+            ⏳ {windowDaysDelta < 0
+              ? `${-windowDaysDelta}d overdue`
+              : windowDaysDelta === 0
+                ? "today"
+                : `in ${windowDaysDelta}d`}
+          </span>
+        )}
         {/* App-listed status for the window's batches. */}
         {batchCount > 0 && (
           <span
@@ -3607,11 +3629,11 @@ function BatchRow({
         ? "border-gold border-dashed bg-gold-pale/20"
         : closed
           ? (partlyDelivered
-              ? "bg-gold-pale/25 border-ink-200"
+              ? "bg-gold-pale/25 border-ink-700"
               : b.closureReason === "delivered"
-                ? "bg-green-pale/30 border-ink-200"
-                : "bg-flame-pale/20 border-ink-200")
-          : "bg-white border-ink-200",
+                ? "bg-green-pale/30 border-ink-700"
+                : "bg-flame-pale/20 border-ink-700")
+          : "bg-white border-ink-700",
     )}>
       {/* Remainder banner — only on remainder batches. Spans the
           full width above the two-column layout so ops sees the
