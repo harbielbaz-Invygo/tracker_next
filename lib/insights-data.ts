@@ -11,7 +11,7 @@ import { gte, or, isNull, eq, and, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   batches, batchForecasts, users, batchActions, actionTypes,
-  batchDateRevisions, pos,
+  batchDateRevisions, batchDeliveryLegs, pos,
   actions as actionsTable,
 } from "@/lib/db/schema";
 import { getDashboardRows, type DashboardRow } from "@/lib/dashboard-data";
@@ -151,7 +151,36 @@ export interface ForecastReliabilityRow {
   superseded: number;
   cancelled: number;
   open: number;
+  /**
+   * Mean (intakePoDate − forecastSubmittedAt) in days across this
+   * user's fulfilled / superseded forecasts. Negative = PO arrived
+   * earlier than expected; positive = late. Null when no fulfilled
+   * forecasts.
+   */
   avgDriftDays: number | null;
+  /**
+   * 90th-percentile drift across the same cohort. Pairs with avg to
+   * expose tail risk — a clean average can hide a few extreme misses.
+   * Null when fewer than 3 fulfilled samples (percentile is noise
+   * on tiny n, matches the listing-speed p90 gate).
+   */
+  p90DriftDays: number | null;
+  /**
+   * Fraction of this user's realized (fulfilled + superseded)
+   * forecasts where the dealer pivoted the car model between
+   * forecast and PO. Computed by comparing the forecast row's
+   * `carModel` against the linked PO batch's `model` — any
+   * case-insensitive non-match counts. Null when no realized
+   * forecasts have model data on both sides (legacy / unmigrated).
+   */
+  modelSwapRate: number | null;
+  /**
+   * Sum of `bookingsCount` across this user's pre-PO forecasts —
+   * how many customer bookings landed against their bets while they
+   * were still pre-PO. The "customer exposure" signal: a high number
+   * means cancellations / mis-forecasts hurt real customers.
+   */
+  totalBookings: number;
 }
 
 /**
@@ -400,9 +429,14 @@ async function getForecastReliability(period: ReportPeriod): Promise<ForecastRel
   // Pull every forecast row joined with the underlying batch + submitter.
   // Period-scoped on submittedAt so the table answers "for forecasts
   // submitted in the last N days, how reliable was each submitter?".
+  // `batches.model` is the dealer-PO-side car model for the realized
+  // case (1:1 fulfilled flips the same row to post_po); compared
+  // against the per-leg `car_model` captured at forecast submission
+  // to detect post-link model swaps (Audit 5 follow-up).
   const baseQuery = db
     .select({
       batchId:           batches.id,
+      poModel:           batches.model,
       lifecycleState:    batches.lifecycleState,
       closedAt:          batches.closedAt,
       closureReason:     batches.closureReason,
@@ -437,6 +471,37 @@ async function getForecastReliability(period: ReportPeriod): Promise<ForecastRel
     throw err;
   }
 
+  // Pull legs for the forecast batches — gives us per-row carModel
+  // (for the swap-rate diff against the linked PO's model) and
+  // bookingsCount (for the customer-exposure signal). Wrapped because
+  // the per-row columns are new on `batch_delivery_legs`; older DBs
+  // return rows without them and we treat those as zero.
+  const legsByBatch = new Map<number, { carModel: string | null; bookings: number; quantity: number }[]>();
+  try {
+    const legRows = await db
+      .select({
+        batchId:       batchDeliveryLegs.batchId,
+        carModel:      batchDeliveryLegs.carModel,
+        bookingsCount: batchDeliveryLegs.bookingsCount,
+        requestedQty:  batchDeliveryLegs.requestedQuantity,
+      })
+      .from(batchDeliveryLegs);
+    for (const l of legRows) {
+      const arr = legsByBatch.get(l.batchId) ?? [];
+      arr.push({
+        carModel: l.carModel ?? null,
+        bookings: l.bookingsCount ?? 0,
+        quantity: l.requestedQty,
+      });
+      legsByBatch.set(l.batchId, arr);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such column|no such table/i.test(msg)) throw err;
+    // Legacy DB without the new columns — empty map; metrics that
+    // depend on legs fall back to null / zero in the aggregation.
+  }
+
   type Acc = {
     name: string;
     submitted: number;
@@ -445,14 +510,29 @@ async function getForecastReliability(period: ReportPeriod): Promise<ForecastRel
     cancelled: number;
     open: number;
     drifts: number[];
+    /** Forecasts where both forecast model and PO model are known. */
+    modelComparable: number;
+    /** Of those, how many had any leg's model differ from the PO model. */
+    modelSwapped: number;
+    /** Sum of per-leg bookingsCount across this user's pre-PO forecasts. */
+    bookings: number;
   };
   const byUser = new Map<number, Acc>();
+  const norm = (s: string | null | undefined) =>
+    (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
   for (const r of rows) {
     const a = byUser.get(r.userId) ?? {
       name: r.userName ?? `@${r.userUsername ?? "user"}`,
-      submitted: 0, fulfilled: 0, superseded: 0, cancelled: 0, open: 0, drifts: [],
+      submitted: 0, fulfilled: 0, superseded: 0, cancelled: 0, open: 0,
+      drifts: [], modelComparable: 0, modelSwapped: 0, bookings: 0,
     };
     a.submitted++;
+    const legs = legsByBatch.get(r.batchId) ?? [];
+    // Bookings are pre-PO only — the column gets frozen the moment a
+    // forecast is linked. Counting across submitted forecasts is
+    // honest: it's "total customer exposure this user generated."
+    for (const leg of legs) a.bookings += leg.bookings;
+
     if (r.closureReason === "cancelled") {
       a.cancelled++;
     } else if (r.forecastSupersededAt) {
@@ -463,6 +543,18 @@ async function getForecastReliability(period: ReportPeriod): Promise<ForecastRel
         const drift = (new Date(r.actualPoDate).getTime() - new Date(r.submittedAt).getTime()) / 86_400_000;
         a.drifts.push(Math.round(drift));
       }
+      // Model-swap diff — only meaningful in the 1:1 fulfilled case
+      // where the SAME batch row carries both the forecast legs and
+      // the post-PO model. Superseded forecasts produce N children
+      // with their own models; surfacing that as one swap-or-not is
+      // ambiguous, so we skip the comparison there. The superseded
+      // count itself signals divergence at a higher resolution.
+      const forecastModels = legs.map((l) => norm(l.carModel)).filter(Boolean);
+      const poModel = norm(r.poModel);
+      if (forecastModels.length > 0 && poModel) {
+        a.modelComparable++;
+        if (forecastModels.some((m) => m !== poModel)) a.modelSwapped++;
+      }
     } else {
       a.open++;
     }
@@ -470,18 +562,35 @@ async function getForecastReliability(period: ReportPeriod): Promise<ForecastRel
   }
 
   return Array.from(byUser.entries())
-    .map(([userId, a]) => ({
-      userId,
-      name: a.name,
-      submitted: a.submitted,
-      fulfilled: a.fulfilled,
-      superseded: a.superseded,
-      cancelled: a.cancelled,
-      open:      a.open,
-      avgDriftDays: a.drifts.length === 0
+    .map(([userId, a]) => {
+      const avgDriftDays = a.drifts.length === 0
         ? null
-        : Math.round(a.drifts.reduce((s, v) => s + v, 0) / a.drifts.length),
-    }))
+        : Math.round(a.drifts.reduce((s, v) => s + v, 0) / a.drifts.length);
+      // p90 gated to n≥3 — matches the listing-speed treatment so the
+      // signal isn't dominated by a single outlier.
+      let p90DriftDays: number | null = null;
+      if (a.drifts.length >= 3) {
+        const sorted = a.drifts.slice().sort((x, y) => x - y);
+        const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(0.9 * sorted.length) - 1));
+        p90DriftDays = sorted[idx];
+      }
+      const modelSwapRate = a.modelComparable === 0
+        ? null
+        : Math.round((a.modelSwapped / a.modelComparable) * 100);
+      return {
+        userId,
+        name: a.name,
+        submitted: a.submitted,
+        fulfilled: a.fulfilled,
+        superseded: a.superseded,
+        cancelled: a.cancelled,
+        open:      a.open,
+        avgDriftDays,
+        p90DriftDays,
+        modelSwapRate,
+        totalBookings: a.bookings,
+      };
+    })
     .sort((x, y) => y.submitted - x.submitted);
 }
 

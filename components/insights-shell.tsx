@@ -876,42 +876,102 @@ function ForecastReliabilityTab({ rows }: { rows: ForecastReliabilityRow[] }) {
     );
   }
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead className="bg-ink-50 text-[0.65rem] text-ink-500 uppercase tracking-wide">
-          <tr>
-            <Th>Partnership member</Th>
-            <Th align="right">Submitted</Th>
-            <Th align="right">Fulfilled</Th>
-            <Th align="right">Split</Th>
-            <Th align="right">Cancelled</Th>
-            <Th align="right">Open</Th>
-            <Th align="right">Avg drift</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => {
-            const realized = r.fulfilled + r.superseded;
-            const ratio = r.submitted === 0 ? 0 : Math.round((realized / r.submitted) * 100);
-            return (
-              <tr key={r.userId} className="border-t border-ink-200/60">
-                <Td>
-                  <span className="font-medium text-midnight">{r.name}</span>
-                  <span className="text-[0.65rem] text-ink-500 ml-2 tabular-nums">{ratio}% realized</span>
-                </Td>
-                <Td align="right" tabular>{r.submitted}</Td>
-                <Td align="right" tabular>{r.fulfilled}</Td>
-                <Td align="right" tabular>{r.superseded}</Td>
-                <Td align="right" tabular>{r.cancelled}</Td>
-                <Td align="right" tabular>{r.open}</Td>
-                <Td align="right" tabular>{r.avgDriftDays == null ? "—" : `${r.avgDriftDays}d`}</Td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <div className="space-y-2">
+      <p className="text-xs text-ink-600 px-1 leading-snug">
+        Per-Partnership-member accuracy on pre-PO commitments. <strong>Drift</strong> = days between
+        forecast submission and signed PO; pair the average with <strong>p90</strong> to expose tail risk a
+        clean average can hide. <strong>Model swap</strong> tracks when the dealer pivoted between the
+        forecast and the signed PO. <strong>Bookings</strong> is the total customer exposure each user
+        generated against their pre-PO bets — high values mean cancellations / mis-forecasts hurt real
+        customers.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-ink-50 text-[0.65rem] text-ink-500 uppercase tracking-wide">
+            <tr>
+              <Th>Partnership member</Th>
+              <Th align="right">Submitted</Th>
+              <Th align="right">Fulfilled</Th>
+              <Th align="right">Split</Th>
+              <Th align="right">Cancelled</Th>
+              <Th align="right">Open</Th>
+              <Th align="right">Avg drift</Th>
+              <Th align="right">p90 drift</Th>
+              <Th align="right">Model swap %</Th>
+              <Th align="right">Bookings</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const realized = r.fulfilled + r.superseded;
+              const ratio = r.submitted === 0 ? 0 : Math.round((realized / r.submitted) * 100);
+              return (
+                <tr key={r.userId} className="border-t border-ink-200/60">
+                  <Td>
+                    <span className="font-medium text-midnight">{r.name}</span>
+                    <span className="text-[0.65rem] text-ink-500 ml-2 tabular-nums">{ratio}% realized</span>
+                  </Td>
+                  <Td align="right" tabular>{r.submitted}</Td>
+                  <Td align="right" tabular>{r.fulfilled}</Td>
+                  <Td align="right" tabular>{r.superseded}</Td>
+                  <Td align="right" tabular>{r.cancelled}</Td>
+                  <Td align="right" tabular>{r.open}</Td>
+                  <Td align="right" tabular>
+                    <DriftCell days={r.avgDriftDays} />
+                  </Td>
+                  <Td align="right" tabular>
+                    {r.p90DriftDays == null
+                      ? <span className="text-ink-400" title="Need ≥ 3 fulfilled forecasts for a meaningful p90.">—</span>
+                      : <DriftCell days={r.p90DriftDays} />}
+                  </Td>
+                  <Td align="right" tabular>
+                    {r.modelSwapRate == null
+                      ? <span className="text-ink-400" title="No realized forecasts with model data on both sides.">—</span>
+                      : <span
+                          title={`${r.modelSwapRate}% of this user's 1:1 fulfilled forecasts had the dealer pivot the car model between forecast and signed PO.`}
+                          className={cn(
+                            "font-medium",
+                            r.modelSwapRate === 0  ? "text-green-dark"
+                              : r.modelSwapRate <= 20 ? "text-gold-dark"
+                              : "text-flame-dark",
+                          )}>
+                          {r.modelSwapRate}%
+                        </span>}
+                  </Td>
+                  <Td align="right" tabular>
+                    {r.totalBookings === 0
+                      ? <span className="text-ink-400">0</span>
+                      : <span
+                          title={`${r.totalBookings} customer bookings landed against this user's pre-PO commitments. High values mean cancellations / mis-forecasts hurt real customers.`}
+                          className={cn(
+                            "font-medium",
+                            r.totalBookings >= 20 ? "text-flame-dark"
+                              : r.totalBookings >= 5 ? "text-gold-dark"
+                              : "text-ink-600",
+                          )}>
+                          {r.totalBookings}
+                        </span>}
+                  </Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
+}
+
+/** Drift cell with tone: 0d green, |d| ≤ 7 gold, else flame. */
+function DriftCell({ days }: { days: number | null }) {
+  if (days == null) return <span className="text-ink-400">—</span>;
+  const abs = Math.abs(days);
+  const cls =
+    days === 0 ? "text-green-dark"
+      : abs <= 7  ? "text-gold-dark"
+      : "text-flame-dark";
+  const text = days > 0 ? `+${days}d` : `${days}d`;
+  return <span className={cn("font-medium tabular-nums", cls)}>{text}</span>;
 }
 
 function TrustTabButton({
