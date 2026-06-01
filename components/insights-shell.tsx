@@ -17,6 +17,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import type {
   InsightsData, ClosureSummary, ForecastReliabilityRow,
   UpcomingAtRiskRow, InternalPhaseActionStat, StuckStageRow,
+  KpiDelta,
 } from "@/lib/insights-data";
 import type {
   DepartmentRow, StakeholderRow, DealerReliabilityRow, CityReliabilityRow,
@@ -124,6 +125,9 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
         accent="flame"
         emphasis
         sub="North Star — total slip × bookings"
+        delta={hero.comparison
+          ? { d: hero.comparison.customerDaysLost, mode: "pct", periodLabel: hero.comparison.periodLabel }
+          : undefined}
         trend={{
           values:    hero.customerDaysLostWeekly,
           domain:    "auto",
@@ -166,6 +170,9 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
             title={gap !== null
               ? `Raw on-time rate excludes cancellations from the denominator. The 'honor rate' (${gap}%) counts cancellations as missed commitments — the gap shows how much trust the cancellation rate is silently eating.`
               : "% of delivered batches that landed on or before the dealer-promised availability date."}
+            delta={hero.comparison
+              ? { d: hero.comparison.onTimeRate, mode: "pp", periodLabel: hero.comparison.periodLabel }
+              : undefined}
             trend={{
               values:    hero.onTimeRateWeekly,
               domain:    "rate",
@@ -238,6 +245,9 @@ function HeroRow({ hero }: { hero: InsightsData["hero"] }) {
         title={hero.p90DaysToListed !== null
           ? `Median (typical) PO → app-listing days vs. p90 (slow tail). A healthy median with a large p90 means most batches list quickly but a minority take significantly longer — investigate those.`
           : "Median days from PO submission to App Listing across batches listed in scope."}
+        delta={hero.comparison
+          ? { d: hero.comparison.medianDaysToListed, mode: "pct", periodLabel: hero.comparison.periodLabel }
+          : undefined}
         trend={{
           values:    hero.medianDaysToListedWeekly,
           domain:    "auto",
@@ -319,8 +329,44 @@ function ClosureStrip({ closure }: { closure: ClosureSummary }) {
   );
 }
 
+/**
+ * Audit 7 — period-over-period delta caption under a hero value.
+ *
+ * Arrow follows the raw direction of the value (▲ up / ▼ down / → flat);
+ * colour follows whether that move is *good* (green) or *bad* (flame),
+ * which the data layer already decided in `KpiDelta.improved`. `mode`
+ * picks the magnitude unit: "pct" = relative % change (customer-days,
+ * median days), "pp" = percentage-point gap (on-time rate). Renders
+ * nothing when there's no prior window to compare against.
+ */
+function DeltaCaption({
+  d, mode, periodLabel,
+}: {
+  d: KpiDelta;
+  mode: "pct" | "pp";
+  periodLabel: ReportPeriod;
+}) {
+  if (d.current == null || d.prior == null) return null;
+  const flat  = d.current === d.prior;
+  const arrow = flat ? "→" : d.current > d.prior ? "▲" : "▼";
+  const colorCls = d.improved == null
+    ? "text-ink-400"
+    : d.improved ? "text-green-dark" : "text-flame-dark";
+  const mag = flat
+    ? "no change"
+    : mode === "pp"
+      ? `${Math.abs(d.current - d.prior)}pp`
+      : d.deltaPct == null ? "new" : `${Math.abs(d.deltaPct)}%`;
+  return (
+    <p className={cn("text-[0.6rem] font-semibold mt-0.5 leading-tight", colorCls)}>
+      {arrow} {mag}{" "}
+      <span className="text-ink-400 font-normal">vs prior {periodLabel}</span>
+    </p>
+  );
+}
+
 function HeroTile({
-  label, value, sub, accent = "neutral", emphasis = false, trend, title,
+  label, value, sub, accent = "neutral", emphasis = false, trend, title, delta,
 }: {
   label: string;
   value: string;
@@ -340,6 +386,8 @@ function HeroTile({
   };
   /** Audit 5 — native tooltip surfaces the canonical metric definition. */
   title?: string;
+  /** Audit 7 — period-over-period delta caption under the value. */
+  delta?: { d: KpiDelta; mode: "pct" | "pp"; periodLabel: ReportPeriod };
 }) {
   const valueCls = {
     neutral: "text-midnight",
@@ -373,6 +421,7 @@ function HeroTile({
       )}>
         {value}
       </p>
+      {delta && <DeltaCaption {...delta} />}
       {trend && (() => {
         // Auto-domain: pick [0, max(1, max(values))] so a flat-zero
         // series doesn't crash the sparkline's range math.
