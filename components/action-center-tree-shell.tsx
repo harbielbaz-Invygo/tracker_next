@@ -2013,6 +2013,12 @@ function PoStoryBar({ po }: { po: PoNode }) {
                   {p.progress.done}/{p.progress.total}
                 </span>
               )}
+              {/* Milestone date inline on the pill (e.g. PO signed,
+                  App listed, Delivery). Replaces the separate date-chip
+                  strip removed in the header dedupe. */}
+              {p.date && (
+                <span className="tabular-nums font-normal opacity-70">{p.date}</span>
+              )}
             </span>
             {i < phases.length - 1 && (
               <span aria-hidden className="text-ink-300">→</span>
@@ -2629,11 +2635,10 @@ function WaveSection({
   const expanded = expandedWaveIds.has(wave.id);
   const setExpanded = () => onToggleWave(wave.id);
   const totalCars = wave.batches.reduce((s, b) => s + b.requestedQuantity, 0);
-  // Tiny status summary in the collapsed header so ops can scan
-  // progress without expanding every wave.
-  const doneCount    = wave.actions.filter((a) => a.status === "done").length;
+  // Blocked count for the collapsed-header indicator (the done/waiting
+  // counts were dropped — window progress is the "{extDone}/{extTotal}
+  // done" chip, and per-action state shows on each chip).
   const blockedCount = wave.actions.filter((a) => a.status === "blocked").length;
-  const waitingCount = wave.actions.filter((a) => a.status === "waiting").length;
 
   // Per-window informational rollups surfaced in the collapsed header
   // (moved here from the PO header so it stays PO-level only):
@@ -2808,18 +2813,25 @@ function WaveSection({
             ✓ Fully confirmed
           </span>
         )}
-        {wave.actions.length > 0 && (
-          <span className="text-[0.65rem] text-ink-500 tabular-nums">
-            · {doneCount}/{wave.actions.length} done
-            {blockedCount > 0 && (
-              <span className="text-flame-dark ml-1">· {blockedCount} blocked</span>
-            )}
+        {/* Blocked indicator only — the wave-scope "{doneCount}/N done"
+            count was removed because it duplicated/contradicted the
+            window-wide "{extDone}/{extTotal} done" chip above (that one
+            counts wave + every batch's external actions; this counted
+            wave-scope rows only). Blocked is a distinct, actionable
+            signal so it stays. */}
+        {blockedCount > 0 && (
+          <span className="text-[0.65rem] text-flame-dark tabular-nums">
+            · {blockedCount} blocked
           </span>
         )}
       </div>
 
       {expanded && (
         <div className="p-2 space-y-3">
+          {/* Ops Expected Date banner + shift-history audit sit side by
+              side so the two window-level boxes fill the row instead of
+              stacking. Stacks back to one column on narrow screens. */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
           {/* Wave-level Ops Expected Date — the per-window commitment.
               When ops hasn't committed yet (opsExpectedDate equals the
               PO availability date), surface a prominent CTA. Once set,
@@ -2879,6 +2891,7 @@ function WaveSection({
               live on each batch row below, so the window bulk bar (and
               its wave-scope chip grid) was redundant clutter. */}
           <ShiftHistoryBlock wave={wave} />
+          </div>
 
           {/* PER-BATCH BLOCK
               Each batch gets its own box with identity meta on top and
