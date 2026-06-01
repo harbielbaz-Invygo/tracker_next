@@ -99,6 +99,42 @@ export interface InsightsHero {
    * to the headline median.
    */
   medianDaysToListedWeekly: (number | null)[];
+  /**
+   * Audit 7 — period-over-period comparison for the three core KPIs.
+   * Null when `period === "all"` (no natural prior window) or when the
+   * underlying tables aren't migrated. See {@link PeriodComparison}.
+   */
+  comparison: PeriodComparison | null;
+}
+
+/**
+ * One KPI's movement between the current window and the equal-length
+ * window immediately before it.
+ *
+ * `current`/`prior` are the raw measures (customer-days, % on-time,
+ * median days). `deltaPct` is the *relative* change (current vs prior)
+ * for measures where that reads naturally (customer-days, median days);
+ * the UI renders on-time as a percentage-point gap instead, straight
+ * from `current - prior`. `improved` already accounts for direction —
+ * lower-is-better for customer-days + median, higher-is-better for
+ * on-time — so the UI just picks the colour, not the polarity.
+ */
+export interface KpiDelta {
+  current: number | null;
+  prior: number | null;
+  /** Signed relative % change (current vs prior). Null when prior is 0/null. */
+  deltaPct: number | null;
+  /** True when the move is good news; null when undecidable (a side is null). */
+  improved: boolean | null;
+}
+
+/** Period-over-period deltas for the three headline KPIs (Audit 7). */
+export interface PeriodComparison {
+  /** Window length label for the caption, e.g. "30d" → "vs prior 30d". */
+  periodLabel: ReportPeriod;
+  customerDaysLost: KpiDelta;
+  onTimeRate: KpiDelta;
+  medianDaysToListed: KpiDelta;
 }
 
 /**
@@ -765,6 +801,144 @@ async function getRePromiseSplit(period: ReportPeriod): Promise<{
   return { pre, post };
 }
 
+/**
+ * Audit 7 — period-over-period comparison for the three core KPIs.
+ *
+ * Returns null for `period === "all"` (no natural prior window) and for
+ * pre-migration DBs. Otherwise computes each KPI for the current window
+ * `[today−N, today]` and the equal-length prior window `[today−2N,
+ * today−N)` so the two never overlap (`priorTo === curFrom`).
+ *
+ * The measures are deliberately the *event-sourced, windowable* ones —
+ * they answer "what happened during this window" rather than "what's
+ * the live state", which is the only honest basis for a historical
+ * comparison:
+ *   • customer-days-lost — Σ(bookingsAtShift × delayDays) over shift
+ *     events (`batch_date_revisions.revisedAt`). This is the same
+ *     measure that drives the weekly sparkline; it can differ slightly
+ *     from the batch-level headline (which folds in live projections on
+ *     still-open batches), but it's the one you can window cleanly.
+ *   • on-time rate — delivered batches bucketed by `closedAt`, on-time
+ *     test replicated verbatim from the headline (`closedAt >
+ *     promisedDate` ⇒ late).
+ *   • median PO→Listed — (appListedAt − requestedAt) for post_po batches
+ *     bucketed by `appListedAt`, gated at n ≥ 3 per side so a one-off
+ *     doesn't masquerade as a trend.
+ */
+async function getPeriodComparison(period: ReportPeriod): Promise<PeriodComparison | null> {
+  if (period === "all") return null;
+  const days = { "30d": 30, "90d": 90, "6m": 183 }[period];
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const t = new Date(); t.setHours(0, 0, 0, 0);
+  const todayMs = t.getTime();
+  const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const todayStr = iso(todayMs);
+  const curFrom   = iso(todayMs - days * DAY_MS);
+  const priorFrom = iso(todayMs - 2 * days * DAY_MS);
+  const priorTo   = curFrom; // windows abut; current owns the shared edge
+
+  const inCur   = (d: string) => d >= curFrom && d <= todayStr;
+  const inPrior = (d: string) => d >= priorFrom && d < priorTo;
+
+  // ── customer-days-lost (revision-sourced) ──────────────────────────
+  let cdlCur: number | null = 0;
+  let cdlPrior: number | null = 0;
+  try {
+    const revisions = await db
+      .select({
+        revisedAt:       batchDateRevisions.revisedAt,
+        delayDays:       batchDateRevisions.delayDays,
+        bookingsAtShift: batchDateRevisions.bookingsAtShift,
+      })
+      .from(batchDateRevisions);
+    for (const r of revisions) {
+      if (!r.revisedAt) continue;
+      const impact = (r.bookingsAtShift ?? 0) * (r.delayDays ?? 0);
+      if (impact <= 0) continue;
+      const d = r.revisedAt.slice(0, 10);
+      if (inCur(d)) cdlCur! += impact;
+      else if (inPrior(d)) cdlPrior! += impact;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such (table|column)/i.test(msg)) throw err;
+    cdlCur = null; cdlPrior = null; // pre-migration — no honest number
+  }
+
+  // ── on-time rate + median PO→Listed (batch fields, one pass) ────────
+  let onCur = 0, lateCur = 0, onPrior = 0, latePrior = 0;
+  const medCur: number[] = [];
+  const medPrior: number[] = [];
+  try {
+    const rows = await db
+      .select({
+        closedAt:       batches.closedAt,
+        closureReason:  batches.closureReason,
+        promisedDate:   batches.dealerPromisedDeliveryDate,
+        requestedAt:    batches.requestedAt,
+        appListedAt:    batches.appListedAt,
+        lifecycleState: batches.lifecycleState,
+      })
+      .from(batches);
+    for (const b of rows) {
+      // On-time: delivered batches, bucketed by the day they closed.
+      if (b.closedAt && b.closureReason === "delivered" && b.promisedDate) {
+        const day = b.closedAt.slice(0, 10);
+        const late = b.closedAt > b.promisedDate; // verbatim from headline calc
+        if (inCur(day))        { if (late) lateCur++;   else onCur++; }
+        else if (inPrior(day)) { if (late) latePrior++; else onPrior++; }
+      }
+      // Median PO→Listed: post_po batches, bucketed by listing day.
+      if (b.lifecycleState === "post_po" && b.requestedAt && b.appListedAt) {
+        const day = b.appListedAt.slice(0, 10);
+        const dd = Math.round(
+          (new Date(day).getTime() - new Date(b.requestedAt).getTime()) / DAY_MS,
+        );
+        if (dd >= 0) {
+          if (inCur(day)) medCur.push(dd);
+          else if (inPrior(day)) medPrior.push(dd);
+        }
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such (table|column)/i.test(msg)) throw err;
+    // Leave the accumulators empty; the deltas degrade to null below.
+  }
+
+  const median = (arr: number[]): number | null => {
+    if (arr.length < 3) return null; // gate noise on tiny windows
+    const s = arr.slice().sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 === 0 ? Math.round((s[mid - 1] + s[mid]) / 2) : s[mid];
+  };
+  const rate = (on: number, late: number): number | null =>
+    on + late > 0 ? Math.round((on / (on + late)) * 100) : null;
+
+  /** Build a KpiDelta. `lowerIsBetter` flips the `improved` polarity. */
+  const delta = (
+    current: number | null,
+    prior: number | null,
+    lowerIsBetter: boolean,
+  ): KpiDelta => {
+    let deltaPct: number | null = null;
+    let improved: boolean | null = null;
+    if (current != null && prior != null) {
+      if (prior !== 0) deltaPct = Math.round(((current - prior) / prior) * 100);
+      if (current !== prior) improved = lowerIsBetter ? current < prior : current > prior;
+      else improved = null; // dead flat — neither up nor down
+    }
+    return { current, prior, deltaPct, improved };
+  };
+
+  return {
+    periodLabel: period,
+    customerDaysLost:   delta(cdlCur, cdlPrior, true),
+    onTimeRate:         delta(rate(onCur, lateCur), rate(onPrior, latePrior), false),
+    medianDaysToListed: delta(median(medCur), median(medPrior), true),
+  };
+}
+
 export async function getInsightsData(period: ReportPeriod = "all"): Promise<InsightsData> {
   // Both functions hit the DB; run them in parallel.
   // Same period filter is threaded into both — Insights is just the
@@ -810,9 +984,10 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
   // Audit 5 #5 — re-promise split by pre/post customer-booking. Runs
   // in parallel with the weekly-trend query since both hit the same
   // revisions table.
-  const [customerDaysLostWeekly, rePromiseSplit] = await Promise.all([
+  const [customerDaysLostWeekly, rePromiseSplit, comparison] = await Promise.all([
     getCustomerDaysLostWeekly(),
     getRePromiseSplit(period),
+    getPeriodComparison(period),
   ]);
 
   // Audit 3 #10 — surface the existing per-week on-time rate from
@@ -836,6 +1011,7 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
     p90DaysToListed:          listingSpeed.p90DaysToListed,
     medianDaysToListedWeekly: listingSpeed.medianDaysToListedWeekly,
     unlistedOverThreshold:    listingSpeed.unlistedOverThreshold,
+    comparison,
   };
 
   // Audit 3 #1 — upcoming-at-risk feed. Score every open batch whose
