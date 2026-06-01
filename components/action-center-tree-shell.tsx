@@ -1272,17 +1272,13 @@ function PoDrawer({
           )}
         </p>
 
-        {/* PO "story" — segmented phase bar + auto-generated narrative
-            sentence. Both pull from the same resolved PO object. The
-            chip strip below stays for deep-dive reading; the story
-            answers "what happened, where are we, where next" at a
-            glance. */}
+        {/* PO "story" — segmented phase bar + a compact next-milestone
+            pointer. PO-level only: per-window dates (app-listed, VIN,
+            ops vs PO) now live on each Delivery Window below, so the
+            header stays a one-glance PO summary without duplicating the
+            same counts three times. */}
         <PoStoryBar po={po} />
-        <PoStorySentence po={po} />
-
-        {/* Phase status chips + milestone timeline. Both pull from the
-            same already-resolved PO object — no extra round-trips. */}
-        <PoHeaderTimeline po={po} />
+        <PoNextPointer po={po} />
       </header>
 
       {/* View toggle. Pre-PO nodes only surface the "Pre-PO follow-up"
@@ -2029,263 +2025,29 @@ function PoStoryBar({ po }: { po: PoNode }) {
 }
 
 /**
- * Story sentence — auto-generated 1-line narrative. Reads like a
- * progress note: "Signed Nd ago · Internal 3/4 · App listing pending
- * · External phase not started · Next milestone: App listing." Adapts to
- * each PO state (open / partly delivered / fully delivered / etc.).
+ * Compact "next milestone" pointer rendered beneath the phase bar —
+ * the leftmost phase that isn't done yet. Replaces the old story
+ * sentence + milestone-chip strip, both of which duplicated the
+ * counts the phase bar already shows. PO-level only; per-window dates
+ * now live on each Delivery Window.
  */
-function PoStorySentence({ po }: { po: PoNode }) {
-  const today  = todayIso();
-  const phases = derivePoPhases(po, today);
-
-  function daysAgo(iso: string): string {
-    const ms = (new Date(today).getTime() - new Date(iso).getTime()) / (24 * 60 * 60 * 1000);
-    const n = Math.round(ms);
-    if (n === 0)  return "today";
-    if (n > 0)    return `${n}d ago`;
-    return `in ${-n}d`;
-  }
-
-  const parts: { text: string; tone?: "neutral" | "good" | "warn" | "flame" }[] = [];
-
-  // 1. PO signing anchor
-  const poPhase = phases.find((p) => p.key === "po_signed");
-  if (poPhase?.date) {
-    parts.push({ text: `Signed ${daysAgo(poPhase.date)}`, tone: "neutral" });
-  } else {
-    parts.push({ text: "Pre-PO", tone: "neutral" });
-  }
-
-  // 2. Internal phase
-  const intl = phases.find((p) => p.key === "internal");
-  if (intl?.progress) {
-    parts.push({
-      text: `Internal ${intl.progress.done}/${intl.progress.total}`,
-      tone: intl.state === "done" ? "good" : "warn",
-    });
-  }
-
-  // 3. App listed
-  const app = phases.find((p) => p.key === "app_listed");
-  if (app?.progress) {
-    const label = app.state === "done"
-      ? "App listed"
-      : app.state === "in_progress"
-        ? `App listing ${app.progress.done}/${app.progress.total}`
-        : "App listing pending";
-    parts.push({ text: label, tone: app.state === "done" ? "good" : "warn" });
-  }
-
-  // 4. External phase (formerly "VIN chase")
-  const vin = phases.find((p) => p.key === "vin_chase");
-  if (vin?.progress) {
-    const label = vin.state === "done"
-      ? "External phase done"
-      : vin.state === "in_progress"
-        ? `External phase ${vin.progress.done}/${vin.progress.total}`
-        : "External phase not started";
-    parts.push({ text: label, tone: vin.state === "done" ? "good" : "neutral" });
-  }
-
-  // 5. Delivery / outcome
-  const del = phases.find((p) => p.key === "delivery");
-  if (del?.state === "done") {
-    parts.push({ text: "✓ Delivered in full", tone: "good" });
-  } else if (del?.state === "overdue") {
-    parts.push({ text: "⚠ Delivery window overdue", tone: "flame" });
-  } else if (del?.progress && del.progress.done > 0) {
-    parts.push({
-      text: `Delivered ${del.progress.done}/${del.progress.total}`,
-      tone: "warn",
-    });
-  }
-
-  // Next milestone — the leftmost phase that's not done yet.
-  const nextPhase = phases.find((p) => p.state !== "done");
-  const nextLabel = nextPhase && nextPhase.state !== "done"
-    ? `Next: ${nextPhase.label}`
-    : null;
-
-  const toneCls = (t?: "neutral" | "good" | "warn" | "flame") =>
-    t === "good"  ? "text-green-dark font-medium" :
-    t === "warn"  ? "text-gold-dark font-medium"  :
-    t === "flame" ? "text-flame-dark font-semibold" :
-                    "text-ink-700";
-
-  return (
-    <p className="text-[0.7rem] leading-snug">
-      {parts.map((p, i) => (
-        <span key={i}>
-          <span className={toneCls(p.tone)}>{p.text}</span>
-          {i < parts.length - 1 && <span className="text-ink-300 mx-1.5">·</span>}
-        </span>
-      ))}
-      {nextLabel && (
-        <>
-          <span className="text-ink-300 mx-1.5">·</span>
-          <span className="text-brand-dark font-medium">→ {nextLabel}</span>
-        </>
-      )}
-    </p>
-  );
-}
-
-function PoHeaderTimeline({ po }: { po: PoNode }) {
+function PoNextPointer({ po }: { po: PoNode }) {
   const today = todayIso();
-
-  // Phase status — counts pulled from the same logic used by the
-  // left-tree progress lines so the numbers can't drift.
-  const counts = rollupPoCounts(po, today);
-
-  // VIN received date: scan every wave's actions for a done action
-  // whose name contains "vin", pick the earliest completion.
-  const vinCompletedAt = po.waves
-    .flatMap((w) => w.actions)
-    .filter((a) => a.status === "done"
-                && /vin/i.test(a.actionTypeName)
-                && !!a.completedAt)
-    .map((a) => a.completedAt!.slice(0, 10))
-    .sort()
-    .at(0) ?? null;
-
-  const appListedAt = po.appListingSummary.completedAt
-    ? localIsoDate(po.appListingSummary.completedAt)
-    : null;
-
-  // Op availability = earliest projected delivery across the PO's
-  // waves. Each wave's opsExpectedDate is ops's current best
-  // estimate; when it's missing we fall back to the wave's PO-
-  // promised availabilityDate so the chip still shows something
-  // useful on freshly-created POs.
-  const opNextAvailability: string | null = (() => {
-    const candidates = po.waves
-      .map((w) => w.opsExpectedDate ?? w.availabilityDate)
-      .filter((s): s is string => !!s);
-    if (candidates.length === 0) return null;
-    return candidates.slice().sort().at(0) ?? null;
-  })();
-
-  const milestones: { icon: string; label: string; date: string | null }[] = [
-    { icon: "📅", label: "PO date",         date: po.poDate },
-    { icon: "📱", label: "App listed",      date: appListedAt },
-    { icon: "🔑", label: "VIN",             date: vinCompletedAt },
-    { icon: "🚗", label: "Op Availability", date: opNextAvailability },
-  ];
-  const hasAnyDate = milestones.some((m) => m.date != null);
-
-  function dayDelta(iso: string): number {
-    const t = (d: string) => new Date(d + "T12:00:00Z").getTime();
-    return Math.round((t(iso) - t(today)) / (24 * 60 * 60 * 1000));
+  const phases = derivePoPhases(po, today);
+  const next = phases.find((p) => p.state !== "done");
+  if (!next) {
+    return (
+      <p className="text-[0.7rem] font-medium text-green-dark">✓ All phases complete</p>
+    );
   }
-
-  function relativeLabel(iso: string): string {
-    const d = dayDelta(iso);
-    if (d === 0) return "today";
-    if (d < 0)   return `${-d}d ago`;
-    return `in ${d}d`;
-  }
-
+  const overdue = next.state === "overdue";
   return (
-    <div className="space-y-1.5">
-      {/* Phase counts row removed — the new PoStoryBar + PoStorySentence
-          above already render Internal X/Y, External X/Y, and overdue
-          status. We surface only the "overdue" pill inline with the
-          milestone strip below when it's non-zero, since the story
-          surfaces don't always cover it explicitly. */}
-
-      {/* Milestone strip — horizontal chips. Each milestone shows
-          icon, label, date, status (done / pending). Today badge
-          sits on the right so ops can scan "past vs future" by
-          comparing chip dates against it. */}
-      {hasAnyDate && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {milestones.map((m) => (
-            <MilestoneChip
-              key={m.label}
-              icon={m.icon}
-              label={m.label}
-              date={m.date}
-              today={today}
-              relativeLabel={m.date ? relativeLabel(m.date) : null}
-            />
-          ))}
-          {/* Overdue pill — the only count the story surfaces above
-              don't always show, so we surface it here as a small
-              warning chip inline with the milestone strip. */}
-          {counts.overdue > 0 && (
-            <span className="text-[0.65rem] font-bold tabular-nums px-2 py-0.5 rounded-full border border-flame text-flame-dark bg-flame-pale">
-              ⚠ {counts.overdue} overdue
-            </span>
-          )}
-          <span className="text-[0.65rem] text-brand-dark font-medium tabular-nums bg-brand-pastel/70 rounded-full px-2 py-0.5 ml-1">
-            ⭐ Today {today}
-          </span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MilestoneChip({
-  icon, label, date, today, relativeLabel,
-}: {
-  icon:   string;
-  label:  string;
-  date:   string | null;
-  today:  string;
-  relativeLabel: string | null;
-}) {
-  const isPast = date != null && date <= today;
-  const isFuture = date != null && date > today;
-  const isToday  = date != null && date === today;
-
-  const toneCls = !date
-    ? "border-ink-200 bg-ink-50 text-ink-400"
-    : isToday
-      ? "border-brand text-brand-dark bg-brand-pastel/40"
-      : isPast
-        ? "border-green text-green-dark bg-green-pale/40"
-        : "border-ink-300 text-ink-700 bg-white";
-
-  const statusGlyph = !date
-    ? "⏰"
-    : isPast
-      ? "✓"
-      : "⏰";
-
-  return (
-    <span
-      className={cn(
-        "text-[0.65rem] inline-flex items-baseline gap-1 border rounded-full px-2 py-0.5 tabular-nums whitespace-nowrap",
-        toneCls,
-      )}
-      title={date
-        ? `${label} · ${date}${relativeLabel ? ` · ${relativeLabel}` : ""}`
-        : `${label} · pending`}
-    >
-      <span aria-hidden>{icon}</span>
-      <span className="font-medium">{label}</span>
-      <span className="text-ink-300">·</span>
-      {date ? (
-        <>
-          <span>{date}</span>
-          {relativeLabel && (
-            <>
-              <span className="text-ink-300">·</span>
-              <span className="text-ink-500">{relativeLabel}</span>
-            </>
-          )}
-          <span className="ml-0.5">{statusGlyph}</span>
-        </>
-      ) : (
-        <span className="italic">pending</span>
-      )}
-      {isFuture && !isToday && (
-        <>
-          {/* Nothing extra — the relativeLabel already says "in Xd" */}
-        </>
-      )}
-    </span>
+    <p className="text-[0.7rem] text-ink-500">
+      <span aria-hidden>→</span>{" "}
+      <span className={cn("font-medium", overdue ? "text-flame-dark" : "text-brand-dark")}>
+        Next: {next.label}
+      </span>
+    </p>
   );
 }
 
@@ -2876,6 +2638,23 @@ function WaveSection({
   const blockedCount = wave.actions.filter((a) => a.status === "blocked").length;
   const waitingCount = wave.actions.filter((a) => a.status === "waiting").length;
 
+  // Per-window informational rollups surfaced in the collapsed header
+  // (moved here from the PO header so it stays PO-level only):
+  //   • External-phase progress — the collapsed-header priority status.
+  //     Counts wave + batch external actions, excluding the synthetic
+  //     Delivery row (that's its own phase / the Mark-delivered button).
+  //   • App-listed — how many of the window's batches are live in-app.
+  //   • VIN — cars with a VIN received vs. the cars requested.
+  const extActions = [
+    ...wave.actions,
+    ...wave.batches.flatMap((b) => b.actions),
+  ].filter((a) => a.actionTypeName !== "Delivery");
+  const extDone  = extActions.filter((a) => a.status === "done").length;
+  const extTotal = extActions.length;
+  const listedCount = wave.batches.filter((b) => b.appListedAt != null).length;
+  const batchCount  = wave.batches.length;
+  const vinsReceived = wave.batches.reduce((s, b) => s + (b.vinsReceivedQuantity ?? 0), 0);
+
   // Audit 1 #3 — wave "Partially confirmed" badge. The Confirmation
   // chip stays green on N>0 (matches dealer reality: yes, partial),
   // but the wave header surfaces the qty gap so it stays visible at
@@ -2991,6 +2770,48 @@ function WaveSection({
         })()}
         <span className="text-xs text-ink-500 tabular-nums">
           {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
+        </span>
+        {/* External-phase progress — the collapsed-header priority. */}
+        <span
+          className={cn(
+            "text-[0.65rem] font-semibold tabular-nums px-1.5 py-0.5 rounded border",
+            extTotal > 0 && extDone === extTotal
+              ? "border-green text-green-dark bg-green-pale"
+              : "border-ink-300 text-ink-600 bg-white",
+          )}
+          title="External-phase actions done across this window (excludes Delivery)"
+        >
+          {extDone}/{extTotal} done
+        </span>
+        {/* App-listed status for the window's batches. */}
+        {batchCount > 0 && (
+          <span
+            className={cn(
+              "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded border",
+              listedCount === batchCount
+                ? "border-green text-green-dark bg-green-pale"
+                : "border-ink-300 text-ink-600 bg-white",
+            )}
+            title={`${listedCount} of ${batchCount} batch${batchCount === 1 ? "" : "es"} listed in-app`}
+          >
+            {listedCount === batchCount ? "✓ Listed" : `📱 Listed ${listedCount}/${batchCount}`}
+          </span>
+        )}
+        {/* VIN status — cars with a VIN received vs. cars requested. */}
+        <span
+          className={cn(
+            "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded border",
+            totalCars > 0 && vinsReceived >= totalCars
+              ? "border-green text-green-dark bg-green-pale"
+              : "border-ink-300 text-ink-600 bg-white",
+          )}
+          title={`${vinsReceived} of ${totalCars} cars have a VIN received`}
+        >
+          {totalCars > 0 && vinsReceived >= totalCars
+            ? "✓ VIN"
+            : vinsReceived > 0
+              ? `🔑 VIN ${vinsReceived}/${totalCars}`
+              : "🔑 VIN pending"}
         </span>
         {/* Audit 1 #3 — wave confirmation state. Chips green when
             partially confirmed land but the window total falls short
