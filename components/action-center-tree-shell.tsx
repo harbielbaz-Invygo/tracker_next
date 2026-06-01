@@ -2806,12 +2806,18 @@ function WaveSection({
   const blockedCount = wave.actions.filter((a) => a.status === "blocked").length;
 
   // Per-window informational rollups surfaced in the collapsed header:
-  //   • Wave-level External-Phase progress ("0/7") — only the wave-scope
-  //     action rows, NOT the per-batch copies (per ops preference).
+  //   • External-Phase progress — counts each BATCH's own external
+  //     action rows summed across the window (batches × steps, e.g.
+  //     6 batches × 7 steps = 42), NOT the single wave-scope set. The
+  //     synthetic Delivery row is excluded (it's its own phase / the
+  //     Mark-delivered button).
   //   • App-listed — how many of the window's batches are live in-app.
   //   • VIN — cars with a VIN received vs. the cars requested.
-  const waveDone  = wave.actions.filter((a) => a.status === "done").length;
-  const waveTotal = wave.actions.length;
+  const extBatchActions = wave.batches
+    .flatMap((b) => b.actions)
+    .filter((a) => a.actionTypeName !== "Delivery");
+  const waveDone  = extBatchActions.filter((a) => a.status === "done").length;
+  const waveTotal = extBatchActions.length;
   const listedCount = wave.batches.filter((b) => b.appListedAt != null).length;
   const batchCount  = wave.batches.length;
   const vinsReceived = wave.batches.reduce((s, b) => s + (b.vinsReceivedQuantity ?? 0), 0);
@@ -2925,8 +2931,9 @@ function WaveSection({
         <span className="text-xs text-ink-500 tabular-nums">
           {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
         </span>
-        {/* Wave-level External-Phase progress — the collapsed-header
-            priority. Counts only the wave-scope action rows ("0/7"). */}
+        {/* External-Phase progress — the collapsed-header priority.
+            Counts every batch's external steps across the window
+            (batches × steps), excluding Delivery. */}
         <span
           className={cn(
             "text-[0.65rem] font-semibold tabular-nums px-1.5 py-0.5 rounded border",
@@ -2934,7 +2941,7 @@ function WaveSection({
               ? "border-green text-green-dark bg-green-pale"
               : "border-ink-300 text-ink-600 bg-white",
           )}
-          title="Wave-level External-Phase actions done for this delivery window"
+          title="External-Phase actions done across this window — each batch's steps summed (excludes Delivery)"
         >
           {waveDone}/{waveTotal} done
         </span>
