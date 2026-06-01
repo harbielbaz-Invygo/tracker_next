@@ -793,6 +793,22 @@ function DetailForm({
                     <option key={s} value={s}>{s}</option>
                   ))}
                 </select>
+                {/* Undo — reset the action to its pristine "never taken"
+                    state. Setting status back to "waiting" clears the
+                    completed_at stamp and cascade-reverts any dependents
+                    server-side (see /api/batch-action). Hidden when the
+                    action is already waiting (nothing to undo). */}
+                {a.status !== "waiting" && (
+                  <button
+                    type="button"
+                    onClick={() => setActionStatus(a.id, "waiting")}
+                    disabled={pending}
+                    title="Undo — reset this action as if it was never taken"
+                    className="text-xs px-2 py-1 rounded-md border border-ink-300 text-ink-600 hover:bg-ink-100 hover:text-midnight disabled:opacity-50 whitespace-nowrap"
+                  >
+                    ↶ Undo
+                  </button>
+                )}
               </li>
             ))}
           </ul>
