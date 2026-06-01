@@ -237,6 +237,21 @@ export interface CustomerImpactBatch {
 
   /** Bucket for the distribution chart. */
   severity: "mild" | "moderate" | "severe";
+
+  /**
+   * Audit 3 #9 — multi-leg per-city slip detail. Lists each delivery
+   * leg under this batch with its city × requested × delivered ×
+   * pending counts. Lets the UI expand a multi-city late batch and
+   * see WHICH city is the bottleneck, not just that the batch is
+   * delayed in aggregate. Empty when the batch has only one leg or
+   * the legs table hasn't been migrated yet.
+   */
+  legs: {
+    city: string;
+    requestedQuantity: number;
+    deliveredQuantity: number;
+    pendingQuantity: number;
+  }[];
 }
 
 export interface CustomerImpactReport {
@@ -430,6 +445,20 @@ export interface CityReliabilityRow {
    * batches. Negative = early. Null when no deliveries.
    */
   avgDateVarianceDays: number | null;
+  /**
+   * Audit 3 #9 — cars committed to this city that haven't shipped yet.
+   * Sum of (requestedQuantity − deliveredQuantity) across legs whose
+   * parent batch is still OPEN (not closed). Counts the "in-flight
+   * backlog" so the tab surfaces which cities have the most stuck
+   * inventory right now, not just historical fulfilment rates.
+   */
+  pendingCars: number;
+  /**
+   * Distinct open batches with at least one car still pending for this
+   * city. Pairs with `pendingCars` so leadership can tell apart "one
+   * big batch is stuck" from "many small batches are spreading thin."
+   */
+  pendingBatches: number;
 }
 
 interface AggregateAccumulator {
@@ -1181,6 +1210,10 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     deliveredBatches: Set<number>;
     carsRequested: number;
     carsDelivered: number;
+    /** Audit 3 #9 — cars on still-open batches, summed per leg. */
+    pendingCars: number;
+    /** Audit 3 #9 — distinct open batches with pending cars in this city. */
+    pendingBatches: Set<number>;
     /** Signed variances for delivered batches (closedAt − promised). */
     dateVariances: number[];
   };
@@ -1192,6 +1225,8 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
         deliveredBatches: new Set(),
         carsRequested: 0,
         carsDelivered: 0,
+        pendingCars: 0,
+        pendingBatches: new Set(),
         dateVariances: [],
       });
     }
@@ -1226,6 +1261,26 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     console.warn("[reports] batch_delivery_legs missing — city reliability lens shows empty. Run the Phase α migration.");
   }
 
+  // Audit 3 #9 — also bucket the raw leg rows by batchId so the
+  // Customer Impact loop downstream can attach per-leg breakdowns to
+  // each affected batch (which city is the bottleneck on a multi-leg
+  // late batch). Built from the same legRows we just loaded — no
+  // extra query.
+  const legsByBatchForImpact = new Map<number, {
+    city: string;
+    requestedQuantity: number;
+    deliveredQuantity: number;
+  }[]>();
+  for (const r of legRows) {
+    const arr = legsByBatchForImpact.get(r.batchId) ?? [];
+    arr.push({
+      city:              r.city,
+      requestedQuantity: r.requestedQuantity,
+      deliveredQuantity: r.deliveredQuantity ?? 0,
+    });
+    legsByBatchForImpact.set(r.batchId, arr);
+  }
+
   for (const r of legRows) {
     const acc = ensureCity(r.city);
     acc.totalBatches.add(r.batchId);
@@ -1234,6 +1289,14 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     if (r.closedAt && r.closureReason === "delivered") {
       acc.deliveredBatches.add(r.batchId);
       acc.dateVariances.push(daysBetween(r.closedAt, r.promisedDate));
+    } else if (!r.closedAt) {
+      // Audit 3 #9 — open batch: count the pending cars (requested
+      // minus already-delivered partials) and the distinct batch.
+      const pending = Math.max(0, r.requestedQuantity - (r.deliveredQuantity ?? 0));
+      if (pending > 0) {
+        acc.pendingCars += pending;
+        acc.pendingBatches.add(r.batchId);
+      }
     }
   }
 
@@ -1256,6 +1319,8 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       qtyFulfillmentRate,
       dateReliabilityRate,
       avgDateVarianceDays,
+      pendingCars:       acc.pendingCars,
+      pendingBatches:    acc.pendingBatches.size,
     };
   });
   // Most-active cities at top.
@@ -1314,6 +1379,20 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
 
     const modelYear = [b.model, b.year].filter(Boolean).join(" ") || "—";
 
+    // Audit 3 #9 — attach per-leg breakdown so the UI can expand a
+    // multi-city late batch and see which city is the bottleneck.
+    // Only fill `legs` when the batch has > 1 leg; single-leg batches
+    // get an empty array since the breakdown adds no information.
+    const rawLegs = legsByBatchForImpact.get(b.id) ?? [];
+    const legs: CustomerImpactBatch["legs"] = rawLegs.length > 1
+      ? rawLegs.map((leg) => ({
+          city:              leg.city,
+          requestedQuantity: leg.requestedQuantity,
+          deliveredQuantity: leg.deliveredQuantity,
+          pendingQuantity:   Math.max(0, leg.requestedQuantity - leg.deliveredQuantity),
+        }))
+      : [];
+
     impactBatches.push({
       batchId:       b.id,
       batchCode:     b.batchCode,
@@ -1328,6 +1407,7 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       state,
       revisionCount: b.revisionCount ?? 0,
       severity,
+      legs,
     });
   }
 
