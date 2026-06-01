@@ -17,8 +17,16 @@ export default async function AuthedLayout({ children }: { children: React.React
   return (
     <div className="flex min-h-screen">
       <Sidebar role={role} name={name} username={username} />
-      <main className="flex-1 px-8 py-6 max-w-screen-2xl">
-        <BrandHeader />
+      <main className="relative flex-1 px-8 py-6 max-w-screen-2xl">
+        {/* Brand sits in the top-right corner of the content area so the
+            page title (rendered by each page's PageHeader as the first
+            child) rises to the top-left instead of sitting beneath a
+            full-width brand block. pointer-events-none so the text
+            overlay never intercepts clicks on header controls beneath
+            it; the page subtitle sits on a lower line, so no overlap. */}
+        <div className="pointer-events-none absolute right-8 top-6 z-10 hidden sm:block">
+          <BrandHeader />
+        </div>
         {children}
       </main>
     </div>
