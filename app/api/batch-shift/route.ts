@@ -69,6 +69,33 @@ function isMissingTableError(err: unknown): boolean {
   return /no such table/i.test(msg);
 }
 
+/**
+ * Audit 3 #6 — derive the phase that owned the batch at the moment of
+ * the shift, so leadership can break customer-days-lost down by
+ * "internal-phase slip" vs "external-phase slip" vs "pre-PO drift."
+ *
+ * Cheap rule (no joins, no per-shift action loads):
+ *   - lifecycleState === "pre_po"   → "pre_po"
+ *     (Partnership-side: a forecast or pre-PO batch had its date
+ *     pushed. No PO yet; the slip is at the partnership-dealer
+ *     handshake layer.)
+ *   - appListedAt == null           → "internal"
+ *     (Post-PO but not yet listed in the customer app — internal
+ *     phase still owns the work: specs, pricing, app listing.)
+ *   - else                          → "external"
+ *     (Post-PO + listed — VIN chase / logistics / final delivery
+ *     are what's left; external phase owns it.)
+ */
+type ShiftPhase = "pre_po" | "internal" | "external";
+function derivePhase(state: {
+  lifecycleState: string | null;
+  appListedAt:    string | null;
+}): ShiftPhase {
+  if (state.lifecycleState === "pre_po") return "pre_po";
+  if (!state.appListedAt) return "internal";
+  return "external";
+}
+
 export async function POST(req: NextRequest) {
   const gate = await requireAuth(["ops", "admin"]);
   if (!gate.ok) return gate.response;
@@ -98,6 +125,9 @@ export async function POST(req: NextRequest) {
   // The previous wave's id + its availabilityDate together decide
   // whether this shift just changes the projection (same window) or
   // moves the batch to a different delivery window (new date).
+  //
+  // `lifecycleState` + `appListedAt` together drive the Audit 3 #6
+  // `phase_at_shift` attribution — see derivePhase() below.
   const [current] = await db
     .select({
       previous:        batches.currentProjectedDeliveryDate,
@@ -107,6 +137,8 @@ export async function POST(req: NextRequest) {
       waveId:          batches.waveId,
       poNumber:        batches.poNumber,
       opsAtLock:       batches.opsProjectedDeliveryDateAtLock,
+      lifecycleState:  batches.lifecycleState,
+      appListedAt:     batches.appListedAt,
     })
     .from(batches)
     .where(eq(batches.id, body.batchId))
@@ -146,14 +178,37 @@ export async function POST(req: NextRequest) {
         reason,
       }).returning({ id: batchDateRevisions.id });
 
-      // Audit 3 #4 — patch the categorical reason via raw SQL so the
-      // column doesn't need to live on the Drizzle schema. Same
-      // missing-column tolerance as the other ensure-* columns.
-      if (delayReasonCategory && insertedRevision?.id) {
+      // Audit 3 #4 + #6 — patch the categorical reason AND the
+      // derived phase via raw SQL so the columns don't need to live
+      // on the Drizzle schema. Same missing-column tolerance as the
+      // other ensure-* columns; either column independently gracefully
+      // degrades when its migration hasn't run.
+      const phaseAtShift = derivePhase({
+        lifecycleState: current.lifecycleState,
+        appListedAt:    current.appListedAt,
+      });
+      if (insertedRevision?.id) {
+        if (delayReasonCategory) {
+          try {
+            await tx.run(sql`
+              UPDATE batch_date_revisions
+              SET delay_reason_category = ${delayReasonCategory}
+              WHERE id = ${insertedRevision.id}
+            `);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!/no such column/i.test(msg)) throw err;
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[batch-shift] delay_reason_category column missing — " +
+              "category dropped. Run /api/admin/ensure-shift-reason-category-column to migrate.",
+            );
+          }
+        }
         try {
           await tx.run(sql`
             UPDATE batch_date_revisions
-            SET delay_reason_category = ${delayReasonCategory}
+            SET phase_at_shift = ${phaseAtShift}
             WHERE id = ${insertedRevision.id}
           `);
         } catch (err) {
@@ -161,8 +216,8 @@ export async function POST(req: NextRequest) {
           if (!/no such column/i.test(msg)) throw err;
           // eslint-disable-next-line no-console
           console.warn(
-            "[batch-shift] delay_reason_category column missing — " +
-            "category dropped. Run /api/admin/ensure-shift-reason-category-column to migrate.",
+            "[batch-shift] phase_at_shift column missing — " +
+            "phase dropped. Run /api/admin/ensure-shift-phase-column to migrate.",
           );
         }
       }

@@ -13,7 +13,7 @@
  * This module computes BOTH so the UI can show them side-by-side. The
  * table headers explain what each column means.
  */
-import { eq, asc, gte, or, isNull, inArray } from "drizzle-orm";
+import { eq, asc, gte, or, isNull, inArray, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   actionTypes, departments, stakeholders, batches, dealers, batchColorMatrix, batchDateRevisions, batchDeliveryLegs,
@@ -236,6 +236,23 @@ export interface CustomerImpactReport {
     /** Split by realisation state. */
     deliveredLateCount: number;
     projectedLateCount: number;
+
+    /**
+     * Audit 3 #4 — customer-days lost grouped by the categorical
+     * reason ops tagged at shift time. Keys are the ShiftReasonCategory
+     * enum values (`dealer_supply`, `internal_specs`, `customs`,
+     * `logistics`, `demand_change`, `other`). Untagged shifts (column
+     * missing or category null) accumulate under `uncategorized`.
+     * Empty object when no shift events have category data.
+     */
+    customerDaysByReason: Record<string, number>;
+    /**
+     * Audit 3 #6 — customer-days lost grouped by the phase that owned
+     * the batch at the moment of the shift. Keys: `pre_po`, `internal`,
+     * `external`. Untagged shifts accumulate under `uncategorized`.
+     * Empty object when no shift events have phase data.
+     */
+    customerDaysByPhase: Record<string, number>;
   };
 }
 
@@ -810,7 +827,15 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
   // earlier `quantity × total_delay` approximation. Defensive: if the
   // table doesn't exist yet (Phase A migration not run on this DB),
   // treat as empty so the rest of the report still loads.
+  //
+  // Audit 3 #4 + #6 — also pull the two raw-SQL-only columns
+  // `delay_reason_category` and `phase_at_shift` via a side query, so
+  // we can roll up customer-days-lost grouped by reason and by phase.
+  // Both columns degrade independently: missing column → null on that
+  // row → bucketed under "uncategorized" in the breakdowns.
   const revisionsByBatch = new Map<number, { bookingsAtShift: number; delayDays: number }[]>();
+  const customerDaysByReason: Record<string, number> = {};
+  const customerDaysByPhase:  Record<string, number> = {};
   try {
     const revisions = await db
       .select({
@@ -835,6 +860,42 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
     } else {
       throw err;
     }
+  }
+
+  // By-reason + by-phase rollups via raw SQL — columns added later by
+  // ensure-shift-reason-category-column and ensure-shift-phase-column
+  // migrations, so they may be missing on legacy DBs. Bucket null /
+  // missing-column rows under "uncategorized" so the chart always
+  // accounts for 100% of customer-days-lost.
+  try {
+    const rows = await db.all<{
+      bookingsAtShift: number | null;
+      delayDays:       number | null;
+      reason:          string | null;
+      phase:           string | null;
+    }>(sql`
+      SELECT
+        bookings_at_shift     AS bookingsAtShift,
+        delay_days            AS delayDays,
+        delay_reason_category AS reason,
+        phase_at_shift        AS phase
+      FROM batch_date_revisions
+      WHERE delay_days > 0 AND bookings_at_shift > 0
+    `);
+    for (const r of rows) {
+      const impact = (r.bookingsAtShift ?? 0) * (r.delayDays ?? 0);
+      if (impact <= 0) continue;
+      const reasonKey = r.reason ?? "uncategorized";
+      const phaseKey  = r.phase  ?? "uncategorized";
+      customerDaysByReason[reasonKey] = (customerDaysByReason[reasonKey] ?? 0) + impact;
+      customerDaysByPhase[phaseKey]   = (customerDaysByPhase[phaseKey]  ?? 0) + impact;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/no such (table|column)/i.test(msg)) throw err;
+    // Either table missing (handled above) or one of the two new
+    // columns missing — leave the breakdown maps empty; the UI hides
+    // the section when there's no data to show.
   }
 
   // ── Summary strip totals ────────────────────────────────────────────
@@ -1248,6 +1309,8 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       severe,
       deliveredLateCount,
       projectedLateCount,
+      customerDaysByReason,
+      customerDaysByPhase,
     },
   };
 

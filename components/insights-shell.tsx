@@ -725,11 +725,130 @@ function CustomerImpactBlock({ impact }: { impact: CustomerImpactReport }) {
         </p>
       </div>
 
+      {/* Audit 3 #4 — by-reason breakdown of customer-days lost.
+          Tells leadership *what kind* of slip is doing the damage, not
+          just how much. "uncategorized" rolls up legacy shifts predating
+          the reason-taxonomy capture so the total reconciles to 100%. */}
+      <ImpactBreakdownBars
+        title="By reason (customer-days lost)"
+        totals={totals.customerDaysByReason}
+        labels={REASON_LABELS}
+        emptyHint="Reason taxonomy hasn't been captured yet — open a shift on the Action Center and pick a category to start populating this."
+      />
+
+      {/* Audit 3 #6 — by-phase breakdown. Same shape, but answers
+          "which phase owned the work when the slip happened?" so ops
+          can tell internal-side from external-side from pre-PO drift. */}
+      <ImpactBreakdownBars
+        title="By phase (customer-days lost)"
+        totals={totals.customerDaysByPhase}
+        labels={PHASE_LABELS}
+        emptyHint="Phase attribution hasn't been recorded yet — run /api/admin/ensure-shift-phase-column once, then any new shifts will populate this."
+      />
+
       {/* Top-impact batches table */}
       <CustomerImpactTable batches={batches} />
     </section>
   );
 }
+
+/**
+ * Generic horizontal-bar breakdown for the customer-impact section.
+ * Sorted descending by impact so the biggest contributor sits on top.
+ * The "uncategorized" bucket always renders last (when present) with
+ * a muted tone so legacy / untagged shifts don't visually compete with
+ * the categorised data.
+ *
+ * Hides itself entirely when the totals map is empty — prevents an
+ * empty bar block when the migration / capture hasn't run yet.
+ */
+function ImpactBreakdownBars({
+  title, totals, labels, emptyHint,
+}: {
+  title: string;
+  totals: Record<string, number>;
+  labels: Record<string, string>;
+  emptyHint: string;
+}) {
+  const entries = Object.entries(totals).filter(([, v]) => v > 0);
+  const total   = entries.reduce((s, [, v]) => s + v, 0);
+  if (total === 0) {
+    return (
+      <div className="px-4 py-3 border-b border-ink-200 bg-ink-50/40">
+        <p className="text-[0.7rem] font-medium text-ink-600 uppercase tracking-wide mb-1">
+          {title}
+        </p>
+        <p className="text-[0.65rem] text-ink-500 italic">{emptyHint}</p>
+      </div>
+    );
+  }
+  const sorted = entries.sort(([ak, av], [bk, bv]) => {
+    // "uncategorized" always sinks to the bottom regardless of value.
+    if (ak === "uncategorized") return 1;
+    if (bk === "uncategorized") return -1;
+    return bv - av;
+  });
+  return (
+    <div className="px-4 py-3 border-b border-ink-200 bg-ink-50">
+      <p className="text-[0.7rem] font-medium text-ink-600 uppercase tracking-wide mb-2">
+        {title} · {total.toLocaleString()} days total
+      </p>
+      <div className="space-y-1.5">
+        {sorted.map(([key, value]) => {
+          const pct = Math.round((value / total) * 100);
+          const label = labels[key] ?? key;
+          const muted = key === "uncategorized";
+          return (
+            <div key={key} className="flex items-center gap-3">
+              <span className={cn(
+                "text-xs w-40 shrink-0",
+                muted ? "text-ink-400 italic" : "text-ink-600",
+              )}>
+                {label}
+              </span>
+              <div className="flex-1 h-3 bg-ink-200 rounded overflow-hidden">
+                <div
+                  className={cn(
+                    "h-full",
+                    muted ? "bg-ink-300"
+                      : pct >= 40 ? "bg-flame-dark"
+                      : pct >= 20 ? "bg-gold"
+                      : "bg-brand",
+                  )}
+                  style={{ width: `${Math.max(2, pct)}%` }}
+                  aria-hidden="true"
+                />
+              </div>
+              <span className="text-xs tabular-nums text-midnight w-24 text-right shrink-0">
+                <span className="font-semibold">{value.toLocaleString()}</span>
+                <span className="text-ink-400 ml-1">({pct}%)</span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Labels match the ShiftReasonCategory enum from the batch-shift API.
+const REASON_LABELS: Record<string, string> = {
+  dealer_supply:  "🏭 Dealer supply",
+  internal_specs: "📋 Internal specs",
+  customs:        "🛃 Customs / shipping",
+  logistics:      "🚚 Logistics",
+  demand_change:  "🔁 Demand change",
+  other:          "· Other",
+  uncategorized:  "untagged",
+};
+
+// Labels match the ShiftPhase enum from the batch-shift API.
+const PHASE_LABELS: Record<string, string> = {
+  pre_po:        "🔮 Pre-PO (Partnership)",
+  internal:      "📋 Internal phase",
+  external:      "🚚 External phase",
+  uncategorized: "untagged",
+};
 
 function SeverityBar({
   label, count, pct, tone,
