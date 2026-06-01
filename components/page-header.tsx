@@ -12,7 +12,7 @@ import type { ViewName } from "@/lib/access";
 import { cn } from "@/lib/utils";
 
 export default function PageHeader({
-  view, title, subtitle, className,
+  view, title, subtitle, className, subtitleClassName,
 }: {
   view: ViewName;
   /** Override the displayed title. Defaults to the view name. */
@@ -21,6 +21,12 @@ export default function PageHeader({
   subtitle?: React.ReactNode;
   /** Extra classes on the outer wrapper, e.g. mb-* overrides. */
   className?: string;
+  /**
+   * Override classes on the subtitle <p>. Defaults to `max-w-prose`
+   * (caps line length for readability). Pass `max-w-none` to let a
+   * short single-sentence subtitle run full width on one line.
+   */
+  subtitleClassName?: string;
 }) {
   const displayTitle = title ?? view;
   return (
@@ -32,7 +38,9 @@ export default function PageHeader({
         <h1 className="text-3xl font-bold leading-none">{displayTitle}</h1>
       </div>
       {subtitle && (
-        <p className="text-sm text-ink-500 max-w-prose">{subtitle}</p>
+        <p className={cn("text-sm text-ink-500", subtitleClassName ?? "max-w-prose")}>
+          {subtitle}
+        </p>
       )}
     </header>
   );

@@ -3205,9 +3205,6 @@ function WindowActionBar({
         <span className="inline-block text-[0.6rem] font-bold uppercase tracking-wide bg-brand text-white rounded-full px-2 py-0.5">
           Window
         </span>
-        <span className="text-[0.7rem] text-brand-dark font-medium">
-          Applies to every batch in this delivery window
-        </span>
         {!expanded && (
           <span className="text-[0.65rem] text-brand-dark/70 italic ml-2">
             click to expand bulk controls
