@@ -2655,6 +2655,8 @@ function VinChaseView({
       ))}
       {/* End-to-end retrospective — only renders once the PO is closed. */}
       <ClosedPoRetrospective po={po} />
+      {/* Who moved this PO + how on-time — closed POs only. */}
+      <PoDeptStakeholderPerformance po={po} />
     </div>
   );
 }
@@ -2785,6 +2787,106 @@ function RetroStat({
       <p className="text-[0.6rem] font-medium uppercase tracking-wide text-ink-500">{label}</p>
       <p className={cn("text-base font-bold tabular-nums leading-tight", valueCls)}>{value}</p>
       {hint && <p className="text-[0.6rem] text-ink-400 leading-tight mt-0.5">{hint}</p>}
+    </div>
+  );
+}
+
+type PerfAgg = { name: string; done: number; onTime: number; late: number };
+
+/**
+ * Department & stakeholder performance for a closed PO — who moved the
+ * work and how on-time they were. Rolls up every (PO + wave + batch)
+ * action by department and by stakeholder: how many they completed, and
+ * of those with a planned date, how many landed on/before it vs late.
+ * Renders under the retrospective; closed POs only.
+ */
+function PoDeptStakeholderPerformance({ po }: { po: PoNode }) {
+  if (!po.closedAt) return null;
+
+  const allActions: ScopedActionDetail[] = [
+    ...po.actions,
+    ...po.waves.flatMap((w) => [...w.actions, ...w.batches.flatMap((b) => b.actions)]),
+  ].filter((a) => a.id >= 0 && a.actionTypeName !== "Delivery");
+
+  if (allActions.length === 0) return null;
+
+  function aggregate(keyOf: (a: ScopedActionDetail) => string | null): PerfAgg[] {
+    const map = new Map<string, PerfAgg>();
+    for (const a of allActions) {
+      const name = keyOf(a) ?? "— unassigned —";
+      let g = map.get(name);
+      if (!g) { g = { name, done: 0, onTime: 0, late: 0 }; map.set(name, g); }
+      if (a.status === "done") {
+        g.done++;
+        if (a.expectedDate && a.completedAt) {
+          // completedAt is an ISO datetime; compare its local date to
+          // the planned (date-only) expectedDate.
+          if (localIsoDate(a.completedAt) <= a.expectedDate) g.onTime++;
+          else g.late++;
+        }
+      }
+    }
+    // Most-active first; then by name for stability.
+    return Array.from(map.values()).sort(
+      (x, y) => y.done - x.done || x.name.localeCompare(y.name),
+    );
+  }
+
+  const byDept = aggregate((a) => a.departmentName);
+  const byStakeholder = aggregate((a) => a.stakeholderName);
+
+  return (
+    <section className="border-2 border-ink-700 rounded-md bg-white overflow-hidden">
+      <div className="px-3 py-2 border-b border-ink-200 bg-ink-50/50 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="text-sm font-bold text-midnight">👥 Department &amp; stakeholder performance</span>
+        <span className="text-[0.7rem] text-ink-500">who moved this PO, and how on-time</span>
+      </div>
+      <div className="p-3 grid gap-4 md:grid-cols-2">
+        <PerfList title="Departments" rows={byDept} />
+        <PerfList title="Stakeholders" rows={byStakeholder} />
+      </div>
+    </section>
+  );
+}
+
+function PerfList({ title, rows }: { title: string; rows: PerfAgg[] }) {
+  return (
+    <div>
+      <p className="text-[0.6rem] font-medium uppercase tracking-wide text-ink-500 mb-1">{title}</p>
+      {rows.length === 0 ? (
+        <p className="text-[0.7rem] text-ink-400 italic">No actions assigned.</p>
+      ) : (
+        <ul className="space-y-1">
+          {rows.map((r) => {
+            const judged = r.onTime + r.late;
+            const pct = judged > 0 ? Math.round((r.onTime / judged) * 100) : null;
+            return (
+              <li key={r.name} className="flex items-center gap-2 text-[0.72rem]">
+                <span className="flex-1 min-w-0 truncate text-midnight" title={r.name}>{r.name}</span>
+                <span className="tabular-nums text-ink-500 shrink-0">{r.done} done</span>
+                {pct != null && (
+                  <span
+                    className={cn(
+                      "tabular-nums font-medium px-1.5 py-0.5 rounded shrink-0",
+                      pct >= 80 ? "text-green-dark bg-green-pale"
+                        : pct >= 50 ? "text-gold-dark bg-gold-pale"
+                        : "text-flame-dark bg-flame-pale",
+                    )}
+                    title={`${r.onTime} on-time · ${r.late} late (of ${judged} with a planned date)`}
+                  >
+                    {pct}% on-time
+                  </span>
+                )}
+                {r.late > 0 && (
+                  <span className="tabular-nums text-flame-dark shrink-0" title="late completions">
+                    ⚠ {r.late}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
