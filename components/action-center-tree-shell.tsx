@@ -3742,8 +3742,14 @@ function BatchRow({
                 )}
               </div>
 
+              {/* Single full-width column. ExtPhaseChipWithFlow is built
+                  as a full-width row (chip stretches via 1fr, metric
+                  badges + 📞/↗ buttons hug a shared right edge), so every
+                  row's controls line up. A multi-column grid squeezes each
+                  chip into a narrow cell — truncating the label and
+                  zig-zagging the right-edge buttons — so keep it 1-col. */}
               {externalActions.length > 0 && (
-                <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-1.5 pt-2 border-t border-ink-200">
+                <div className="flex flex-col gap-1.5 pt-2 border-t border-ink-200">
                   {externalActions
                     .slice()
                     .sort((a, b) => a.sortOrder - b.sortOrder)
