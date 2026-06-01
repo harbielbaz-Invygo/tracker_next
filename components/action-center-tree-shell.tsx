@@ -1430,6 +1430,20 @@ function MineView({
             };
           }
 
+          // Drop settled windows from the inbox: a window that is fully
+          // closed (PO closed, wave closed, or every batch delivered/
+          // cancelled) AND has no pending work left is a finished
+          // outcome, not something "sitting" — keeping it clutters
+          // "All pending" (e.g. a delivered-in-full PO). Idle but still
+          // OPEN windows are intentionally kept so ops can see where
+          // deliveries are sitting; only closed + empty rows drop off.
+          const noPending = internalPending.length === 0 && externalPending.length === 0;
+          const windowClosed =
+            p.closedAt != null ||
+            w.closedAt != null ||
+            (w.batches.length > 0 && w.batches.every((b) => b.closedAt != null));
+          if (noPending && windowClosed) continue;
+
           acc.push({
             poId:        p.id,
             poNumber:    p.poNumber,
@@ -1464,7 +1478,7 @@ function MineView({
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-xl font-bold text-midnight">📋 Inbox</h2>
           <span className="text-xs text-ink-500">
-            Every delivery window — sorted by nearest date (ops projection wins). Idle rows show the current step.
+            Every open delivery window — sorted by nearest date (ops projection wins). Idle rows show the current step; settled windows drop off.
           </span>
         </div>
         <p className="text-xs text-ink-600 mt-1">
