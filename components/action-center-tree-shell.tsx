@@ -1542,8 +1542,35 @@ function MineView({
     (a, b) => a.sortDate.localeCompare(b.sortDate),
   ), [rows]);
 
-  const totalPending = sorted.reduce(
-    (n, r) => n + r.internalPending.length + r.externalPending.length,
+  // Group windows under their PO so PO-scope Internal-Phase work shows
+  // ONCE per PO (it's shared across that PO's windows) instead of
+  // repeating on every window card, and each window lists only its own
+  // External-Phase work. `sorted` is ascending by date, so the first
+  // window seen for a PO is its earliest — the Map's insertion order
+  // therefore keeps POs ordered by nearest window.
+  const poGroups = useMemo(() => {
+    const byPo = new Map<number, {
+      poId: number; poNumber: string; dealerName: string;
+      internalPending: ScopedActionDetail[]; windows: InboxWindow[];
+    }>();
+    for (const r of sorted) {
+      let g = byPo.get(r.poId);
+      if (!g) {
+        g = {
+          poId: r.poId, poNumber: r.poNumber, dealerName: r.dealerName,
+          internalPending: r.internalPending, windows: [],
+        };
+        byPo.set(r.poId, g);
+      }
+      g.windows.push(r);
+    }
+    return Array.from(byPo.values());
+  }, [sorted]);
+
+  // Pending actions: internal counted once per PO, external per window.
+  const totalPending = poGroups.reduce(
+    (n, g) => n + g.internalPending.length
+      + g.windows.reduce((m, w) => m + w.externalPending.length, 0),
     0,
   );
   const overdueWindows = sorted.filter((r) => r.sortDate < today).length;
@@ -1554,11 +1581,13 @@ function MineView({
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-xl font-bold text-midnight">📋 Inbox</h2>
           <span className="text-xs text-ink-500">
-            Every open delivery window — sorted by nearest date (ops projection wins). Idle rows show the current step; settled windows drop off.
+            Grouped by PO — Internal-Phase work shows once per PO; each delivery window lists its own External-Phase work. Sorted by nearest window; settled windows drop off.
           </span>
         </div>
         <p className="text-xs text-ink-600 mt-1">
-          <span className="font-medium">{sorted.length} window{sorted.length === 1 ? "" : "s"}</span>
+          <span className="font-medium">{poGroups.length} PO{poGroups.length === 1 ? "" : "s"}</span>
+          <span className="text-ink-300 mx-1.5">·</span>
+          <span>{sorted.length} window{sorted.length === 1 ? "" : "s"}</span>
           <span className="text-ink-300 mx-1.5">·</span>
           <span>{totalPending} pending action{totalPending === 1 ? "" : "s"}</span>
           {overdueWindows > 0 && (
@@ -1582,16 +1611,16 @@ function MineView({
             <button type="button" onClick={onDismissFlash} className="px-1">✕</button>
           </div>
         )}
-        {sorted.length === 0 ? (
+        {poGroups.length === 0 ? (
           <p className="text-sm text-ink-500 italic px-2">
             No delivery windows yet — submit an Intake to create one.
           </p>
         ) : (
           <ul className="space-y-2">
-            {sorted.map((r) => (
-              <InboxWindowCard
-                key={`${r.poId}:${r.windowDate}`}
-                row={r}
+            {poGroups.map((g) => (
+              <PoInboxCard
+                key={g.poId}
+                group={g}
                 today={today}
                 onJumpToPo={onJumpToPo}
               />
@@ -1603,141 +1632,141 @@ function MineView({
   );
 }
 
+
 /**
- * One delivery-window row. Two render modes:
- *
- *  - Pending mode (has open actions): header + Internal / External
- *    chip rows.
- *  - Idle mode (no pending): condensed single-line — header + the
- *    last step the workflow has reached. Skips the chip rows since
- *    there's nothing to act on.
+ * One PO card in the Inbox. PO-scope Internal-Phase work renders ONCE
+ * at the top (it's shared across the PO's windows), then each delivery
+ * window lists only its own External-Phase work below. The card flames
+ * if any of its windows is overdue.
  */
-function InboxWindowCard({
-  row, today, onJumpToPo,
+function PoInboxCard({
+  group, today, onJumpToPo,
 }: {
-  row: InboxWindow;
+  group: {
+    poId: number; poNumber: string; dealerName: string;
+    internalPending: ScopedActionDetail[]; windows: InboxWindow[];
+  };
   today: string;
   onJumpToPo: (poId: number) => void;
 }) {
-  const isOverdueWindow = row.sortDate < today;
-  const slipped = row.opsDate != null && row.opsDate !== row.windowDate;
-  const hasPending = row.internalPending.length > 0 || row.externalPending.length > 0;
-
+  const anyOverdue = group.windows.some((w) => w.sortDate < today);
   return (
     <li className={cn(
-      "rounded-md border bg-white px-3 py-2",
-      hasPending ? "space-y-1.5" : "space-y-0.5",
-      isOverdueWindow ? "border-flame bg-flame-pale/20" : "border-ink-200",
+      "rounded-md border bg-white px-3 py-2 space-y-2",
+      anyOverdue ? "border-flame bg-flame-pale/20" : "border-ink-200",
     )}>
-      {/* Header — dealer is the protagonist; PO + dates follow. */}
+      {/* PO header — dealer + PO (click to open the drawer) + window count. */}
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className="text-sm font-bold text-midnight">{row.dealerName}</span>
+        <span className="text-sm font-bold text-midnight">{group.dealerName}</span>
         <span className="text-ink-300">·</span>
         <button
           type="button"
-          onClick={() => onJumpToPo(row.poId)}
+          onClick={() => onJumpToPo(group.poId)}
           className="font-mono text-[0.75rem] text-midnight underline-offset-2 hover:underline"
         >
-          {row.poNumber}
+          {group.poNumber}
         </button>
-        {/* Date stack: both dates always shown; ops date highlights
-            in flame when it's later than the PO promise so the slip
-            is visible at a glance. */}
-        <span className="ml-auto inline-flex items-baseline gap-2 text-[0.7rem]">
-          <span className="tabular-nums text-ink-600" title="Current PO Expected Date — partnership-dealer commitment">
-            📅 PO Expected <span className="text-midnight">{row.windowDate}</span>
-          </span>
-          {row.opsDate ? (
-            <span
-              className={cn(
-                "tabular-nums",
-                slipped ? "text-flame-dark font-medium" : "text-green-dark",
-              )}
-              title="Current Ops Expected Date — ops projection based on real signals"
-            >
-              ⏰ Ops Expected <span>{row.opsDate}</span>
-            </span>
-          ) : (
-            <span className="tabular-nums text-ink-400 italic">⏰ Ops Expected —</span>
-          )}
+        <span className="text-[0.65rem] text-ink-500 tabular-nums">
+          · {group.windows.length} window{group.windows.length === 1 ? "" : "s"}
         </span>
       </div>
 
-      {/* Idle mode — no pending work. Show only the last step the
-          workflow has reached. Skipping the chip rows entirely keeps
-          the inbox dense; ops scans these rows to confirm where
-          near-done deliveries are sitting. */}
-      {!hasPending && (
-        <p className="text-[0.7rem] text-ink-600">
+      {/* Internal phase — PO-scope, shown ONCE for the whole PO (not
+          repeated per window). */}
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <span className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 w-28 shrink-0">
+          Internal phase
+        </span>
+        {group.internalPending.length === 0 ? (
+          <span className="text-[0.7rem] text-green-dark">✓ all done</span>
+        ) : (
+          <ReadOnlyChipList actions={group.internalPending} today={today} />
+        )}
+      </div>
+
+      {/* Per-window External-Phase work. */}
+      <div className="space-y-1 border-t border-ink-100 pt-1.5">
+        {group.windows.map((w) => (
+          <WindowExternalRow key={w.windowDate} row={w} today={today} />
+        ))}
+      </div>
+    </li>
+  );
+}
+
+/**
+ * One delivery-window sub-row inside a PO card — its date stack plus
+ * the head of its External-Phase queue (or, when idle, the last step
+ * reached). Internal-Phase work lives once at the PO level above.
+ */
+function WindowExternalRow({
+  row, today,
+}: {
+  row: InboxWindow;
+  today: string;
+}) {
+  const isOverdueWindow = row.sortDate < today;
+  const slipped = row.opsDate != null && row.opsDate !== row.windowDate;
+  const hasExternal = row.externalPending.length > 0;
+  return (
+    <div className={cn(
+      "rounded px-2 py-1.5",
+      isOverdueWindow ? "bg-flame-pale/40" : "bg-ink-50/60",
+    )}>
+      {/* Window date line — PO Expected (the window date) + Ops Expected. */}
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="text-[0.72rem] font-semibold text-midnight tabular-nums" title="PO Expected Date for this delivery window">
+          📅 {row.windowDate}
+        </span>
+        {row.opsDate ? (
+          <span
+            className={cn("text-[0.68rem] tabular-nums", slipped ? "text-flame-dark font-medium" : "text-green-dark")}
+            title="Current Ops Expected Date — ops projection based on real signals"
+          >
+            ⏰ Ops {row.opsDate}
+          </span>
+        ) : (
+          <span className="text-[0.68rem] tabular-nums text-ink-400 italic">⏰ Ops —</span>
+        )}
+      </div>
+
+      {/* External head-of-queue, or the last step reached when idle. */}
+      {hasExternal ? (() => {
+        const sortedByOrder = row.externalPending.slice().sort(
+          (a, b) => a.sortOrder - b.sortOrder,
+        );
+        const head = sortedByOrder[0];
+        const remaining = new Set(
+          sortedByOrder
+            .filter((a) => a.actionTypeId !== head.actionTypeId)
+            .map((a) => a.actionTypeId),
+        ).size;
+        return (
+          <div className="mt-1 flex flex-wrap items-baseline gap-2">
+            <ReadOnlyChipList actions={[head]} today={today} />
+            {remaining > 0 && (
+              <span className="text-[0.65rem] text-ink-500 tabular-nums">
+                +{remaining} more downstream
+              </span>
+            )}
+          </div>
+        );
+      })() : (
+        <p className="mt-0.5 text-[0.68rem] text-ink-600">
           {row.lastStep ? (
             <>
               <span className="text-ink-500 mr-1">Current step:</span>
               <span className="text-green-dark font-medium">✓ {row.lastStep.label}</span>
               {row.lastStep.completedAt && (
-                <span className="text-ink-400 ml-1 tabular-nums">
-                  ({row.lastStep.completedAt})
-                </span>
+                <span className="text-ink-400 ml-1 tabular-nums">({row.lastStep.completedAt})</span>
               )}
             </>
           ) : (
-            <span className="text-ink-400 italic">No work has started yet.</span>
+            <span className="text-ink-400 italic">No external work started yet.</span>
           )}
         </p>
       )}
-
-      {/* Internal phase pending actions — read-only labels. The
-          Inbox is an info box; to act on a chip, ops clicks the PO
-          number above to jump into the detail drawer. */}
-      {hasPending && (
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 w-28 shrink-0">
-          Internal phase
-        </span>
-        {row.internalPending.length === 0 ? (
-          <span className="text-[0.7rem] text-green-dark">✓ all done</span>
-        ) : (
-          <ReadOnlyChipList actions={row.internalPending} today={today} />
-        )}
-      </div>
-      )}
-
-      {/* External phase — only the next pending action. Dealer
-          execution runs as a chain (VIN → Plate → Insurance → …);
-          ops only needs to see the head of the queue. Downstream
-          chips will surface once the head clears. Dedupe by
-          action_type so wave + batch copies of the same step
-          don't render twice. */}
-      {hasPending && (
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className="text-[0.65rem] font-medium uppercase tracking-wide text-ink-500 w-28 shrink-0">
-          External phase
-        </span>
-        {row.externalPending.length === 0 ? (
-          <span className="text-[0.7rem] text-green-dark">✓ all done</span>
-        ) : (() => {
-          const sortedByOrder = row.externalPending.slice().sort(
-            (a, b) => a.sortOrder - b.sortOrder,
-          );
-          const head = sortedByOrder[0];
-          const remaining = new Set(
-            sortedByOrder
-              .filter((a) => a.actionTypeId !== head.actionTypeId)
-              .map((a) => a.actionTypeId),
-          ).size;
-          return (
-            <div className="flex flex-wrap items-baseline gap-2 flex-1 min-w-0">
-              <ReadOnlyChipList actions={[head]} today={today} />
-              {remaining > 0 && (
-                <span className="text-[0.65rem] text-ink-500 tabular-nums">
-                  +{remaining} more downstream
-                </span>
-              )}
-            </div>
-          );
-        })()}
-      </div>
-      )}
-    </li>
+    </div>
   );
 }
 
