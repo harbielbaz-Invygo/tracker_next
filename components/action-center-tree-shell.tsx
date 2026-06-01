@@ -1045,7 +1045,16 @@ function DealerTree({
                                 <span className="text-gold-dark">awaiting PO</span>
                               </>
                             )}
-                            {p.closedAt && <span className="ml-1 text-green-dark">· closed</span>}
+                            {p.closedAt && (() => {
+                              const bs = p.waves.flatMap((w) => w.batches);
+                              const cancelledOnly = bs.length > 0
+                                && bs.every((b) => b.closureReason === "cancelled");
+                              return (
+                                <span className={cn("ml-1", cancelledOnly ? "text-flame-dark" : "text-green-dark")}>
+                                  · {cancelledOnly ? "cancelled" : "delivered"}
+                                </span>
+                              );
+                            })()}
                           </div>
                           {/* Phase-broken progress lines: Internal +
                               External shown separately so ops can
@@ -1201,11 +1210,20 @@ function PoDrawer({
           {po.poDate && (
             <span className="text-xs text-ink-500 tabular-nums">{po.poDate}</span>
           )}
-          {po.closedAt && (
-            <span className="text-[0.65rem] font-medium tabular-nums text-green-dark uppercase tracking-wide">
-              ✓ Closed {po.closedAt}
-            </span>
-          )}
+          {po.closedAt && (() => {
+            // "Delivered" unless every batch was cancelled (then "Cancelled").
+            const batches = po.waves.flatMap((w) => w.batches);
+            const cancelledOnly = batches.length > 0
+              && batches.every((b) => b.closureReason === "cancelled");
+            return (
+              <span className={cn(
+                "text-[0.65rem] font-medium tabular-nums uppercase tracking-wide",
+                cancelledOnly ? "text-flame-dark" : "text-green-dark",
+              )}>
+                {cancelledOnly ? "🚫 Cancelled" : "✓ Delivered"} {po.closedAt}
+              </span>
+            );
+          })()}
         </div>
         <p className="text-xs text-ink-600">
           <span className="font-medium text-midnight">🏢 {dealerName}</span>
@@ -1346,8 +1364,11 @@ function PoDrawer({
             : null;
           return (
             <div className="border border-green-pale rounded-md bg-green-pale/40 p-4 text-center space-y-1">
-              <p className="text-sm font-semibold text-green-dark">
-                ✅ PO closed
+              <p className={cn(
+                "text-sm font-semibold",
+                cancelled.length > 0 && delivered.length === 0 ? "text-flame-dark" : "text-green-dark",
+              )}>
+                {cancelled.length > 0 && delivered.length === 0 ? "🚫 PO cancelled" : "✅ PO delivered"}
               </p>
               <p className="text-xs text-ink-700">
                 {delivered.length > 0 && (
@@ -1899,7 +1920,7 @@ function derivePoPhases(po: PoNode, todayStr: string): PoPhase[] {
   //    converted yet; real POs always have a date.
   const poSigned: PoPhase = {
     key:   "po_signed",
-    label: "PO signed",
+    label: "PO received",
     state: po.poDate ? "done" : "in_progress",
     progress: null,
     date:  po.poDate ?? null,
@@ -2732,7 +2753,7 @@ function ClosedPoRetrospective({ po }: { po: PoNode }) {
 
       <div className="p-3 grid gap-2 grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
         <RetroStat label="End-to-end" value={e2eDays != null ? `${e2eDays}d` : "—"}
-                   hint="PO signed → delivered" />
+                   hint="PO received → delivered" />
         <RetroStat
           label="On-time"
           value={worstLate == null ? "—" : worstLate <= 0 ? "On time" : `${worstLate}d late`}
@@ -2755,7 +2776,7 @@ function ClosedPoRetrospective({ po }: { po: PoNode }) {
       {/* Plan-vs-reality milestone line. */}
       <div className="px-3 pb-3 -mt-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.7rem] text-ink-600">
-          {po.poDate && (<span className="tabular-nums">🖊 Signed {po.poDate}</span>)}
+          {po.poDate && (<span className="tabular-nums">🖊 Received {po.poDate}</span>)}
           {po.appListingSummary.completedAt && (
             <>
               <span className="text-ink-300">→</span>
@@ -2763,7 +2784,11 @@ function ClosedPoRetrospective({ po }: { po: PoNode }) {
             </>
           )}
           <span className="text-ink-300">→</span>
-          <span className="tabular-nums text-green-dark font-medium">✓ Closed {po.closedAt}</span>
+          {cancelled.length > 0 && delivered.length === 0 ? (
+            <span className="tabular-nums text-flame-dark font-medium">🚫 Cancelled {po.closedAt}</span>
+          ) : (
+            <span className="tabular-nums text-green-dark font-medium">✓ Delivered {po.closedAt}</span>
+          )}
         </div>
       </div>
     </section>
