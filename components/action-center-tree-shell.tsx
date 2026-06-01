@@ -2911,23 +2911,12 @@ function WaveSection({
             </div>
           )}
 
-          {/* TWO-COLUMN HEAD ROW: WINDOW controls (left) + Shift History
-              (right). Both boxes share the same outer height when
-              collapsed; expanding either pushes the row taller without
-              disturbing the other's resting height. Stacks on narrow
-              screens via grid-cols breakpoint. */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <WindowActionBar
-              wave={wave}
-              internalPhaseDone={internalPhaseDone}
-              busyActionId={busyActionId}
-              busyBatchId={busyBatchId}
-              onChangeStatus={onChangeStatus}
-              onBatchOp={onBatchOp}
-              onOpenInlineForm={onOpenInlineForm}
-            />
-            <ShiftHistoryBlock wave={wave} />
-          </div>
+          {/* Shift-history audit trail for this delivery window. The
+              window-level bulk-action box ("WINDOW") was removed —
+              per-batch closure controls + External-Phase chips already
+              live on each batch row below, so the window bulk bar (and
+              its wave-scope chip grid) was redundant clutter. */}
+          <ShiftHistoryBlock wave={wave} />
 
           {/* PER-BATCH BLOCK
               Each batch gets its own box with identity meta on top and
@@ -2958,237 +2947,8 @@ function WaveSection({
 }
 
 /**
- * WINDOW-LEVEL ACTION BAR. A single horizontal row at the top of an
- * expanded delivery window. Three closure controls on the left
- * (Shift / Cancel all / Mark all delivered) and the wave-scope
- * External-Phase action chips on the right. Bar is purely a presenter
- * — every click delegates to the existing per-batch endpoints or to
- * /api/scope-action with cross-scope wave→batch propagation.
- */
-function WindowActionBar({
-  wave, internalPhaseDone, busyActionId, busyBatchId,
-  onChangeStatus, onBatchOp, onOpenInlineForm,
-}: {
-  wave: WaveNode;
-  internalPhaseDone: boolean;
-} & Pick<MutationProps, "busyActionId" | "onChangeStatus">
-  & BatchOpProps
-  & Pick<UiStateProps, "onOpenInlineForm">
-) {
-  // Pull confirm/alert from the shell for branded bulk-op dialogs.
-  const shell = useShell();
-  // Collapsed by default. Bulk controls + window-wide chips live
-  // inside this card; per-batch action is the more common operation,
-  // so we keep the bulk surface tucked away until ops explicitly
-  // asks for it. State is local — each window's card maintains its
-  // own toggle independent of others.
-  const [expanded, setExpanded] = useState<boolean>(false);
-  const openBatches = wave.batches.filter((b) => b.closedAt == null);
-  const deliveredCount = wave.batches.filter((b) => b.closureReason === "delivered").length;
-
-  // Mark-all-delivered fires the same Delivery-action flip as the
-  // per-batch button, just iterated over every still-open batch in
-  // the window. Gates mirror the single-batch case: every wave action
-  // settled + internal phase done + every batch app-listed.
-  const wavePending = wave.actions.filter(
-    (a) => a.status !== "done" && a.status !== "skipped",
-  ).length;
-  const waveReady = wave.actions.length > 0 && wavePending === 0;
-  const allListed = openBatches.length > 0
-    && openBatches.every((b) => b.appListedAt != null);
-  const canMarkAllDelivered = waveReady && internalPhaseDone && allListed && openBatches.length > 0;
-  const markAllDeliveredTooltip = !internalPhaseDone
-    ? "Internal-phase actions still pending on the PO."
-    : !waveReady
-      ? `${wavePending} External-Phase action${wavePending === 1 ? "" : "s"} still pending in this window.`
-      : !allListed
-        ? "Some batches aren't app-listed yet — list them via Internal Phase first."
-        : `Marks every open batch's Delivery action done (${openBatches.length}).`;
-
-  async function handleMarkAllDelivered() {
-    if (!canMarkAllDelivered) return;
-    // Audit 6 #1+#5 — preview-list confirm so ops sees which batches.
-    const ok = await shell.confirm({
-      title: `Mark ${openBatches.length} batch${openBatches.length === 1 ? "" : "es"} delivered?`,
-      description:
-        `Every open batch in this window will have its Delivery action marked done and the batch closed. This action affects the PO Reliability score and is irreversible.`,
-      previewItems: openBatches.map((b) => b.batchCode),
-      previewLabel: "Batches to deliver",
-      confirmLabel: "Mark all delivered",
-    });
-    if (!ok) return;
-    for (const b of openBatches) {
-      const delivery = b.actions.find((a) => a.actionTypeName === "Delivery");
-      if (delivery) onChangeStatus(delivery.id, "done");
-      // onChangeStatus is fire-and-forget from this caller; we await
-      // the router refresh implicitly via setActionStatus's own state.
-    }
-  }
-
-  async function handleCancelWindow() {
-    if (openBatches.length === 0) return;
-    const ok = await shell.confirm({
-      title: `Cancel ${openBatches.length} batch${openBatches.length === 1 ? "" : "es"}?`,
-      description:
-        `Every open batch in this window will close as cancelled. This counts as a missed commitment on the PO Reliability score and is irreversible.`,
-      previewItems: openBatches.map((b) => b.batchCode),
-      previewLabel: "Batches to cancel",
-      confirmLabel: "Cancel all batches",
-      danger: true,
-    });
-    if (!ok) return;
-    const noteInput = await shell.prompt({
-      title: "Cancellation note (optional)",
-      description: "Applied to every cancelled batch in this window. Leave blank to skip.",
-      inputLabel: "Note",
-      placeholder: "e.g. Dealer pulled the order after sample inspection",
-      confirmLabel: "Save & cancel batches",
-    });
-    if (noteInput == null) return; // user backed out of the note step
-    const note = noteInput.trim() || null;
-    for (const b of openBatches) {
-      await onBatchOp(b.id, "/api/batch-close", {
-        batchId: b.id,
-        reason: "cancelled",
-        note,
-      });
-    }
-  }
-
-  async function handleShiftWindow() {
-    if (openBatches.length === 0) return;
-    // Step 1 — pick the new projected date. InputDialog's date type
-    // surfaces a native date picker; required + inline validation
-    // means we can drop the separate "invalid date" alert that the
-    // window.prompt flow used to need.
-    const nextInput = await shell.prompt({
-      title: "Shift availability for this window",
-      description: `Applies to every open batch (${openBatches.length}) in this window.`,
-      inputLabel: "New projected availability date",
-      inputType: "date",
-      required: true,
-      validate: (val) =>
-        /^\d{4}-\d{2}-\d{2}$/.test(val) ? null : "Pick a valid date.",
-      confirmLabel: "Continue",
-    });
-    if (nextInput == null) return;
-    const trimmed = nextInput.trim();
-
-    // Step 2 — optional reason. Cancel here aborts the whole flow so
-    // an accidental Escape doesn't shift without context.
-    const reasonInput = await shell.prompt({
-      title: "Reason for the shift (optional)",
-      description: "Free-text. Categorical reason can be picked from each batch's shift form individually.",
-      inputLabel: "Reason",
-      placeholder: "e.g. Dealer flagged customs delay this week",
-      confirmLabel: "Shift batches",
-    });
-    if (reasonInput == null) return;
-    const reason = reasonInput.trim() || null;
-
-    for (const b of openBatches) {
-      await onBatchOp(b.id, "/api/batch-shift", {
-        batchId: b.id,
-        newProjectedDate: trimmed,
-        bookingsAtShift: 0,
-        reason,
-      });
-    }
-  }
-
-  return (
-    <div className="border-2 border-brand rounded-md bg-brand-pastel/40 shadow-sm">
-      {/* Click-to-toggle header. Collapsed = pill + subtitle only,
-          expanded = full bulk control surface beneath. The chevron
-          gives an explicit affordance even though the whole row is
-          clickable. */}
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
-        className="w-full flex items-baseline gap-2 px-3 py-2 text-left hover:bg-brand-pastel/30 transition-colors"
-      >
-        <span aria-hidden className="text-brand-dark text-xs">
-          {expanded ? "▾" : "▸"}
-        </span>
-        <span className="inline-block text-[0.6rem] font-bold uppercase tracking-wide bg-brand text-white rounded-full px-2 py-0.5">
-          Window
-        </span>
-        {!expanded && (
-          <span className="text-[0.65rem] text-brand-dark/70 italic ml-2">
-            click to expand bulk controls
-          </span>
-        )}
-        {deliveredCount > 0 && (
-          <span className="text-[0.7rem] text-green-dark tabular-nums ml-auto">
-            ✓ {deliveredCount}/{wave.batches.length} delivered
-          </span>
-        )}
-      </button>
-
-      {expanded && (
-      <>
-
-
-      {/* Row 1: bulk closure cluster — single horizontal line, three
-          equally-weighted controls. */}
-      <div className="flex flex-wrap gap-1.5 px-3 py-2 border-b border-brand/30">
-        <BulkBtn
-          label="📅 Shift all"
-          tone="gold"
-          disabled={openBatches.length === 0}
-          onClick={handleShiftWindow}
-        />
-        <BulkBtn
-          label="🚫 Cancel all"
-          tone="flame"
-          disabled={openBatches.length === 0}
-          onClick={handleCancelWindow}
-        />
-        <BulkBtn
-          label={canMarkAllDelivered
-            ? `✓ Mark all delivered (${openBatches.length})`
-            : `🔒 Mark all delivered`}
-          tone="green"
-          disabled={!canMarkAllDelivered}
-          title={markAllDeliveredTooltip}
-          onClick={handleMarkAllDelivered}
-        />
-      </div>
-
-      {/* Row 2: External-Phase chips. Grid layout keeps chip columns
-          predictable across the window AND every batch row below, so
-          the eye scans vertically by action_type. Auto-fit + min
-          width handles narrow screens by wrapping rows. */}
-      <div className="px-3 py-2 grid gap-1.5 grid-cols-[repeat(auto-fit,minmax(140px,1fr))]">
-        {wave.actions.length === 0 ? (
-          <span className="text-[0.7rem] text-ink-500 italic">
-            No External-Phase actions configured.
-          </span>
-        ) : wave.actions
-            .slice()
-            .sort((a, b) => a.sortOrder - b.sortOrder)
-            .map((a) => (
-              <ActionChip
-                key={a.id}
-                action={a}
-                busy={busyActionId === a.id}
-                onChangeStatus={onChangeStatus}
-              />
-            ))}
-      </div>
-      {/* Silence unused-prop lint until per-bar busy state is shown. */}
-      <span className="hidden" data-busy={busyBatchId} />
-      </>
-      )}
-    </div>
-  );
-}
-
-/**
  * Compact horizontal chip representation of a single action — used
- * inside the WindowActionBar (right cluster) and the per-batch
- * ActionBar (right cluster). One click flips the action's status in
+ * in the per-batch ActionBar (right cluster). One click flips the action's status in
  * the canonical waiting → done direction; shift-click reverts via
  * the cascade. Status drives the icon + colour:
  *   ⏳ waiting   → click marks done
@@ -3551,9 +3311,8 @@ function ShiftHistoryBlock({ wave }: { wave: WaveNode }) {
     return n + (s[(v - 20) % 10] || s[v] || s[0]);
   }
 
-  // Twin of the WindowActionBar — sits on the same row, same outer
-  // dimensions, collapsed by default. Click-to-toggle header so ops
-  // opens it on demand.
+  // Shift-history audit trail for the window — full-width, collapsed
+  // by default. Click-to-toggle header so ops opens it on demand.
   return (
     <div className="border border-gold/40 rounded-md bg-gold-pale/20 text-[0.7rem] flex flex-col">
       <button
@@ -3706,42 +3465,6 @@ function fmtShortDay(isoTs: string): string {
   const month = MONTHS[parseInt(m[2], 10) - 1] ?? m[2];
   const day = String(parseInt(m[3], 10));
   return `${month} ${day}`;
-}
-
-/**
- * Bulk-action button used inside the WindowActionBar's left cluster.
- * Thin wrapper over <button> with the same tone palette as BatchOpBtn
- * but with `disabled`/`title` plumbing for the gated bulk actions.
- */
-function BulkBtn({
-  label, tone, disabled, title, onClick,
-}: {
-  label: string;
-  tone: "green" | "gold" | "flame" | "ink";
-  disabled?: boolean;
-  title?: string;
-  onClick: () => void;
-}) {
-  const toneCls = disabled
-    ? "border-ink-200 text-ink-400 cursor-not-allowed"
-    : tone === "green" ? "border-green text-green-dark hover:bg-green-pale"
-    : tone === "gold"  ? "border-gold text-gold-dark hover:bg-gold-pale"
-    : tone === "flame" ? "border-flame text-flame-dark hover:bg-flame-pale"
-    : "border-ink-300 text-ink-600 hover:bg-ink-50";
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className={cn(
-        "text-[0.7rem] px-2 py-0.5 rounded border transition-colors",
-        toneCls,
-      )}
-    >
-      {label}
-    </button>
-  );
 }
 
 /**
