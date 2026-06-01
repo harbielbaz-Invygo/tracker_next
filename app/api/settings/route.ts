@@ -410,6 +410,12 @@ const EDITABLE_BATCH_FIELDS = new Set<string>([
   "appDisplayCities", "dealerReceivingCity",
   // Dates
   "requestedAt", "dealerPromisedDeliveryDate", "currentProjectedDeliveryDate",
+  "appListedAt", "vinReceivingDate",
+  "poExpectedDateAtLock", "opsProjectedDeliveryDateAtLock",
+  // VINs
+  "vinsReceivedQuantity", "vinReceivedAtIntake",
+  // Closure (realised outcome)
+  "closedAt", "closureReason", "cancellationNote",
   // Status
   "currentStage", "lifecycleState", "feasibilityStatus",
   // Commercial
@@ -450,6 +456,7 @@ async function handleBatch(b: Extract<Body, { resource: "batch" }>) {
     // Coerce numeric fields that arrive as strings from <input type="number">
     const numericFields = [
       "year", "dealerId", "requestedQuantity", "allocatedQuantity", "deliveredQuantity",
+      "vinsReceivedQuantity",
       "buyBackRate", "contractLengthMonths", "unitPriceSar", "taxPct", "lineAmountSar",
       "poTotalSar", "poSubtotalSar", "poTaxTotalSar",
       "partnershipConfidence", "operationsConfidence", "riskScore",
@@ -467,6 +474,20 @@ async function handleBatch(b: Extract<Body, { resource: "batch" }>) {
       } else if (f in updates && updates[f] === "") {
         updates[f] = null;
       }
+    }
+
+    // A cleared <input type="date"> / <select> sends "". For nullable
+    // text/date/enum columns that means "clear", not "store empty string"
+    // (an empty enum value would otherwise corrupt closureReason).
+    const nullableStringFields = [
+      "poNumber", "poReference", "actualPoDate", "expectedPoDate",
+      "model", "category", "appDisplayCities", "dealerReceivingCity",
+      "currentProjectedDeliveryDate", "appListedAt", "vinReceivingDate",
+      "poExpectedDateAtLock", "opsProjectedDeliveryDateAtLock",
+      "closedAt", "closureReason", "cancellationNote", "colorSummary", "notes",
+    ];
+    for (const f of nullableStringFields) {
+      if (f in updates && updates[f] === "") updates[f] = null;
     }
 
     // Recompute targetPoDate when promised date changes.

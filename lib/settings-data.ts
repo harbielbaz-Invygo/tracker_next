@@ -119,6 +119,23 @@ export interface BatchEditRow {
   dealerPromisedDeliveryDate: string;
   currentProjectedDeliveryDate: string | null;
   targetPoDate: string | null;          // computed; read-only
+  /** ISO date the cars went live in the customer app. Drives PO→Listed. */
+  appListedAt: string | null;
+  /** ISO date the dealer committed to share VINs. */
+  vinReceivingDate: string | null;
+  /** Baseline @ lock — first PO expected date. Drives variance metrics. */
+  poExpectedDateAtLock: string | null;
+  /** Baseline @ lock — first ops-projected delivery date. */
+  opsProjectedDeliveryDateAtLock: string | null;
+
+  /* VINs. */
+  vinsReceivedQuantity: number;
+  vinReceivedAtIntake: boolean;
+
+  /* Closure (realised outcome — drives on-time + customer-days). */
+  closedAt: string | null;
+  closureReason: "delivered" | "cancelled" | null;
+  cancellationNote: string | null;
 
   /* Status & lifecycle. */
   currentStage: string;
@@ -307,6 +324,17 @@ export async function getSettingsData(): Promise<SettingsData> {
     dealerPromisedDeliveryDate: b.dealerPromisedDeliveryDate,
     currentProjectedDeliveryDate: b.currentProjectedDeliveryDate ?? null,
     targetPoDate: b.targetPoDate ?? null,
+    appListedAt: b.appListedAt ?? null,
+    vinReceivingDate: b.vinReceivingDate ?? null,
+    poExpectedDateAtLock: b.poExpectedDateAtLock ?? null,
+    opsProjectedDeliveryDateAtLock: b.opsProjectedDeliveryDateAtLock ?? null,
+
+    vinsReceivedQuantity: b.vinsReceivedQuantity ?? 0,
+    vinReceivedAtIntake: b.vinReceivedAtIntake ?? false,
+
+    closedAt: b.closedAt ?? null,
+    closureReason: (b.closureReason ?? null) as "delivered" | "cancelled" | null,
+    cancellationNote: b.cancellationNote ?? null,
 
     currentStage:   b.currentStage ?? "request_submitted",
     lifecycleState: (b.lifecycleState ?? "post_po") as "pre_po" | "post_po",
