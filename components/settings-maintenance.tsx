@@ -26,7 +26,7 @@
  * The raw JSON response is rendered verbatim so the operator sees the
  * exact action log (added vs. exists, counts, errors).
  */
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { CollapsibleCard } from "./settings-shell";
 import { useConfirmDialog } from "./use-confirm-dialog";
 import ConfirmDialog from "./confirm-dialog";
@@ -172,53 +172,25 @@ const CLEANUP: MigrationEndpoint[] = [
 
 type Phase = "idle" | "loading" | "done" | "error";
 
+interface RowState {
+  phase: Phase;
+  mode: "check" | "run" | null;
+  result: unknown;
+  error: string | null;
+}
+
+const IDLE: RowState = { phase: "idle", mode: null, result: null, error: null };
+
 function EndpointRow({
   ep,
-  confirm,
+  state,
+  onCall,
 }: {
   ep: MigrationEndpoint;
-  confirm: ReturnType<typeof useConfirmDialog>["confirm"];
+  state: RowState;
+  onCall: (ep: MigrationEndpoint, method: "GET" | "POST") => void;
 }) {
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [mode, setMode] = useState<"check" | "run" | null>(null);
-  const [result, setResult] = useState<unknown>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function call(method: "GET" | "POST") {
-    if (method === "POST" && ep.destructive) {
-      const ok = await confirm({
-        title: `Run "${ep.label}"?`,
-        description:
-          `This permanently DELETES rows from the production database and cannot be undone.\n\n${ep.detail}\n\nRun the Check (dry-run) first to preview exactly what would be removed.`,
-        danger: true,
-        confirmLabel: "Run cleanup",
-      });
-      if (!ok) return;
-    }
-
-    setPhase("loading");
-    setMode(method === "GET" ? "check" : "run");
-    setError(null);
-    setResult(null);
-    try {
-      const res = await fetch(`/api/admin/${ep.path}`, { method });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || (json && json.ok === false)) {
-        setError(
-          (json && (json.error || json.message)) || `HTTP ${res.status}`,
-        );
-        setResult(json);
-        setPhase("error");
-        return;
-      }
-      setResult(json);
-      setPhase("done");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setPhase("error");
-    }
-  }
-
+  const { phase, mode, result, error } = state;
   const busy = phase === "loading";
 
   return (
@@ -249,7 +221,7 @@ function EndpointRow({
               type="button"
               className="btn min-h-0 px-2.5 py-1.5 text-xs"
               disabled={busy}
-              onClick={() => call("GET")}
+              onClick={() => onCall(ep, "GET")}
             >
               {busy && mode === "check" ? "Checking…" : "Check"}
             </button>
@@ -263,7 +235,7 @@ function EndpointRow({
                 : "btn-primary",
             )}
             disabled={busy}
-            onClick={() => call("POST")}
+            onClick={() => onCall(ep, "POST")}
           >
             {busy && mode === "run" ? "Running…" : "Run"}
           </button>
@@ -301,12 +273,14 @@ function Group({
   title,
   note,
   endpoints,
-  confirm,
+  states,
+  onCall,
 }: {
   title: string;
   note: string;
   endpoints: MigrationEndpoint[];
-  confirm: ReturnType<typeof useConfirmDialog>["confirm"];
+  states: Record<string, RowState>;
+  onCall: (ep: MigrationEndpoint, method: "GET" | "POST") => void;
 }) {
   return (
     <div>
@@ -316,7 +290,12 @@ function Group({
       <p className="text-xs text-ink-400 mt-0.5 mb-1">{note}</p>
       <div>
         {endpoints.map((ep) => (
-          <EndpointRow key={ep.path} ep={ep} confirm={confirm} />
+          <EndpointRow
+            key={ep.path}
+            ep={ep}
+            state={states[ep.path] ?? IDLE}
+            onCall={onCall}
+          />
         ))}
       </div>
     </div>
@@ -325,6 +304,106 @@ function Group({
 
 export default function MaintenancePanel() {
   const { confirm, dialogProps } = useConfirmDialog();
+  const [states, setStates] = useState<Record<string, RowState>>({});
+  const [bulk, setBulk] = useState<null | "check" | "run">(null);
+
+  const setRow = useCallback((path: string, s: RowState) => {
+    setStates((prev) => ({ ...prev, [path]: s }));
+  }, []);
+
+  /**
+   * Fire a single endpoint. Returns true on success so bulk callers can
+   * stop early on failure. Skips the destructive confirm — callers gate
+   * that themselves (individual rows confirm per-endpoint; bulk never
+   * touches destructive endpoints).
+   */
+  const fire = useCallback(
+    async (ep: MigrationEndpoint, method: "GET" | "POST"): Promise<boolean> => {
+      const mode = method === "GET" ? "check" : "run";
+      setRow(ep.path, { phase: "loading", mode, result: null, error: null });
+      try {
+        const res = await fetch(`/api/admin/${ep.path}`, { method });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || (json && json.ok === false)) {
+          setRow(ep.path, {
+            phase: "error",
+            mode,
+            result: json,
+            error: (json && (json.error || json.message)) || `HTTP ${res.status}`,
+          });
+          return false;
+        }
+        setRow(ep.path, { phase: "done", mode, result: json, error: null });
+        return true;
+      } catch (err) {
+        setRow(ep.path, {
+          phase: "error",
+          mode,
+          result: null,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return false;
+      }
+    },
+    [setRow],
+  );
+
+  /** Per-row handler — adds the destructive confirm in front of POST. */
+  const onCall = useCallback(
+    async (ep: MigrationEndpoint, method: "GET" | "POST") => {
+      if (method === "POST" && ep.destructive) {
+        const ok = await confirm({
+          title: `Run "${ep.label}"?`,
+          description:
+            `This permanently DELETES rows from the production database and cannot be undone.\n\n${ep.detail}\n\nRun the Check (dry-run) first to preview exactly what would be removed.`,
+          danger: true,
+          confirmLabel: "Run cleanup",
+        });
+        if (!ok) return;
+      }
+      await fire(ep, method);
+    },
+    [confirm, fire],
+  );
+
+  /** Dry-run every GET-capable endpoint in parallel (always safe). */
+  const checkAll = useCallback(async () => {
+    setBulk("check");
+    const eps = [...SCHEMA_MIGRATIONS, ...BACKFILLS, ...CLEANUP].filter(
+      (e) => e.supportsGet,
+    );
+    await Promise.all(eps.map((e) => fire(e, "GET")));
+    setBulk(null);
+  }, [fire]);
+
+  /**
+   * Apply every schema migration sequentially. Idempotent + non-
+   * destructive, so this is safe to run on a fresh environment in one
+   * click. Stops at the first failure so a broken migration doesn't get
+   * masked by later successes. Backfills and destructive cleanups are
+   * deliberately excluded.
+   */
+  const runAllSchema = useCallback(async () => {
+    const ok = await confirm({
+      title: "Run all schema migrations?",
+      description:
+        `Sequentially applies all ${SCHEMA_MIGRATIONS.length} schema migrations. Each is idempotent — it checks for existence before writing, so re-running is a no-op and no data is deleted. Stops at the first failure.`,
+      confirmLabel: "Run all",
+    });
+    if (!ok) return;
+    setBulk("run");
+    for (const ep of SCHEMA_MIGRATIONS) {
+      const success = await fire(ep, "POST");
+      if (!success) break;
+    }
+    setBulk(null);
+  }, [confirm, fire]);
+
+  // Aggregate verdict after a bulk (or any) check/run.
+  const touched = Object.values(states);
+  const errors = touched.filter((s) => s.phase === "error").length;
+  const done = touched.filter((s) => s.phase === "done").length;
+  const busy = bulk !== null;
 
   return (
     <CollapsibleCard
@@ -332,23 +411,58 @@ export default function MaintenancePanel() {
       description="Run schema migrations, backfills and cleanups. Admin-only; safe ones are idempotent, destructive ones confirm first."
     >
       <div className="space-y-5">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="btn min-h-0 px-2.5 py-1.5 text-xs"
+              disabled={busy}
+              onClick={checkAll}
+            >
+              {bulk === "check" ? "Checking all…" : "Check all (dry-run)"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary min-h-0 px-2.5 py-1.5 text-xs"
+              disabled={busy}
+              onClick={runAllSchema}
+            >
+              {bulk === "run" ? "Running…" : "Run all schema migrations"}
+            </button>
+          </div>
+          {(done > 0 || errors > 0) && (
+            <p className="text-[0.7rem] font-semibold text-ink-500">
+              <span className="text-green-dark">{done} ok</span>
+              {errors > 0 && (
+                <>
+                  {" · "}
+                  <span className="text-flame-dark">{errors} failed</span>
+                </>
+              )}
+            </p>
+          )}
+        </div>
+
         <Group
           title="Schema migrations"
           note="Idempotent — each checks for existence before writing, so re-running is a no-op. Run once per environment if drizzle-kit push skipped the addition."
           endpoints={SCHEMA_MIGRATIONS}
-          confirm={confirm}
+          states={states}
+          onCall={onCall}
         />
         <Group
           title="Backfills"
           note="Mutate data but never delete. Idempotent and safe to re-run."
           endpoints={BACKFILLS}
-          confirm={confirm}
+          states={states}
+          onCall={onCall}
         />
         <Group
           title="Cleanup (destructive)"
           note="Permanently delete rows. Always run Check (dry-run) first to preview, then confirm the danger prompt."
           endpoints={CLEANUP}
-          confirm={confirm}
+          states={states}
+          onCall={onCall}
         />
       </div>
       <ConfirmDialog {...dialogProps} />
