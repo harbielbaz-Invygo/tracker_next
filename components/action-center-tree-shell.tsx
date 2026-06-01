@@ -2624,9 +2624,6 @@ function WaveSection({
   & BatchOpProps
   & UiStateProps
 ) {
-  // Pull the branded confirm/alert from the shell so this section can
-  // gate destructive bulk ops through ConfirmDialog instead of native.
-  const shell = useShell();
   // Expansion state is lifted to the top-level shell so router.refresh()
   // after a mutation doesn't collapse the wave the operator is working in.
   const expanded = expandedWaveIds.has(wave.id);
@@ -2708,32 +2705,10 @@ function WaveSection({
     }
   }
 
-  async function handleMarkAllDone(e: React.MouseEvent) {
-    // Stop the click from also toggling the wave's expanded state —
-    // the button is logically nested inside the toggle row.
-    e.stopPropagation();
-    const waiting = wave.actions.filter((a) => a.status === "waiting");
-    const ids = waiting.map((a) => a.id);
-    if (ids.length === 0) return;
-    // Audit 6 #1+#5 — branded confirm with the action labels listed so
-    // the operator can verify the set before flipping 10+ rows at once.
-    const ok = await shell.confirm({
-      title: `Mark ${ids.length} action${ids.length === 1 ? "" : "s"} done?`,
-      description:
-        `These ${ids.length} waiting External-Phase action${ids.length === 1 ? "" : "s"} will be marked done in this window. ` +
-        `Blocked rows are excluded — unblock them first if they should also flip.`,
-      previewItems: waiting.map((a) => a.doneLabel || a.actionTypeName),
-      previewLabel: "Actions to mark done",
-      confirmLabel: "Mark done",
-    });
-    if (ok) onBulkSetStatus(ids, "done");
-  }
-
   return (
     <section className="border border-ink-200 rounded-md bg-ink-50/30 overflow-hidden">
-      {/* Header row uses a wrapper <div> + nested <button> roles so we
-          can place an inline "Mark all done" affordance next to the
-          toggle without nesting <button>s (invalid HTML). */}
+      {/* Header row uses a wrapper <div> + nested <button> roles so the
+          collapsible toggle stays valid HTML. */}
       <div
         role="button"
         tabIndex={0}
@@ -2840,19 +2815,6 @@ function WaveSection({
               <span className="text-flame-dark ml-1">· {blockedCount} blocked</span>
             )}
           </span>
-        )}
-        {/* Wave-level bulk-apply: when expanded AND ≥ 1 waiting action,
-            give ops a one-click "all waiting → done" affordance. Hidden
-            on closed-status waves to avoid clutter. */}
-        {expanded && waitingCount > 0 && (
-          <button
-            type="button"
-            onClick={handleMarkAllDone}
-            onKeyDown={(e) => e.stopPropagation()}
-            className="ml-auto text-[0.7rem] px-2 py-0.5 rounded border border-green text-green-dark hover:bg-green-pale"
-          >
-            ✓ Mark all External-Phase actions done ({waitingCount})
-          </button>
         )}
       </div>
 
@@ -3631,11 +3593,12 @@ function BatchRow({
         // the External-Phase chip + flow-controls row has room to
         // breathe — the satellite metrics (📞 N · ↗ N · ⏱ Nd) plus the
         // bigger lg chip were wrapping onto two lines in the old width.
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_min(560px,55%)] min-h-[10rem]">
-          {/* LEFT — identity + meta. No colors line (intentionally
-              dropped from this view — the modal at intake captures it
-              and the dashboard surfaces it; here it crowded the row). */}
-          <div className="px-3 py-2 space-y-1 md:border-r border-ink-200">
+        <div>
+          {/* TOP — identity + meta (full width). No colors line
+              (intentionally dropped from this view — the modal at intake
+              captures it and the dashboard surfaces it; here it crowded
+              the row). */}
+          <div className="px-3 py-2 space-y-1 border-b border-ink-200">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
               <code className="text-[0.75rem] text-midnight font-mono font-semibold">{b.batchCode}</code>
               <span className="text-midnight font-medium">{b.modelYear}</span>
@@ -3729,13 +3692,15 @@ function BatchRow({
             </div>
           </div>
 
-          {/* RIGHT — actions stacked vertically. Closure cluster on
-              top (Shift / Cancel / Mark delivered), External-Phase
-              chips below in a single column so the eye scans the
-              chain top→bottom. Hidden once the batch is closed. */}
+          {/* BELOW — action cluster, full width. Closure controls
+              (Shift / Cancel / Mark delivered) laid inline, then the
+              External-Phase chips in a responsive multi-column grid so
+              they fill the window's width instead of stranding empty
+              space beside a narrow column. Hidden once the batch is
+              closed. */}
           {!closed && (
-            <div className="px-3 py-2 bg-ink-50/40 flex flex-col gap-1.5">
-              <div className="flex flex-col gap-1">
+            <div className="px-3 py-2 bg-ink-50/40 space-y-2">
+              <div className="flex flex-wrap gap-1.5">
                 {/* "Set Ops expected date" now lives at the wave
                     (delivery window) level — see the WaveSection
                     header. Per-batch Shift Date stays here for
@@ -3778,7 +3743,7 @@ function BatchRow({
               </div>
 
               {externalActions.length > 0 && (
-                <div className="flex flex-col gap-1.5 pt-1 border-t border-ink-200">
+                <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-1.5 pt-2 border-t border-ink-200">
                   {externalActions
                     .slice()
                     .sort((a, b) => a.sortOrder - b.sortOrder)
