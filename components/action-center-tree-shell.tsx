@@ -1241,7 +1241,13 @@ function PoDrawer({
           })()}
           <span className="text-ink-300 mx-1.5">·</span>
           <span className="tabular-nums">{po.waves.length} delivery window{po.waves.length === 1 ? "" : "s"}</span>
-          {po.nextAvailability && (() => {
+          {/* "Xd past first window" is a LIVE urgency metric (window date
+              vs today). It's meaningless — and misleading — once the PO
+              is closed: a PO delivered on its window date would still
+              read "16d past first window" today, looking late when it was
+              on time. Suppress it for closed POs (the closed summary
+              already shows the close date + end-to-end). */}
+          {!po.closedAt && po.nextAvailability && (() => {
             const today = todayIso();
             const days = Math.round(
               (new Date(po.nextAvailability).getTime() - new Date(today).getTime())
@@ -2711,7 +2717,7 @@ function WaveSection({
   }
 
   return (
-    <section className="border border-ink-200 rounded-md bg-ink-50/30 overflow-hidden">
+    <section className="border-2 border-ink-700 rounded-md bg-ink-50/30 overflow-hidden">
       {/* Header row uses a wrapper <div> + nested <button> roles so the
           collapsible toggle stays valid HTML. */}
       <div
