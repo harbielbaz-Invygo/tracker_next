@@ -888,6 +888,22 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       return computePoReliability(shaped).po.composite;
     })();
 
+    // PO-level close date — derived from the batches (the source of
+    // truth ops edits via the Action Center and Settings → Batches)
+    // rather than the standalone `pos.closedAt` column, which is NOT
+    // updated when a batch is marked delivered (/api/batch-action only
+    // writes batches.closedAt) or when its delivered date is edited in
+    // Settings. That left the PO header "✓ Closed" date and the
+    // "N days end-to-end" metric showing a stale/wrong date while the
+    // batch row showed the correct one. When every batch is closed the
+    // PO closed on the LATEST batch close date; otherwise fall back to
+    // the pos column.
+    const everyBatchClosed = rawBatchesUnderPo.length > 0
+      && rawBatchesUnderPo.every((b) => b.closedAt != null);
+    const poClosedAt = everyBatchClosed
+      ? (rawBatchesUnderPo.map((b) => b.closedAt as string).sort().at(-1) ?? null)
+      : (p.closedAt ?? null);
+
     const node: PoNode = {
       id:                   p.id,
       poNumber:             p.poNumber,
@@ -896,7 +912,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       contractLengthMonths: p.contractLengthMonths ?? null,
       buyBackRate:          p.buyBackRate ?? null,
       unitPriceSar:         p.unitPriceSar ?? null,
-      closedAt:             p.closedAt ?? null,
+      closedAt:             poClosedAt,
       totalCars,
       totalValueSar,
       nextAvailability,
