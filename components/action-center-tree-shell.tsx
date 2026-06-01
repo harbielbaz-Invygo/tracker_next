@@ -2653,6 +2653,138 @@ function VinChaseView({
           onCloseInlineForm={onCloseInlineForm}
         />
       ))}
+      {/* End-to-end retrospective — only renders once the PO is closed. */}
+      <ClosedPoRetrospective po={po} />
+    </div>
+  );
+}
+
+/**
+ * Closed-PO end-to-end retrospective — a compact, Insights-style recap
+ * rendered under the delivery windows once the PO is closed. Pulls from
+ * the batch data already on the node (no extra fetch): the reliability
+ * composite, end-to-end span, on-time vs the locked PO Expected baseline,
+ * the PO→App-listed lag, delivered cars, and the date-slip / customer-
+ * days impact rolled up from each batch's shift history.
+ */
+function ClosedPoRetrospective({ po }: { po: PoNode }) {
+  if (!po.closedAt) return null;
+  const allBatches = po.waves.flatMap((w) => w.batches);
+  if (allBatches.length === 0) return null;
+
+  const dayDiff = (a: string, b: string) =>
+    Math.round((new Date(a).getTime() - new Date(b).getTime()) / 86_400_000);
+
+  const delivered = allBatches.filter((b) => b.closureReason === "delivered");
+  const cancelled = allBatches.filter((b) => b.closureReason === "cancelled");
+  const requestedCars = allBatches.reduce((s, b) => s + b.requestedQuantity, 0);
+  const deliveredCars = allBatches.reduce((s, b) => s + (b.deliveredQuantity ?? 0), 0);
+
+  const e2eDays = po.poDate ? dayDiff(po.closedAt, po.poDate) : null;
+
+  // Worst lateness across delivered batches vs the locked baseline
+  // (PO Expected @ lock, falling back to the dealer-promised date).
+  let worstLate: number | null = null;
+  for (const b of delivered) {
+    if (!b.closedAt) continue;
+    const baseline = b.poExpectedDateAtLock ?? b.promisedDate;
+    if (!baseline) continue;
+    const late = dayDiff(b.closedAt, baseline);
+    worstLate = worstLate == null ? late : Math.max(worstLate, late);
+  }
+
+  const listedLag = po.appListingSummary.completedAt && po.poDate
+    ? dayDiff(localIsoDate(po.appListingSummary.completedAt), po.poDate)
+    : null;
+
+  let shiftCount = 0;
+  let custDaysLost = 0;
+  for (const b of allBatches) {
+    for (const s of b.shiftHistory) {
+      shiftCount++;
+      if (s.delayDays > 0) custDaysLost += (s.bookingsAtShift ?? 0) * s.delayDays;
+    }
+  }
+
+  const reliability = po.reliabilityScore;
+
+  return (
+    <section className="border-2 border-ink-700 rounded-md bg-white overflow-hidden">
+      <div className="px-3 py-2 border-b border-ink-200 bg-ink-50/50 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="text-sm font-bold text-midnight">📊 End-to-end retrospective</span>
+        <span className="text-[0.7rem] text-ink-500">how this PO actually played out</span>
+        {reliability != null && (
+          <span
+            className={cn(
+              "ml-auto text-[0.7rem] font-bold tabular-nums px-2 py-0.5 rounded-full border",
+              reliability >= 80 ? "border-green text-green-dark bg-green-pale"
+                : reliability >= 50 ? "border-gold text-gold-dark bg-gold-pale"
+                : "border-flame text-flame-dark bg-flame-pale",
+            )}
+            title="PO reliability composite (same metric as the Insights → PO Reliability tab)"
+          >
+            🎯 {Math.round(reliability)}% reliable
+          </span>
+        )}
+      </div>
+
+      <div className="p-3 grid gap-2 grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
+        <RetroStat label="End-to-end" value={e2eDays != null ? `${e2eDays}d` : "—"}
+                   hint="PO signed → delivered" />
+        <RetroStat
+          label="On-time"
+          value={worstLate == null ? "—" : worstLate <= 0 ? "On time" : `${worstLate}d late`}
+          tone={worstLate == null ? "neutral" : worstLate <= 0 ? "good" : "bad"}
+          hint="actual vs PO Expected @ lock"
+        />
+        <RetroStat label="Delivered" value={`${deliveredCars}/${requestedCars}`}
+                   tone={deliveredCars >= requestedCars ? "good" : "neutral"}
+                   hint={cancelled.length > 0 ? `${cancelled.length} batch${cancelled.length === 1 ? "" : "es"} cancelled` : "cars"} />
+        <RetroStat label="PO → Listed" value={listedLag != null ? `${listedLag}d` : "—"}
+                   hint="signing → in-app" />
+        <RetroStat label="Date slips" value={`${shiftCount}`}
+                   tone={shiftCount === 0 ? "good" : "neutral"}
+                   hint={shiftCount === 1 ? "revision" : "revisions"} />
+        <RetroStat label="Cust-days lost" value={`${custDaysLost}`}
+                   tone={custDaysLost === 0 ? "good" : "bad"}
+                   hint="Σ bookings × slip days" />
+      </div>
+
+      {/* Plan-vs-reality milestone line. */}
+      <div className="px-3 pb-3 -mt-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.7rem] text-ink-600">
+          {po.poDate && (<span className="tabular-nums">🖊 Signed {po.poDate}</span>)}
+          {po.appListingSummary.completedAt && (
+            <>
+              <span className="text-ink-300">→</span>
+              <span className="tabular-nums">📱 Listed {localIsoDate(po.appListingSummary.completedAt)}</span>
+            </>
+          )}
+          <span className="text-ink-300">→</span>
+          <span className="tabular-nums text-green-dark font-medium">✓ Closed {po.closedAt}</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function RetroStat({
+  label, value, hint, tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  tone?: "neutral" | "good" | "bad";
+}) {
+  const valueCls =
+    tone === "good" ? "text-green-dark" :
+    tone === "bad"  ? "text-flame-dark" :
+    "text-midnight";
+  return (
+    <div className="rounded-md border border-ink-200 bg-ink-50/40 px-2.5 py-1.5">
+      <p className="text-[0.6rem] font-medium uppercase tracking-wide text-ink-500">{label}</p>
+      <p className={cn("text-base font-bold tabular-nums leading-tight", valueCls)}>{value}</p>
+      {hint && <p className="text-[0.6rem] text-ink-400 leading-tight mt-0.5">{hint}</p>}
     </div>
   );
 }
@@ -2724,6 +2856,8 @@ function WaveSection({
   const opsProjectionSet = wave.opsExpectedDate != null
     && wave.opsExpectedDate !== wave.availabilityDate;
   const [showOpsDateForm, setShowOpsDateForm] = useState<boolean>(false);
+  // Ops Expected Date box starts collapsed — ops expands it on demand.
+  const [opsExpanded, setOpsExpanded] = useState<boolean>(false);
   const [opsDateBusy, setOpsDateBusy] = useState<boolean>(false);
   const [opsDateError, setOpsDateError] = useState<string | null>(null);
   const router = useRouter();
@@ -2896,51 +3030,73 @@ function WaveSection({
               batch via the Shift Date button on each row. Cascades to
               every open batch in the wave and locks each batch's
               `opsProjectedDeliveryDateAtLock` on the first set. */}
-          {!opsProjectionSet ? (
-            showOpsDateForm ? (
-              <WaveOpsDateForm
-                availabilityDate={wave.availabilityDate}
-                busy={opsDateBusy}
-                error={opsDateError}
-                onSubmit={submitWaveOpsDate}
-                onCancel={() => { setShowOpsDateForm(false); setOpsDateError(null); }}
-              />
-            ) : (
-              <div className="border-2 border-dashed border-brand rounded-md bg-brand-pastel/20 px-3 py-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                <span className="text-[0.7rem] font-medium text-brand-dark">
-                  📌 Ops Expected Date — not set yet
+          {/* Collapsible — starts collapsed; the header line always shows
+              the date status, the body (Set CTA / form / detail) reveals
+              on expand. The form forces the body open while it's active. */}
+          <div className={cn(
+            "rounded-md",
+            opsProjectionSet
+              ? "border border-brand/40 bg-brand-pastel/30"
+              : "border-2 border-dashed border-brand bg-brand-pastel/20",
+          )}>
+            <button
+              type="button"
+              onClick={() => setOpsExpanded((v) => !v)}
+              aria-expanded={opsExpanded}
+              className="w-full px-3 py-2 flex items-center gap-2 text-left hover:bg-brand-pastel/40 rounded-md"
+            >
+              <span aria-hidden className="text-brand-dark text-xs">{opsExpanded ? "▾" : "▸"}</span>
+              <span className="text-[0.7rem] font-medium text-brand-dark">📌 Ops Expected Date</span>
+              <span className="text-[0.65rem] tabular-nums text-midnight">
+                {opsProjectionSet ? wave.opsExpectedDate : "— not set yet"}
+              </span>
+              {!opsExpanded && !showOpsDateForm && (
+                <span className="ml-auto text-[0.6rem] text-brand-dark/70 italic">
+                  {opsProjectionSet ? "click to view" : "click to set"}
                 </span>
-                <span className="text-[0.65rem] text-ink-600">
-                  PO Expected Date: <span className="text-midnight tabular-nums">{wave.availabilityDate}</span>
-                </span>
-                <span className="text-[0.65rem] text-ink-500 italic">
-                  Signals Internal Phase — App listing targets this date.
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowOpsDateForm(true)}
-                  className="ml-auto text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark bg-white hover:bg-brand-pastel"
-                >
-                  Set Ops Expected Date →
-                </button>
+              )}
+            </button>
+            {(opsExpanded || showOpsDateForm) && (
+              <div className="px-3 pb-2">
+                {!opsProjectionSet ? (
+                  showOpsDateForm ? (
+                    <WaveOpsDateForm
+                      availabilityDate={wave.availabilityDate}
+                      busy={opsDateBusy}
+                      error={opsDateError}
+                      onSubmit={submitWaveOpsDate}
+                      onCancel={() => { setShowOpsDateForm(false); setOpsDateError(null); }}
+                    />
+                  ) : (
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                      <span className="text-[0.65rem] text-ink-600">
+                        PO Expected Date: <span className="text-midnight tabular-nums">{wave.availabilityDate}</span>
+                      </span>
+                      <span className="text-[0.65rem] text-ink-500 italic">
+                        Signals Internal Phase — App listing targets this date.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowOpsDateForm(true)}
+                        className="ml-auto text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark bg-white hover:bg-brand-pastel"
+                      >
+                        Set Ops Expected Date →
+                      </button>
+                    </div>
+                  )
+                ) : (
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[0.7rem]">
+                    <span className="text-ink-500">
+                      PO Expected Date <span className="tabular-nums text-midnight">{wave.availabilityDate}</span>
+                    </span>
+                    <span className="text-ink-500 italic">
+                      Per-batch shifts adjust individual batches; the window-level commitment is the baseline.
+                    </span>
+                  </div>
+                )}
               </div>
-            )
-          ) : (
-            <div className="border border-brand/40 rounded-md bg-brand-pastel/30 px-3 py-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[0.7rem]">
-              <span className="font-medium text-brand-dark">
-                📌 Ops Expected Date
-              </span>
-              <span className="tabular-nums text-midnight font-medium">
-                {wave.opsExpectedDate}
-              </span>
-              <span className="text-ink-500">
-                · PO Expected Date <span className="tabular-nums text-midnight">{wave.availabilityDate}</span>
-              </span>
-              <span className="text-ink-500 italic ml-auto">
-                Per-batch shifts adjust individual batches; the window-level commitment is the baseline.
-              </span>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* Shift-history audit trail for this delivery window. The
               window-level bulk-action box ("WINDOW") was removed —
