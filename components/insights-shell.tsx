@@ -1274,8 +1274,19 @@ function OpsTab({
 }) {
   return (
     <div className="space-y-5">
+      {/* Audit 2 #3 — Departments row carries an internal/external
+          phase split so a dept lead can see which side of the
+          handoff is failing without doing the math from Action
+          Center themselves. Stakeholders intentionally don't get
+          the split (the role view is about who, not which phase). */}
       <PerfTable title="Departments" rows={depts.map((d) => ({
         primary: d.name, secondary: null, row: d, key: `d-${d.id}`,
+        phaseSplit: {
+          internalOnTime: d.internal.onTimeRate,
+          internalTotal:  d.internal.totalActions,
+          externalOnTime: d.external.onTimeRate,
+          externalTotal:  d.external.totalActions,
+        },
       }))} />
       <PerfTable title="Stakeholders" rows={stakeholders.map((s) => ({
         primary: s.name, secondary: s.departmentName, row: s, key: `s-${s.id}`,
@@ -1289,6 +1300,18 @@ interface PerfRow {
   primary: string;
   secondary: string | null;
   row: DepartmentRow | StakeholderRow;
+  /**
+   * Audit 2 #3 — optional internal/external phase split rendered as a
+   * small caption under the on-time cell. Only populated for
+   * Department rows; stakeholder rows leave this undefined and the
+   * cell renders unchanged.
+   */
+  phaseSplit?: {
+    internalOnTime: number | null;
+    internalTotal:  number;
+    externalOnTime: number | null;
+    externalTotal:  number;
+  };
 }
 function PerfTable({ title, rows }: { title: string; rows: PerfRow[] }) {
   return (
@@ -1315,7 +1338,7 @@ function PerfTable({ title, rows }: { title: string; rows: PerfRow[] }) {
                   No data yet.
                 </td>
               </tr>
-            ) : rows.map(({ key, primary, secondary, row }) => (
+            ) : rows.map(({ key, primary, secondary, row, phaseSplit }) => (
               <tr key={key} className="border-b border-ink-200/60 last:border-b-0">
                 <Td>
                   <div className="font-medium text-midnight">{primary}</div>
@@ -1333,6 +1356,7 @@ function PerfTable({ title, rows }: { title: string; rows: PerfRow[] }) {
                           : row.onTimeRate >= 75 ? "text-gold-dark"
                           : "text-flame-dark",
                       )}>{row.onTimeRate}%</span>}
+                  {phaseSplit && <PhaseSplitCaption split={phaseSplit} />}
                 </Td>
                 <Td align="right" tabular><DelayValue days={row.avgDelayDays} /></Td>
                 <Td align="right" tabular><DelayValue days={row.worstDelayDays} bold /></Td>
@@ -1356,6 +1380,54 @@ function DelayValue({ days, bold = false }: { days: number | null; bold?: boolea
   const cls = days > 0 ? "text-flame-dark" : "text-green-dark";
   const text = days > 0 ? `+${days}d` : `${days}d`;
   return <span className={cn(cls, bold && "font-semibold")}>{text}</span>;
+}
+
+/**
+ * Audit 2 #3 — small two-line caption rendered under a department's
+ * blended on-time rate showing the internal vs external split.
+ * Each side is tone-coloured the same way as the headline so the eye
+ * can spot a green-headline-with-red-external mismatch immediately
+ * (the "we look fine overall but our external side is failing" signal).
+ *
+ * Hidden when neither phase has any action data — keeps the cell
+ * compact for departments that haven't accumulated activity yet.
+ */
+function PhaseSplitCaption({
+  split,
+}: {
+  split: {
+    internalOnTime: number | null;
+    internalTotal:  number;
+    externalOnTime: number | null;
+    externalTotal:  number;
+  };
+}) {
+  if (split.internalTotal === 0 && split.externalTotal === 0) return null;
+  const toneCls = (rate: number | null) =>
+    rate == null   ? "text-ink-400"
+    : rate >= 90   ? "text-green-dark"
+    : rate >= 75   ? "text-gold-dark"
+    : "text-flame-dark";
+  const cell = (label: string, rate: number | null, total: number) => {
+    if (total === 0) return <span className="text-ink-300">{label} —</span>;
+    return (
+      <span
+        className={cn("font-medium", toneCls(rate))}
+        title={`${label} phase — ${total} action${total === 1 ? "" : "s"}${
+          rate == null ? "" : `, ${rate}% on-time`
+        }`}
+      >
+        {label} {rate == null ? "—" : `${rate}%`}
+      </span>
+    );
+  };
+  return (
+    <div className="text-[0.6rem] text-ink-500 mt-0.5 tabular-nums flex gap-1.5 justify-end">
+      {cell("i", split.internalOnTime, split.internalTotal)}
+      <span className="text-ink-300">·</span>
+      {cell("e", split.externalOnTime, split.externalTotal)}
+    </div>
+  );
 }
 
 /**
