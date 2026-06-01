@@ -147,8 +147,58 @@ type Selection =
   | { kind: "po"; poId: number }
   | { kind: "mine" };
 
+// Drag-to-resize bounds for the left PO-tree pane. Persisted width is
+// clamped to this range so neither pane can collapse past usefulness.
+const TREE_W_KEY = "ac-tree-width";
+const TREE_W_DEFAULT = 320;
+const TREE_W_MIN = 240;
+const TREE_W_MAX = 560;
+
 export default function ActionCenterTreeShell({ tree }: Props) {
   const router = useRouter();
+
+  // ── Drag-to-resize the split between the PO tree and the detail
+  // pane. Width persists in localStorage so ops keeps their preferred
+  // split across sessions; double-clicking the handle resets it.
+  const [treeWidth, setTreeWidth] = useState<number>(TREE_W_DEFAULT);
+  const [resizingTree, setResizingTree] = useState<boolean>(false);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(TREE_W_KEY);
+      if (stored) {
+        const n = parseInt(stored, 10);
+        if (!Number.isNaN(n) && n >= TREE_W_MIN && n <= TREE_W_MAX) setTreeWidth(n);
+      }
+    } catch { /* private mode / SSR */ }
+  }, []);
+  useEffect(() => {
+    try { window.localStorage.setItem(TREE_W_KEY, String(treeWidth)); } catch { /* ignore */ }
+  }, [treeWidth]);
+
+  function startTreeResize(e: React.MouseEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = treeWidth;
+    setResizingTree(true);
+    function onMove(ev: MouseEvent) {
+      const next = Math.min(
+        TREE_W_MAX,
+        Math.max(TREE_W_MIN, startWidth + (ev.clientX - startX)),
+      );
+      setTreeWidth(next);
+    }
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setResizingTree(false);
+    }
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
 
   // Selection: a PO, or the "Mine" cross-PO inbox. Defaults to Mine
   // so ops lands on their own pending work first instead of an
@@ -593,7 +643,31 @@ export default function ActionCenterTreeShell({ tree }: Props) {
     }}>
     <ConfirmDialog {...dialogProps} />
     <InputDialog   {...inputProps} />
-    <div className="relative grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]">
+    <div
+      className="relative grid grid-cols-1 lg:grid-cols-[var(--ac-tree-w,320px)_1fr] gap-4 h-[min(80vh,860px)] min-h-[520px]"
+      style={{ "--ac-tree-w": `${treeWidth}px` } as React.CSSProperties}
+    >
+      {/* Drag-to-resize the PO-tree ↔ detail split. lg+ only (the panes
+          stack on small screens). Sits centred in the 1rem gap between
+          the two columns; double-click resets to the default width. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize panels"
+        aria-valuemin={TREE_W_MIN}
+        aria-valuemax={TREE_W_MAX}
+        aria-valuenow={treeWidth}
+        title={`Drag to resize · double-click to reset (${treeWidth}px)`}
+        onMouseDown={startTreeResize}
+        onDoubleClick={() => setTreeWidth(TREE_W_DEFAULT)}
+        style={{ left: "calc(var(--ac-tree-w,320px) + 8px)" }}
+        className={cn(
+          "hidden lg:block absolute top-0 z-10 h-full w-2 -ml-1 rounded cursor-col-resize select-none",
+          "hover:bg-brand/40 active:bg-brand/60 transition-colors",
+          resizingTree && "bg-brand/60",
+        )}
+      />
+
       {/* Floating help button — bottom-right of the grid container. */}
       <button
         type="button"
