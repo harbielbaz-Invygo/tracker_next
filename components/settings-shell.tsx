@@ -17,6 +17,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { SettingsData, SettingsUser, AlertRuleSetting } from "@/lib/settings-data";
 import SettingsBatches from "./settings-batches";
+import MaintenancePanel from "./settings-maintenance";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -39,6 +40,7 @@ export default function SettingsShell({ data, currentUserId }: Props) {
       <AlertRulesEditor data={data} />
       <UsersEditor users={data.users} currentUserId={currentUserId} />
       <SettingsBatches data={data} />
+      <MaintenancePanel />
     </div>
   );
 }
