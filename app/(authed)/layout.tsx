@@ -24,7 +24,7 @@ export default async function AuthedLayout({ children }: { children: React.React
             full-width brand block. pointer-events-none so the text
             overlay never intercepts clicks on header controls beneath
             it; the page subtitle sits on a lower line, so no overlap. */}
-        <div className="pointer-events-none absolute right-8 top-6 z-10 hidden sm:block">
+        <div className="pointer-events-none absolute right-8 top-6 z-10 hidden xl:block">
           <BrandHeader />
         </div>
         {children}
