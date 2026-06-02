@@ -20,6 +20,7 @@ import {
   batchForecasts, users,
 } from "@/lib/db/schema";
 import { computePoReliability, type ReliabilityBatch } from "@/lib/po-reliability";
+import { runAlertEngine, highestSeverity, type ActiveAlert, type AlertsByBatch } from "@/lib/alert-engine";
 
 type BatchRow = typeof batches.$inferSelect;
 
@@ -269,6 +270,8 @@ export interface BatchNode {
     bookingsAtShift: number;
   }[];
   actions:            ScopedActionDetail[]; // scope='batch' for this batch
+  /** Active (unresolved) alerts raised by the alert engine for this batch. */
+  alerts:             ActiveAlert[];
 }
 
 export interface WaveNode {
@@ -280,6 +283,9 @@ export interface WaveNode {
   actions:            ScopedActionDetail[]; // scope='wave' for this wave
   /** Batches landing in this wave. */
   batches:            BatchNode[];
+  /** Alert roll-up across this window's batches. */
+  alertCount:         number;
+  highestAlertSeverity: ActiveAlert["severity"] | null;
 }
 
 export interface PoNode {
@@ -337,6 +343,9 @@ export interface PoNode {
    * Reliability tab uses.
    */
   reliabilityScore:    number | null;
+  /** Alert roll-up across all of this PO's batches (every window). */
+  alertCount:          number;
+  highestAlertSeverity: ActiveAlert["severity"] | null;
   /**
    * True when this node is a virtual stand-in for a Pre-PO (Forecast)
    * batch — no real PO exists yet, so the drawer hides the Internal /
@@ -443,7 +452,7 @@ export interface ActionTouchpoint {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, alertsByBatch] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     fetchBatchesTolerant(),
@@ -559,6 +568,18 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           }[];
         }
         throw err;
+      }
+    })(),
+    // Alert engine — evaluates admin alert rules against open batches on
+    // every Action Center load (writes/auto-resolves the `alerts` table)
+    // and returns active alerts grouped by batchId. Defensive: never let
+    // an alert failure 500 the whole page.
+    (async (): Promise<AlertsByBatch> => {
+      try { return await runAlertEngine(); }
+      catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[action-center-tree-data] alert engine failed — continuing without alerts:", err);
+        return new Map();
       }
     })(),
   ]);
@@ -788,8 +809,10 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           shiftHistory:                  shiftHistoryByBatch.get(b.id) ?? [],
           legs:                          legsByBatch.get(b.id) ?? [],
           actions:            actionsByKey.get(`batch:${b.id}`) ?? [],
+          alerts:             alertsByBatch.get(b.id) ?? [],
         };
       });
+      const waveAlerts = wBatches.flatMap((b) => b.alerts);
       return {
         id:               w.id,
         availabilityDate: w.availabilityDate,
@@ -798,6 +821,8 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         closedAt:         w.closedAt ?? null,
         actions:          actionsByKey.get(`wave:${w.id}`) ?? [],
         batches:          wBatches,
+        alertCount:           waveAlerts.length,
+        highestAlertSeverity: highestSeverity(waveAlerts),
       };
     });
 
@@ -904,6 +929,9 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       ? (rawBatchesUnderPo.map((b) => b.closedAt as string).sort().at(-1) ?? null)
       : (p.closedAt ?? null);
 
+    // Alert roll-up across every batch in every window under this PO.
+    const poAlerts = wavesForPo.flatMap((w) => w.batches.flatMap((b) => b.alerts));
+
     const node: PoNode = {
       id:                   p.id,
       poNumber:             p.poNumber,
@@ -927,6 +955,8 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       daysSinceSubmission,
       daysToListed,
       reliabilityScore,
+      alertCount:           poAlerts.length,
+      highestAlertSeverity: highestSeverity(poAlerts),
       isPrePo:      false,
       prePoBatchId: null,
       prePoSummary: null,
@@ -1022,6 +1052,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
   for (const b of prePoBatches) {
     const batchActions = actionsByKey.get(`batch:${b.id}`) ?? [];
     const summary = prePoForecastIndex.get(b.id) ?? null;
+    const prePoAlerts = alertsByBatch.get(b.id) ?? [];
     const virtualPoNode: PoNode = {
       // Use a negative id derived from the batch id so it can never
       // collide with a real `pos.id` (autoincrement is always > 0).
@@ -1050,6 +1081,8 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       daysSinceSubmission: null,
       daysToListed:        null,
       reliabilityScore:    null,
+      alertCount:           prePoAlerts.length,
+      highestAlertSeverity: highestSeverity(prePoAlerts),
       isPrePo:             true,
       prePoBatchId:        b.id,
       prePoSummary: {
