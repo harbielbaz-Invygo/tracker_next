@@ -829,6 +829,37 @@ interface UiStateProps {
 // Left panel — Dealer → PO tree
 // ─────────────────────────────────────────────────────────────
 
+type PoStatusFilter = "all" | "active" | "completed" | "cancelled" | "partly";
+
+/**
+ * Bucket a PO for the status quick-filter:
+ *   active     — not yet closed (open, or a Pre-PO bet)
+ *   cancelled  — closed with every batch cancelled
+ *   completed  — closed with every batch delivered in full
+ *   partly     — closed but mixed (some cancelled, or partial deliveries)
+ */
+function poStatusBucket(po: PoNode): Exclude<PoStatusFilter, "all"> {
+  if (!po.closedAt) return "active";
+  const batches = po.waves.flatMap((w) => w.batches);
+  if (batches.length === 0) return "active";
+  const delivered = batches.filter((b) => b.closureReason === "delivered");
+  const cancelled = batches.filter((b) => b.closureReason === "cancelled");
+  if (cancelled.length === batches.length) return "cancelled";
+  const fullyDelivered = cancelled.length === 0
+    && delivered.length === batches.length
+    && delivered.every((b) => (b.deliveredQuantity ?? 0) >= b.requestedQuantity);
+  if (fullyDelivered) return "completed";
+  return "partly";
+}
+
+const PO_STATUS_FILTERS: { value: PoStatusFilter; label: string; title: string }[] = [
+  { value: "active",    label: "Active",    title: "Open POs still in progress (incl. Pre-PO bets)" },
+  { value: "all",       label: "All",       title: "Every PO" },
+  { value: "completed", label: "Completed", title: "Closed — every batch delivered in full" },
+  { value: "partly",    label: "Partly",    title: "Closed — partly delivered (mixed / partial)" },
+  { value: "cancelled", label: "Cancelled", title: "Closed — every batch cancelled" },
+];
+
 function DealerTree({
   tree, selection, onSelectPo, onSelectMine,
 }: {
@@ -847,6 +878,9 @@ function DealerTree({
   // toggle. Both are local UI state — no need to persist for now.
   const [query, setQuery] = useState<string>("");
   const [sortMode, setSortMode] = useState<"alpha" | "overdue">("alpha");
+  // Status quick-filter. Defaults to "active" so ops lands on in-progress
+  // POs; closed/cancelled ones are a click away.
+  const [statusFilter, setStatusFilter] = useState<PoStatusFilter>("active");
 
   // Memoised so we don't recompute on every render — same value for
   // the whole session view (overdue is a date-only comparison).
@@ -891,8 +925,10 @@ function DealerTree({
       }
       return false;
     };
+    const matchStatus = (p: PoNode) =>
+      statusFilter === "all" || poStatusBucket(p) === statusFilter;
     return tree.dealers
-      .map((d) => ({ ...d, pos: d.pos.filter((p) => matchPo(p, d.name)) }))
+      .map((d) => ({ ...d, pos: d.pos.filter((p) => matchPo(p, d.name) && matchStatus(p)) }))
       .filter((d) => d.pos.length > 0)
       .map((d) => {
         if (sortMode === "overdue") {
@@ -905,7 +941,7 @@ function DealerTree({
         }
         return d;
       });
-  }, [tree.dealers, q, sortMode, today]);
+  }, [tree.dealers, q, sortMode, today, statusFilter]);
 
   return (
     <aside className="border border-ink-200 rounded-lg bg-white overflow-hidden flex flex-col">
@@ -940,6 +976,26 @@ function DealerTree({
             {sortMode === "alpha" ? "A→Z" : "⚠ Overdue"}
           </button>
         </div>
+        {/* Status quick-filter — show/hide POs by lifecycle outcome. */}
+        <div className="flex flex-wrap items-center gap-1">
+          {PO_STATUS_FILTERS.map(({ value, label, title }) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setStatusFilter(value)}
+              aria-pressed={statusFilter === value}
+              title={title}
+              className={cn(
+                "text-[0.65rem] px-2 py-0.5 rounded-full border whitespace-nowrap transition-colors",
+                statusFilter === value
+                  ? "border-brand text-brand-dark bg-brand-pastel/60 font-semibold"
+                  : "border-ink-300 text-ink-600 hover:bg-ink-50",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </header>
 
       {/* "Mine" cross-PO inbox — lives at the top of the tree as a
@@ -968,6 +1024,11 @@ function DealerTree({
       </button>
 
       <ul className="flex-1 overflow-auto">
+        {filteredDealers.length === 0 && (
+          <li className="px-3 py-4 text-xs text-ink-500 italic">
+            No POs match {query ? "the search" : `the "${PO_STATUS_FILTERS.find((f) => f.value === statusFilter)?.label}" filter`}.
+          </li>
+        )}
         {filteredDealers.map((d) => {
           const expanded = expandedDealers.has(d.id);
           return (
