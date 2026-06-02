@@ -93,6 +93,9 @@ export async function POST(req: NextRequest) {
   // Cascade result — set inside the transaction, read after.
   let waveClosedFromCascade = false;
   let poClosedFromCascade   = false;
+  // Wave-scope External-Phase rows the closure cascade settled when
+  // this delivery completed the window (see lib/closure-cascade.ts).
+  let reconciledWaveActionIds: number[] = [];
 
   await db.transaction(async (tx) => {
     // 1. Close the batch.
@@ -357,6 +360,7 @@ export async function POST(req: NextRequest) {
       const cascade = await cascadeBatchClosureUp(tx, body.batchId, new Date().toISOString());
       waveClosedFromCascade = cascade.waveClosed;
       poClosedFromCascade = cascade.poClosed;
+      reconciledWaveActionIds = cascade.reconciledWaveActionIds;
     } catch (err) {
       // The cascade is best-effort: a missing waves/pos row (legacy
       // batch with no wave linkage, or a corrupt FK) shouldn't fail
@@ -377,6 +381,7 @@ export async function POST(req: NextRequest) {
     closureReason: body.reason,
     waveClosed: waveClosedFromCascade,
     poClosed:   poClosedFromCascade,
+    reconciledWaveActionIds,
     ...(remainderBatchId != null ? { remainderBatchId } : {}),
   });
 }

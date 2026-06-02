@@ -126,10 +126,16 @@ export async function PATCH(req: NextRequest) {
       }
     }
     // After the batch's closedAt changed, propagate to wave + PO.
-    // Same transaction so a half-cascaded state is impossible.
+    // Same transaction so a half-cascaded state is impossible. The
+    // cascade also reconciles the wave's bulk roll-up External-Phase
+    // actions when this delivery closes the last open batch in the
+    // wave (see lib/closure-cascade.ts) — without that, a fully
+    // delivered window keeps stale "waiting" wave-scope rows.
+    let reconciledWaveActionIds: number[] = [];
     if (batchClosureMutated) {
       try {
-        await cascadeBatchClosureUp(tx, current.scopeId, nowIso);
+        const cascade = await cascadeBatchClosureUp(tx, current.scopeId, nowIso);
+        reconciledWaveActionIds = cascade.reconciledWaveActionIds;
       } catch (err) {
         // Best-effort — don't fail the status flip if the cascade
         // can't reach a parent (orphan batch / corrupt FK).
@@ -201,7 +207,7 @@ export async function PATCH(req: NextRequest) {
       }
     }
 
-    return { autoUnblockedIds, cascadeRevertedIds, waveToBatchPropagatedIds };
+    return { autoUnblockedIds, cascadeRevertedIds, waveToBatchPropagatedIds, reconciledWaveActionIds };
   });
 
   return NextResponse.json({
@@ -212,5 +218,6 @@ export async function PATCH(req: NextRequest) {
     autoUnblockedIds:        cascadeResult.autoUnblockedIds,
     cascadeRevertedIds:      cascadeResult.cascadeRevertedIds,
     waveToBatchPropagatedIds: cascadeResult.waveToBatchPropagatedIds,
+    reconciledWaveActionIds:  cascadeResult.reconciledWaveActionIds,
   });
 }
