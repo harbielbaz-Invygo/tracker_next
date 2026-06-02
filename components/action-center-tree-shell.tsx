@@ -3052,12 +3052,18 @@ function WaveSection({
         >
           {waveDone}/{waveTotal} done
         </span>
-        {/* Per-window countdown — days until / past this window's date. */}
+        {/* Per-window countdown — days until / past this window's date.
+            Rendered as a prominent pill so the timing reads at a glance:
+            flame when overdue, gold for today, brand for upcoming. */}
         {!windowClosed && (
           <span
             className={cn(
-              "text-[0.65rem] font-medium tabular-nums",
-              windowDaysDelta < 0 ? "text-flame-dark" : "text-ink-600",
+              "text-sm font-bold tabular-nums px-2.5 py-0.5 rounded-full border",
+              windowDaysDelta < 0
+                ? "border-flame text-flame-dark bg-flame-pale"
+                : windowDaysDelta === 0
+                  ? "border-gold text-gold-dark bg-gold-pale"
+                  : "border-brand text-brand-dark bg-brand-pastel/60",
             )}
             title="Days until (or past) this window's expected date"
           >
