@@ -1259,35 +1259,9 @@ function PoDrawer({
           })()}
           <span className="text-ink-300 mx-1.5">·</span>
           <span className="tabular-nums">{po.waves.length} delivery window{po.waves.length === 1 ? "" : "s"}</span>
-          {/* "Xd past first window" is a LIVE urgency metric (window date
-              vs today). It's meaningless — and misleading — once the PO
-              is closed: a PO delivered on its window date would still
-              read "16d past first window" today, looking late when it was
-              on time. Suppress it for closed POs (the closed summary
-              already shows the close date + end-to-end). */}
-          {!po.closedAt && po.nextAvailability && (() => {
-            const today = todayIso();
-            const days = Math.round(
-              (new Date(po.nextAvailability).getTime() - new Date(today).getTime())
-              / (24 * 60 * 60 * 1000),
-            );
-            const txt = days < 0
-              ? `${-days}d past first window`
-              : days === 0
-                ? "first window today"
-                : `in ${days}d`;
-            return (
-              <>
-                <span className="text-ink-300 mx-1.5">·</span>
-                <span className={cn(
-                  "tabular-nums",
-                  days < 0 ? "text-flame-dark font-medium" : "text-ink-600",
-                )}>
-                  📅 {txt}
-                </span>
-              </>
-            );
-          })()}
+          {/* The "in Nd / Nd past window" countdown moved to each delivery
+              window header (it's inherently per-window) — removed from the
+              PO header to keep it PO-level. */}
           {po.contractLengthMonths && (
             <>
               <span className="text-ink-300 mx-1.5">·</span>
