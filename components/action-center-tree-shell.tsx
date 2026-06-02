@@ -1501,19 +1501,19 @@ function MineView({
             };
           }
 
-          // Drop settled windows from the inbox: a window that is fully
-          // closed (PO closed, wave closed, or every batch delivered/
-          // cancelled) AND has no pending work left is a finished
-          // outcome, not something "sitting" — keeping it clutters
-          // "All pending" (e.g. a delivered-in-full PO). Idle but still
-          // OPEN windows are intentionally kept so ops can see where
-          // deliveries are sitting; only closed + empty rows drop off.
-          const noPending = internalPending.length === 0 && externalPending.length === 0;
+          // Drop settled windows from the inbox. A window is settled when
+          // it's fully closed — PO closed, wave closed, or every batch
+          // delivered/cancelled. We drop it regardless of any remaining
+          // "pending" actions, because the wave-scope External-Phase rows
+          // are a bulk layer that ISN'T marked done when a batch delivers,
+          // so a delivered window would otherwise linger in "All pending"
+          // showing a stale "Awaiting VIN" head. Idle-but-OPEN windows are
+          // still kept so ops sees where deliveries are sitting.
           const windowClosed =
             p.closedAt != null ||
             w.closedAt != null ||
             (w.batches.length > 0 && w.batches.every((b) => b.closedAt != null));
-          if (noPending && windowClosed) continue;
+          if (windowClosed) continue;
 
           acc.push({
             poId:        p.id,
