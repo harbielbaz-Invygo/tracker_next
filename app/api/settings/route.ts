@@ -686,7 +686,7 @@ async function handleUser(b: Extract<Body, { resource: "user" }>, callerId: numb
 // Alert rules
 // ──────────────────────────────────────────────────────────────────
 
-const VALID_TRIGGER_TYPES = ["no_vin_before_avail", "action_overdue", "action_pending_before_avail"] as const;
+const VALID_TRIGGER_TYPES = ["no_vin_before_avail", "action_overdue", "action_pending_before_avail", "listing_overdue"] as const;
 const VALID_SEVERITIES    = ["critical", "high", "medium", "info"] as const;
 
 async function handleAlertRule(b: Extract<Body, { resource: "alert-rule" }>) {
