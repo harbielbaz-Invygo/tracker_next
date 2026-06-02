@@ -2820,9 +2820,15 @@ type PerfAgg = { name: string; done: number; onTime: number; late: number };
 
 /**
  * Department & stakeholder performance for a closed PO — who moved the
- * work and how on-time they were. Rolls up every (PO + wave + batch)
- * action by department and by stakeholder: how many they completed, and
- * of those with a planned date, how many landed on/before it vs late.
+ * work and how on-time they were. Rolls up the actionable work units by
+ * department and by stakeholder: how many they completed, and of those
+ * with a planned date, how many landed on/before it vs late.
+ *
+ * Counts PO-scope Internal-Phase actions + each batch's own External-
+ * Phase rows. The wave-scope external copies are deliberately EXCLUDED:
+ * they're the bulk/roll-up layer mirroring the per-batch rows, so
+ * counting both would credit each external step once per batch PLUS once
+ * at wave level. This matches the window progress count (batches × steps).
  * Renders under the retrospective; closed POs only.
  */
 function PoDeptStakeholderPerformance({ po }: { po: PoNode }) {
@@ -2830,7 +2836,7 @@ function PoDeptStakeholderPerformance({ po }: { po: PoNode }) {
 
   const allActions: ScopedActionDetail[] = [
     ...po.actions,
-    ...po.waves.flatMap((w) => [...w.actions, ...w.batches.flatMap((b) => b.actions)]),
+    ...po.waves.flatMap((w) => w.batches.flatMap((b) => b.actions)),
   ].filter((a) => a.id >= 0 && a.actionTypeName !== "Delivery");
 
   if (allActions.length === 0) return null;
