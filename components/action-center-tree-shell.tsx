@@ -23,7 +23,10 @@ import type {
   DepartmentCatalog, ActionTouchpoint,
 } from "@/lib/action-center-tree-data";
 import { augmentActions, type Touchpoint } from "@/lib/action-flow-shared";
-import { highestSeverity, type ActiveAlert } from "@/lib/alert-engine";
+// Type-only import — alert-engine.ts pulls in the server `db`, so a value
+// import would drag it into this client bundle. Severities are rolled up
+// with the local `maxSeverity` helper instead.
+import type { ActiveAlert } from "@/lib/alert-engine";
 import ConfirmDialog from "./confirm-dialog";
 import InputDialog from "./input-dialog";
 import { useConfirmDialog } from "./use-confirm-dialog";
@@ -4075,7 +4078,7 @@ function BatchRow({
               <span className="text-midnight font-medium">{b.modelYear}</span>
               <span className="text-ink-300">·</span>
               <span className="tabular-nums">{b.requestedQuantity} cars</span>
-              <AlertBadge count={b.alerts.length} severity={highestSeverity(b.alerts)} alerts={b.alerts} />
+              <AlertBadge count={b.alerts.length} severity={maxSeverity(b.alerts.map((a) => a.severity))} alerts={b.alerts} />
               {(vinsPartial || vinsAllIn) && (
                 <span className={cn(
                   "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",
