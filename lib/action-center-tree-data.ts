@@ -105,6 +105,43 @@ async function fetchConfirmedQtyByBatch(): Promise<Map<number, number>> {
   }
 }
 
+/**
+ * SLA clock starts, keyed by action id. `actions.sla_started_at` lives
+ * off the Drizzle schema (raw-SQL pattern — declaring it would make the
+ * scope-cascade's select().from(actions) 500 on un-migrated prod), so we
+ * read it here via raw SQL. Tolerant of the column not existing yet →
+ * empty Map (every action treated as no-clock / exempt).
+ */
+async function fetchSlaStartedByAction(): Promise<Map<number, string>> {
+  try {
+    const rows = await db.all<{ id: number; sla_started_at: string | null }>(
+      sql`SELECT id, sla_started_at FROM actions WHERE sla_started_at IS NOT NULL`,
+    );
+    return new Map(rows.map((r) => [Number(r.id), String(r.sla_started_at)]));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such (column|table)/i.test(msg)) return new Map();
+    throw err;
+  }
+}
+
+/**
+ * SLA budgets (whole hours), keyed by action_type id. `sla_hours` is also
+ * off the Drizzle schema. Tolerant → empty Map (every type exempt).
+ */
+async function fetchSlaHoursByActionType(): Promise<Map<number, number>> {
+  try {
+    const rows = await db.all<{ id: number; sla_hours: number | null }>(
+      sql`SELECT id, sla_hours FROM action_types WHERE sla_hours IS NOT NULL`,
+    );
+    return new Map(rows.map((r) => [Number(r.id), Number(r.sla_hours)]));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such (column|table)/i.test(msg)) return new Map();
+    throw err;
+  }
+}
+
 async function fetchBatchesTolerant(): Promise<BatchRow[]> {
   try {
     return await db.select().from(batches);
@@ -162,6 +199,14 @@ export interface ScopedActionDetail {
   completedAt:    string | null;
   notes:          string | null;
   sortOrder:      number;
+  /**
+   * SLA countdown inputs. `slaStartedAt` is when the clock started (ISO,
+   * stamped on unblock / at intake); `slaHours` is the action type's
+   * budget. Both null = exempt (no countdown). The remaining/overdue
+   * state is derived client-side so it ticks live without a refetch.
+   */
+  slaStartedAt:   string | null;
+  slaHours:       number | null;
   /**
    * Names of parent action_types that are STILL pending on the same
    * scope as this action. Sourced from action_dependencies, filtered
@@ -452,7 +497,7 @@ export interface ActionTouchpoint {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, alertsByBatch] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, alertsByBatch, slaStartedByAction, slaHoursByActionType] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     fetchBatchesTolerant(),
@@ -582,6 +627,8 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         return new Map();
       }
     })(),
+    fetchSlaStartedByAction(),
+    fetchSlaHoursByActionType(),
   ]);
 
   // Index per-city legs by batch — order preserved (intake order).
@@ -679,6 +726,8 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       completedAt:      a.completedAt ?? null,
       notes:            a.notes ?? null,
       sortOrder:        a.sortOrder,
+      slaStartedAt:     slaStartedByAction.get(a.id) ?? null,
+      slaHours:         slaHoursByActionType.get(a.actionTypeId) ?? null,
       blockedByNames,
       pendingDependentNames: [], // filled in by the second pass below
     });
