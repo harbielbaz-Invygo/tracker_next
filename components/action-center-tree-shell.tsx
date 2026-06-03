@@ -23,10 +23,6 @@ import type {
   DepartmentCatalog, ActionTouchpoint,
 } from "@/lib/action-center-tree-data";
 import { augmentActions, type Touchpoint } from "@/lib/action-flow-shared";
-// Type-only import — alert-engine.ts pulls in the server `db`, so a value
-// import would drag it into this client bundle. Severities are rolled up
-// with the local `maxSeverity` helper instead.
-import type { ActiveAlert } from "@/lib/alert-engine";
 import ConfirmDialog from "./confirm-dialog";
 import InputDialog from "./input-dialog";
 import { useConfirmDialog } from "./use-confirm-dialog";
@@ -95,56 +91,6 @@ function isOverdue(a: ScopedActionDetail, today: string): boolean {
   return a.expectedDate < today;
 }
 
-/**
- * Alert badge — surfaces active alert-engine alerts as a "⚠ N" pill,
- * coloured by the highest severity (critical/high → flame, medium →
- * gold, info → ink). Pass `alerts` for a per-line tooltip, or just
- * `count` + `severity` for a rolled-up node (window / PO). Renders
- * nothing when there are no alerts.
- */
-function AlertBadge({
-  count, severity, alerts, className,
-}: {
-  count: number;
-  severity: ActiveAlert["severity"] | null;
-  alerts?: ActiveAlert[];
-  className?: string;
-}) {
-  if (count <= 0 || !severity) return null;
-  const tone =
-    severity === "critical" || severity === "high"
-      ? "border-flame text-flame-dark bg-flame-pale"
-      : severity === "medium"
-        ? "border-gold text-gold-dark bg-gold-pale"
-        : "border-ink-300 text-ink-600 bg-ink-50";
-  const title = alerts && alerts.length > 0
-    ? alerts.map((a) => `• [${a.severity}] ${a.message}`).join("\n")
-    : `${count} active alert${count === 1 ? "" : "s"}`;
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-0.5 text-[0.65rem] font-bold tabular-nums px-1.5 py-0.5 rounded-full border whitespace-nowrap",
-        tone, className,
-      )}
-      title={title}
-    >
-      ⚠ {count}
-    </span>
-  );
-}
-
-const SEVERITY_RANK: Record<ActiveAlert["severity"], number> = {
-  info: 0, medium: 1, high: 2, critical: 3,
-};
-/** Highest severity across a list (used to roll wave severities up to a PO). */
-function maxSeverity(list: (ActiveAlert["severity"] | null)[]): ActiveAlert["severity"] | null {
-  let best: ActiveAlert["severity"] | null = null;
-  for (const s of list) {
-    if (!s) continue;
-    if (!best || SEVERITY_RANK[s] > SEVERITY_RANK[best]) best = s;
-  }
-  return best;
-}
 /**
  * Walk every action under a PO and split the counts by phase so the
  * left tree can show "Internal x/y · External x/y" instead of a
@@ -1138,7 +1084,6 @@ function DealerTree({
                             <span className="truncate">
                               {p.isPrePo ? p.poNumber.replace(/^Pre-PO · /, "") : p.poNumber}
                             </span>
-                            <AlertBadge count={p.alertCount} severity={p.highestAlertSeverity} />
                             {counts.overdue > 0 && (
                               <span
                                 title={`${counts.overdue} overdue`}
@@ -1327,7 +1272,6 @@ function PoDrawer({
           {po.poDate && (
             <span className="text-xs text-ink-500 tabular-nums">{po.poDate}</span>
           )}
-          <AlertBadge count={po.alertCount} severity={po.highestAlertSeverity} />
           {po.closedAt && (() => {
             // "Delivered" unless every batch was cancelled (then "Cancelled").
             const batches = po.waves.flatMap((w) => w.batches);
@@ -1542,9 +1486,6 @@ interface InboxWindow {
    * where deliveries are sitting, just without the empty chip rows).
    */
   lastStep:       { label: string; completedAt: string | null } | null;
-  /** Alert roll-up for this window (from the alert engine). */
-  alertCount:     number;
-  highestAlertSeverity: ActiveAlert["severity"] | null;
 }
 
 /** True when an action is still in flight (waiting or blocked). */
@@ -1646,8 +1587,6 @@ function MineView({
             internalPending,
             externalPending,
             lastStep,
-            alertCount:           w.alertCount,
-            highestAlertSeverity: w.highestAlertSeverity,
           });
         }
       }
@@ -1882,8 +1821,6 @@ function PoInboxCard({
   onJumpToPo: (poId: number) => void;
 }) {
   const anyOverdue = group.windows.some((w) => w.sortDate < today);
-  const poAlertCount = group.windows.reduce((n, w) => n + w.alertCount, 0);
-  const poAlertSeverity = maxSeverity(group.windows.map((w) => w.highestAlertSeverity));
   return (
     <li className={cn(
       "rounded-md border bg-white px-3 py-2 space-y-2",
@@ -1903,7 +1840,6 @@ function PoInboxCard({
         <span className="text-[0.65rem] text-ink-500 tabular-nums">
           · {group.windows.length} window{group.windows.length === 1 ? "" : "s"}
         </span>
-        <AlertBadge count={poAlertCount} severity={poAlertSeverity} className="ml-auto" />
       </div>
 
       {/* Internal phase — PO-scope, shown ONCE for the whole PO (not
@@ -1963,7 +1899,6 @@ function WindowExternalRow({
         ) : (
           <span className="text-[0.68rem] tabular-nums text-ink-400 italic">⏰ Ops —</span>
         )}
-        <AlertBadge count={row.alertCount} severity={row.highestAlertSeverity} className="ml-auto" />
       </div>
 
       {/* External head-of-queue, or the last step reached when idle. */}
@@ -3306,7 +3241,6 @@ function WaveSection({
         <span className="text-xs text-ink-500 tabular-nums">
           {totalCars} cars · {wave.batches.length} batch{wave.batches.length === 1 ? "" : "es"}
         </span>
-        <AlertBadge count={wave.alertCount} severity={wave.highestAlertSeverity} />
         {/* External-Phase progress — the collapsed-header priority.
             Counts every batch's external steps across the window
             (batches × steps), excluding Delivery. */}
@@ -4368,7 +4302,6 @@ function BatchRow({
               <span className="text-midnight font-medium">{b.modelYear}</span>
               <span className="text-ink-300">·</span>
               <span className="tabular-nums">{b.requestedQuantity} cars</span>
-              <AlertBadge count={b.alerts.length} severity={maxSeverity(b.alerts.map((a) => a.severity))} alerts={b.alerts} />
               {(vinsPartial || vinsAllIn) && (
                 <span className={cn(
                   "text-[0.65rem] font-medium tabular-nums px-1.5 py-0.5 rounded",

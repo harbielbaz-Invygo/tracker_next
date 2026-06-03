@@ -12,22 +12,10 @@ import { asc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   departments, stakeholders, actionTypes, actionDependencies,
-  dealers, batches, batchActions, users, alertRules,
+  dealers, batches, batchActions, users,
   vinChaseStages,
 } from "@/lib/db/schema";
 import { getAllRules } from "@/lib/rules";
-
-export interface AlertRuleSetting {
-  id: number;
-  name: string;
-  triggerType: "no_vin_before_avail" | "action_overdue" | "action_pending_before_avail" | "listing_overdue";
-  thresholdDays: number;
-  actionTypeId: number | null;
-  /** Name of the actionType, resolved for display. */
-  actionTypeName: string | null;
-  severity: "critical" | "high" | "medium" | "info";
-  isActive: boolean;
-}
 
 export interface SettingsData {
   departments: {
@@ -58,7 +46,6 @@ export interface SettingsData {
   rules: {
     prePoOpsLeadTimeDays: number;
   };
-  alertRules: AlertRuleSetting[];
   /**
    * Application users. Password hashes are deliberately omitted — only
    * the metadata Settings → Users needs is exposed. To set or rotate a
@@ -180,9 +167,9 @@ export interface BatchEditRow {
 }
 
 /**
- * Defensive helper: returns [] if the `alert_rules` table is missing in this
- * database (e.g. production hasn't had `npm run db:push` run since the alert
- * engine landed). Without this, the entire Settings page would 500.
+ * Defensive helper: returns [] if the `vin_chase_stages` table is missing
+ * in this database (e.g. production hasn't had the migration run yet).
+ * Without this, the entire Settings page would 500.
  */
 async function safeListVinChaseStages(): Promise<(typeof vinChaseStages.$inferSelect)[]> {
   try {
@@ -223,23 +210,10 @@ async function safeReadSlaHours(): Promise<Map<number, number>> {
   return out;
 }
 
-async function safeListAlertRules(): Promise<(typeof alertRules.$inferSelect)[]> {
-  try {
-    return await db.select().from(alertRules).orderBy(asc(alertRules.id));
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/no such table/i.test(msg)) {
-      // eslint-disable-next-line no-console
-      console.warn("[settings] alert_rules table missing — returning []. Run `npm run db:push` to enable.");
-      return [];
-    }
-    throw err;
-  }
-}
 
 export async function getSettingsData(): Promise<SettingsData> {
   const [
-    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw, alertRulesRaw, vinStagesRaw, slaHoursById,
+    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw, vinStagesRaw, slaHoursById,
   ] = await Promise.all([
     db.select().from(departments).orderBy(asc(departments.sortOrder)),
     db.select().from(stakeholders).orderBy(asc(stakeholders.sortOrder)),
@@ -275,7 +249,6 @@ export async function getSettingsData(): Promise<SettingsData> {
       role:      users.role,
       createdAt: users.createdAt,
     }).from(users).orderBy(asc(users.role), asc(users.username)),
-    safeListAlertRules(),
     safeListVinChaseStages(),
     safeReadSlaHours(),
   ]);
@@ -411,16 +384,6 @@ export async function getSettingsData(): Promise<SettingsData> {
     })),
     batches: batchesList,
     rules,
-    alertRules: alertRulesRaw.map((r) => ({
-      id:             r.id,
-      name:           r.name,
-      triggerType:    r.triggerType as AlertRuleSetting["triggerType"],
-      thresholdDays:  r.thresholdDays,
-      actionTypeId:   r.actionTypeId ?? null,
-      actionTypeName: r.actionTypeId ? (actionTypeNames[r.actionTypeId] ?? null) : null,
-      severity:       r.severity as AlertRuleSetting["severity"],
-      isActive:       r.isActive ?? true,
-    })),
     users: usersRaw.map((u) => ({
       id:        u.id,
       username:  u.username,

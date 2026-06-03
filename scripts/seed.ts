@@ -36,9 +36,10 @@
  * for back-compat and can be removed once the last consumer migrates.
  */
 import bcrypt from "bcryptjs";
+import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  users, dealers, batches, milestones, milestoneEvents, vehicles, alerts,
+  users, dealers, batches, milestones, milestoneEvents, vehicles,
   departments, stakeholders, actionTypes, actionDependencies, batchActions, settings,
 } from "@/lib/db/schema";
 import { makeBatchCode } from "@/lib/utils";
@@ -519,7 +520,9 @@ async function seed() {
   await db.delete(milestoneEvents);
   await db.delete(milestones);
   await db.delete(vehicles);
-  await db.delete(alerts);
+  // Legacy alerts table is dormant (alert engine removed) — clear any
+  // leftover rows via raw SQL, tolerant of the table being absent.
+  try { await db.run(sql`DELETE FROM alerts`); } catch { /* table absent */ }
   await db.delete(batchActions);
   await db.delete(batches);
   await db.delete(actionDependencies);

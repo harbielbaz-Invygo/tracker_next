@@ -1980,9 +1980,10 @@ function RiskTab({ report }: { report: InsightsData["report"] }) {
         <RiskMetric label="Severe slips (>21d)" value={customerImpact.totals.severe} sub="worst-tier impacts" tone="flame" />
       </div>
       <p className="text-xs text-ink-500 px-1 leading-relaxed">
-        The alert engine fires on every Action Center load — runway-shrinking and overdue-action
-        rules surface as inline alerts on the action rows. Acked / dismissed alerts have been
-        retired; alerts now auto-resolve when the underlying action lands.
+        Each action now runs an SLA countdown from when it becomes actionable. Approaching and
+        breached SLAs surface live on the action rows in the Action Center, sort breached POs to
+        the top of the Inbox, and roll up into the SLA-health panel above — set per-type budgets
+        under Settings → Action Types.
       </p>
     </div>
   );

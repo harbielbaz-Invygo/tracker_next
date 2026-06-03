@@ -18,13 +18,29 @@
  * Admin-only. Single-use. Will be deleted in a follow-up PR once the
  * cutover lands cleanly in prod.
  */
-import { isNull, inArray } from "drizzle-orm";
+import { isNull, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import {
-  batches, alerts,
-} from "@/lib/db/schema";
+import { batches } from "@/lib/db/schema";
 import { requireAuth, apiError } from "@/lib/api-auth";
+
+/**
+ * Count / delete rows in the dormant legacy `alerts` table that reference
+ * the given batch ids, via raw SQL. The alert engine was removed (Phase
+ * 4b) so the table is no longer modelled, but its non-cascading batch_id
+ * FK means leftover rows must still be cleared before deleting a batch.
+ * Tolerant of the table being absent.
+ */
+async function countLegacyAlerts(ids: number[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  try {
+    const list = sql.join(ids.map((n) => sql`${n}`), sql`, `);
+    const rows = await db.all<{ n: number }>(
+      sql`SELECT COUNT(*) AS n FROM alerts WHERE batch_id IN (${list})`,
+    );
+    return Number(rows[0]?.n ?? 0);
+  } catch { return 0; }
+}
 
 export const runtime = "nodejs";
 
@@ -48,17 +64,18 @@ async function buildReport(write: boolean): Promise<DeleteReport> {
     .where(isNull(batches.waveId));
   const ids = legacy.map((b) => b.id);
 
-  const legacyAlertCount = ids.length === 0 ? 0 : (await db
-    .select({ id: alerts.id })
-    .from(alerts)
-    .where(inArray(alerts.batchId, ids))).length;
+  const legacyAlertCount = await countLegacyAlerts(ids);
 
   let deleted = 0;
   if (write && ids.length > 0) {
     await db.transaction(async (tx) => {
-      // alerts has no ON DELETE CASCADE on batch_id — clean up first.
+      // The dormant alerts table has no ON DELETE CASCADE on batch_id —
+      // clear any leftover rows first (raw SQL, tolerant of absence).
       if (legacyAlertCount > 0) {
-        await tx.delete(alerts).where(inArray(alerts.batchId, ids));
+        const list = sql.join(ids.map((n) => sql`${n}`), sql`, `);
+        try {
+          await tx.run(sql`DELETE FROM alerts WHERE batch_id IN (${list})`);
+        } catch { /* table absent — nothing to clean up */ }
       }
       // Everything else (batch_actions, batch_vin_stages,
       // batch_delivery_legs, batch_color_matrix, batch_date_revisions,
