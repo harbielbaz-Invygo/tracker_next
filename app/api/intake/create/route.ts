@@ -26,6 +26,7 @@ import { makeBatchCode } from "@/lib/utils";
 import { getLeadTimeDays } from "@/lib/rules";
 import { requireAuth } from "@/lib/api-auth";
 import { computeExpectedDate } from "@/lib/expected-date";
+import { stampSlaStartForScopes } from "@/lib/sla";
 
 export const runtime = "nodejs";
 
@@ -399,6 +400,10 @@ export async function POST(req: NextRequest) {
   // libSQL transactions take an async callback. All inserts/updates
   // inside must be `await`-ed; if any throws, the whole submission rolls
   // back and we never leave half-created batches.
+  // Captured out of the tx so the post-commit SLA stamp (below) can reach
+  // the new PO / wave ids without re-querying.
+  let slaPoId = 0;
+  const slaWaveIds: number[] = [];
   const created: CreatedBatch[] = await db.transaction(async (tx) => {
     const out: CreatedBatch[] = [];
 
@@ -781,8 +786,26 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    slaPoId = poId;
+    slaWaveIds.push(...waveIdByDate.values());
     return out;
   });
+
+  // ── SLA clock (Phase 1b) ──────────────────────────────────────────
+  // Start the countdown for the freshly-created `waiting` actions — root
+  // PO-scope actions and all wave-scope (VIN-chase) actions. Anchored to
+  // creation time (= the intake-submission moment), so a new PO never
+  // starts already-overdue. Dependent (`blocked`) actions are skipped
+  // here; the unblock cascade stamps them when their parent completes.
+  // Best-effort + tolerant of the un-migrated column (see lib/sla.ts).
+  const slaNow = new Date().toISOString();
+  await stampSlaStartForScopes(
+    [
+      { scope: "po" as const, scopeId: slaPoId },
+      ...slaWaveIds.map((id) => ({ scope: "wave" as const, scopeId: id })),
+    ],
+    slaNow,
+  );
 
   return NextResponse.json({
     ok: true,

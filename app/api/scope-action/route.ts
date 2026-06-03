@@ -34,6 +34,7 @@ import { requireAuth, apiError } from "@/lib/api-auth";
 import { unblockDependents, cascadeRevertDependents } from "@/lib/scope-cascade";
 import { cascadeBatchClosureUp } from "@/lib/closure-cascade";
 import { checkBatchDeliveryGate } from "@/lib/closure-gates";
+import { stampSlaStart, clearSlaStart } from "@/lib/sla";
 
 export const runtime = "nodejs";
 
@@ -209,6 +210,26 @@ export async function PATCH(req: NextRequest) {
 
     return { autoUnblockedIds, cascadeRevertedIds, waveToBatchPropagatedIds, reconciledWaveActionIds };
   });
+
+  // ── SLA clock (Phase 1b) ──────────────────────────────────────────
+  // Runs AFTER the tx commits, best-effort (see lib/sla.ts): never let
+  // an SLA write roll back or fail a status change.
+  //   • Entering `waiting` (manual reopen, unblock cascade, wave→batch
+  //     copies on reopen) → (re)start the clock at nowIso.
+  //   • Entering `blocked` (manual block, revert cascade, wave→batch
+  //     copies on block) → stop the clock (clear to NULL); the next
+  //     unblock will re-stamp a fresh start.
+  //   • `done` / `skipped` keep their existing start for compliance.
+  const enteringWaiting: number[] = [];
+  const enteringBlocked: number[] = [];
+  if (status === "waiting") enteringWaiting.push(actionId);
+  if (status === "blocked") enteringBlocked.push(actionId);
+  enteringWaiting.push(...cascadeResult.autoUnblockedIds);
+  enteringBlocked.push(...cascadeResult.cascadeRevertedIds);
+  if (status === "waiting") enteringWaiting.push(...cascadeResult.waveToBatchPropagatedIds);
+  if (status === "blocked") enteringBlocked.push(...cascadeResult.waveToBatchPropagatedIds);
+  await stampSlaStart(enteringWaiting, nowIso);
+  await clearSlaStart(enteringBlocked);
 
   return NextResponse.json({
     ok: true,
