@@ -8,7 +8,7 @@
  *   - batches (full editable detail + per-batch action summary)
  *   - rules (key/value tunables)
  */
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   departments, stakeholders, actionTypes, actionDependencies,
@@ -45,6 +45,12 @@ export interface SettingsData {
     defaultDepartmentId: number | null;
     sortOrder: number;
     dependsOnIds: number[];
+    /**
+     * SLA budget for this action type, in whole hours. NULL = no SLA →
+     * the action is exempt from the countdown / overdue engine. Read via
+     * raw SQL (not on the Drizzle schema) — see safeReadSlaHours.
+     */
+    slaHours: number | null;
   }[];
   actionTypeNames: Record<number, string>;
   dealers: { id: number; name: string; homeCity: string }[];
@@ -192,6 +198,31 @@ async function safeListVinChaseStages(): Promise<(typeof vinChaseStages.$inferSe
   }
 }
 
+/**
+ * Read action_types.sla_hours via raw SQL. The column is deliberately
+ * NOT declared on the Drizzle schema (settings-data does
+ * `select().from(actionTypes)` — an un-migrated declared column would 500
+ * the whole Settings page). Returns a Map keyed by action_type id;
+ * absent / NULL values are simply not present. Tolerant of the column
+ * not existing yet (pre-migration) — returns an empty Map.
+ */
+async function safeReadSlaHours(): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  try {
+    const rows = await db.all<{ id: number; sla_hours: number | null }>(
+      sql`SELECT id, sla_hours FROM action_types`,
+    );
+    for (const r of rows) {
+      if (r.sla_hours != null && Number.isFinite(Number(r.sla_hours))) {
+        out.set(Number(r.id), Number(r.sla_hours));
+      }
+    }
+  } catch {
+    /* column not migrated yet — every type is exempt (no SLA). */
+  }
+  return out;
+}
+
 async function safeListAlertRules(): Promise<(typeof alertRules.$inferSelect)[]> {
   try {
     return await db.select().from(alertRules).orderBy(asc(alertRules.id));
@@ -208,7 +239,7 @@ async function safeListAlertRules(): Promise<(typeof alertRules.$inferSelect)[]>
 
 export async function getSettingsData(): Promise<SettingsData> {
   const [
-    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw, alertRulesRaw, vinStagesRaw,
+    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw, alertRulesRaw, vinStagesRaw, slaHoursById,
   ] = await Promise.all([
     db.select().from(departments).orderBy(asc(departments.sortOrder)),
     db.select().from(stakeholders).orderBy(asc(stakeholders.sortOrder)),
@@ -246,6 +277,7 @@ export async function getSettingsData(): Promise<SettingsData> {
     }).from(users).orderBy(asc(users.role), asc(users.username)),
     safeListAlertRules(),
     safeListVinChaseStages(),
+    safeReadSlaHours(),
   ]);
 
   // Group stakeholders by department for inline rendering.
@@ -371,6 +403,7 @@ export async function getSettingsData(): Promise<SettingsData> {
       defaultDepartmentId: t.defaultDepartmentId,
       sortOrder: t.sortOrder,
       dependsOnIds: dependsOnByChild.get(t.id) ?? [],
+      slaHours: slaHoursById.get(t.id) ?? null,
     })),
     actionTypeNames,
     dealers: dealersRaw.map((d) => ({
