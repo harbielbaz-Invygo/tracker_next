@@ -129,6 +129,13 @@ const SCHEMA_MIGRATIONS: MigrationEndpoint[] = [
     detail: "Seeds the Pre-PO App Listing action type if it's missing.",
     supportsGet: false,
   },
+  {
+    path: "ensure-sla-columns",
+    label: "SLA countdown columns",
+    detail:
+      "action_types.sla_hours (nullable SLA budget) + actions.sla_started_at (nullable clock-start). Backfills waiting rows to created_at. Run before SLA durations appear in Settings.",
+    supportsGet: true,
+  },
 ];
 
 // ── Backfills — mutate data but never delete; idempotent ──
