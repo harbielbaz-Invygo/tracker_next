@@ -527,63 +527,12 @@ export const milestoneEvents = sqliteTable("milestone_events", {
 }));
 
 // ─────────────────────────────────────────────────────────
-// Alerts
+// Alerts / alert rules — REMOVED (replaced by the SLA countdown system,
+// Phase 4b). The physical `alerts` / `alert_rules` tables are left in
+// place (dormant) so no data is dropped; they're simply no longer
+// modelled or read. SLA tracking now lives on action_types.sla_hours +
+// actions.sla_started_at (see lib/sla-metrics.ts / lib/sla.ts).
 // ─────────────────────────────────────────────────────────
-export const alerts = sqliteTable("alerts", {
-  id:             integer("id").primaryKey({ autoIncrement: true }),
-  batchId:        integer("batch_id").references(() => batches.id),
-  vehicleId:      integer("vehicle_id").references(() => vehicles.id),
-  fingerprint:    text("fingerprint").notNull(),
-  severity:       text("severity", { enum: ["critical", "high", "medium", "info"] }).notNull(),
-  alertType:      text("alert_type").notNull(),
-  message:        text("message").notNull(),
-  audience:       text("audience"),
-  raisedAt:       text("raised_at").default(sql`(CURRENT_TIMESTAMP)`),
-  acknowledged:   integer("acknowledged", { mode: "boolean" }).default(false),
-  acknowledgedBy: text("acknowledged_by"),
-  acknowledgedAt: text("acknowledged_at"),
-  resolved:       integer("resolved", { mode: "boolean" }).default(false),
-  resolvedAt:     text("resolved_at"),
-}, (t) => ({
-  byBatch:       index("alerts_batch_idx").on(t.batchId),
-  byFingerprint: index("alerts_fingerprint_idx").on(t.fingerprint),
-}));
-
-// ─────────────────────────────────────────────────────────
-// Alert rules — admin-configured thresholds for the alert engine.
-// Each rule defines when an alert should fire on an open batch.
-// The engine runs on every Action Center page load, creates new alerts
-// (fingerprint-deduped) and auto-resolves ones whose condition cleared.
-// ─────────────────────────────────────────────────────────
-export const alertRules = sqliteTable("alert_rules", {
-  id:            integer("id").primaryKey({ autoIncrement: true }),
-  name:          text("name").notNull(),
-  /**
-   * Trigger logic:
-   *  no_vin_before_avail         — VIN action not done, ≤ thresholdDays to availability date
-   *  action_overdue              — any waiting/blocked action is past its expectedDate
-   *  action_pending_before_avail — a specific actionTypeId not done, ≤ thresholdDays to availability date
-   *  listing_overdue             — post_po batch submitted ≥ thresholdDays ago AND not yet
-   *                                app-listed. Surfaces stalled Internal Phase work — the
-   *                                primary "PO → Listed" KPI alert.
-   */
-  triggerType:   text("trigger_type", {
-                   enum: [
-                     "no_vin_before_avail",
-                     "action_overdue",
-                     "action_pending_before_avail",
-                     "listing_overdue",
-                   ],
-                 }).notNull(),
-  /** Days before availability date (or days overdue) at which to fire. */
-  thresholdDays: integer("threshold_days").notNull().default(7),
-  /** Only for action_pending_before_avail — which action type must be done. */
-  actionTypeId:  integer("action_type_id").references(() => actionTypes.id, { onDelete: "set null" }),
-  severity:      text("severity", { enum: ["critical", "high", "medium", "info"] })
-                   .notNull().default("high"),
-  isActive:      integer("is_active", { mode: "boolean" }).notNull().default(true),
-  createdAt:     text("created_at").default(sql`(CURRENT_TIMESTAMP)`),
-});
 
 // ─────────────────────────────────────────────────────────
 // Settings — single-row key/value (mirrors user_settings.json)
@@ -943,8 +892,6 @@ export type Dealer            = typeof dealers.$inferSelect;
 export type Batch             = typeof batches.$inferSelect;
 export type Vehicle           = typeof vehicles.$inferSelect;
 export type Milestone         = typeof milestones.$inferSelect;
-export type Alert             = typeof alerts.$inferSelect;
-export type AlertRule         = typeof alertRules.$inferSelect;
 export type Department        = typeof departments.$inferSelect;
 export type Stakeholder       = typeof stakeholders.$inferSelect;
 export type ActionType        = typeof actionTypes.$inferSelect;

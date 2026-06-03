@@ -18,7 +18,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import {
-  departments, stakeholders, actionTypes, actionDependencies, batchActions, batches, users, alertRules, alerts,
+  departments, stakeholders, actionTypes, actionDependencies, batchActions, batches, users,
   vinChaseStages, batchVinStages,
 } from "@/lib/db/schema";
 import { setRuleNumber, RULE_KEYS, getLeadTimeDays } from "@/lib/rules";
@@ -47,9 +47,6 @@ type Body =
   | { resource: "user"; op: "update"; id: number; username?: string; name?: string | null; email?: string | null; role?: "admin" | "ops" }
   | { resource: "user"; op: "reset-password"; id: number; password: string }
   | { resource: "user"; op: "delete"; id: number }
-  | { resource: "alert-rule"; op: "create"; name: string; triggerType: string; thresholdDays: number; actionTypeId?: number | null; severity: string }
-  | { resource: "alert-rule"; op: "update"; id: number; name?: string; thresholdDays?: number; actionTypeId?: number | null; severity?: string; isActive?: boolean }
-  | { resource: "alert-rule"; op: "delete"; id: number }
   | { resource: "vin-stage";  op: "create"; name: string; waitingLabel: string; doneLabel: string; sortOrder?: number }
   | { resource: "vin-stage";  op: "update"; id: number; name?: string; waitingLabel?: string; doneLabel?: string; sortOrder?: number }
   | { resource: "vin-stage";  op: "delete"; id: number };
@@ -76,7 +73,6 @@ export async function POST(req: NextRequest) {
       case "batch":        return await handleBatch(body);
       case "stakeholder":  return await handleStakeholder(body);
       case "user":         return await handleUser(body, Number(gate.user.id));
-      case "alert-rule":   return await handleAlertRule(body);
       case "vin-stage":    return await handleVinStage(body);
       default:
         return NextResponse.json({ error: "Unknown resource" }, { status: 400 });
@@ -474,13 +470,15 @@ const EDITABLE_BATCH_FIELDS = new Set<string>([
 async function handleBatch(b: Extract<Body, { resource: "batch" }>) {
   if (b.op === "delete") {
     // batch_actions / vehicles / milestones / batch_color_matrix cascade
-    // via FK ON DELETE CASCADE. `alerts.batch_id` was defined without
-    // cascade, so any batch with active alerts (e.g. TEST-002/003/011
-    // after the alert engine fires) would otherwise fail with a FOREIGN
-    // KEY error. Delete those alerts first inside a transaction so the
-    // batch delete either fully succeeds or rolls back cleanly.
+    // via FK ON DELETE CASCADE. The legacy `alerts` table (now dormant —
+    // the alert engine was removed) had a non-cascading `batch_id` FK, so
+    // a batch with leftover alert rows would otherwise fail with a FOREIGN
+    // KEY error. Best-effort clear those rows first via raw SQL (tolerant
+    // of the table being absent) so the batch delete succeeds cleanly.
     await db.transaction(async (tx) => {
-      await tx.delete(alerts).where(eq(alerts.batchId, b.id));
+      try {
+        await tx.run(sql`DELETE FROM alerts WHERE batch_id = ${b.id}`);
+      } catch { /* alerts table absent — nothing to clean up */ }
       await tx.delete(batches).where(eq(batches.id, b.id));
     });
     return NextResponse.json({ ok: true });
@@ -720,74 +718,6 @@ async function handleUser(b: Extract<Body, { resource: "user" }>, callerId: numb
       }
     }
     await db.delete(users).where(eq(users.id, b.id));
-    return NextResponse.json({ ok: true });
-  }
-
-  return NextResponse.json({ error: "Unknown op" }, { status: 400 });
-}
-
-// ──────────────────────────────────────────────────────────────────
-// Alert rules
-// ──────────────────────────────────────────────────────────────────
-
-const VALID_TRIGGER_TYPES = ["no_vin_before_avail", "action_overdue", "action_pending_before_avail", "listing_overdue"] as const;
-const VALID_SEVERITIES    = ["critical", "high", "medium", "info"] as const;
-
-async function handleAlertRule(b: Extract<Body, { resource: "alert-rule" }>) {
-  if (b.op === "create") {
-    if (!b.name?.trim()) {
-      return NextResponse.json({ error: "name required" }, { status: 400 });
-    }
-    if (!VALID_TRIGGER_TYPES.includes(b.triggerType as never)) {
-      return NextResponse.json({ error: "invalid triggerType" }, { status: 400 });
-    }
-    if (!VALID_SEVERITIES.includes(b.severity as never)) {
-      return NextResponse.json({ error: "invalid severity" }, { status: 400 });
-    }
-    const days = Number(b.thresholdDays);
-    if (!Number.isFinite(days) || days < 0) {
-      return NextResponse.json({ error: "thresholdDays must be a non-negative number" }, { status: 400 });
-    }
-
-    const [row] = await db.insert(alertRules).values({
-      name:          b.name.trim(),
-      triggerType:   b.triggerType as typeof VALID_TRIGGER_TYPES[number],
-      thresholdDays: days,
-      actionTypeId:  b.actionTypeId ?? null,
-      severity:      b.severity as typeof VALID_SEVERITIES[number],
-      isActive:      true,
-    }).returning();
-    return NextResponse.json({ ok: true, row });
-  }
-
-  if (b.op === "update") {
-    const updates: Partial<typeof alertRules.$inferInsert> = {};
-    if (b.name !== undefined)         updates.name = b.name.trim();
-    if (b.thresholdDays !== undefined) {
-      const n = Number(b.thresholdDays);
-      if (!Number.isFinite(n) || n < 0) {
-        return NextResponse.json({ error: "thresholdDays must be a non-negative number" }, { status: 400 });
-      }
-      updates.thresholdDays = n;
-    }
-    if (b.actionTypeId !== undefined) updates.actionTypeId = b.actionTypeId ?? null;
-    if (b.severity !== undefined) {
-      if (!VALID_SEVERITIES.includes(b.severity as never)) {
-        return NextResponse.json({ error: "invalid severity" }, { status: 400 });
-      }
-      updates.severity = b.severity as typeof VALID_SEVERITIES[number];
-    }
-    if (b.isActive !== undefined) updates.isActive = b.isActive;
-
-    if (Object.keys(updates).length === 0) {
-      return NextResponse.json({ error: "no fields to update" }, { status: 400 });
-    }
-    await db.update(alertRules).set(updates).where(eq(alertRules.id, b.id));
-    return NextResponse.json({ ok: true });
-  }
-
-  if (b.op === "delete") {
-    await db.delete(alertRules).where(eq(alertRules.id, b.id));
     return NextResponse.json({ ok: true });
   }
 

@@ -11,7 +11,7 @@
 import { eq, asc, inArray, and, sql, or } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, alerts, batchColorMatrix, batchDeliveryLegs,
+  batches, dealers, batchActions, actionTypes, actionDependencies, departments, stakeholders, batchColorMatrix, batchDeliveryLegs,
   vinChaseStages, batchVinStages,
   // Phase 4c — scope-aware reads for the PO Slack message so PO/wave
   // actions completed in /action-center-v2 also surface in the message.
@@ -19,8 +19,6 @@ import {
   // down for the delivery-wave roll-up.
   pos, waves as wavesTable, actions as actionsTable,
 } from "@/lib/db/schema";
-import type { ActiveAlert } from "@/lib/alert-engine";
-import { highestSeverity } from "@/lib/alert-engine";
 import { getLeadTimeDays } from "@/lib/rules";
 import { isFullySettled } from "./action-center-predicates";
 
@@ -77,10 +75,6 @@ export interface ActionCenterRow {
   /* Confidence */
   operationsConfidence: number | null;
   operationsLocked: boolean;
-
-  /* Alerts */
-  alertCount: number;
-  highestAlertSeverity: ActiveAlert["severity"] | null;
 
   /**
    * Compact descriptors of every OPEN (waiting OR blocked) action on
@@ -236,8 +230,6 @@ export interface DrawerData {
   actions: ActionDetail[];
   /** Departments available for re-assignment in the drawer. */
   departments: { id: number; name: string }[];
-  /** Active (unresolved) alerts for this batch. */
-  alerts: ActiveAlert[];
   /**
    * Per-colour breakdown rows for this batch. Drives the Car Delivery
    * confirmation modal — ops fills in delivered quantity per colour at
@@ -294,9 +286,7 @@ function statusFor(b: typeof batches.$inferSelect): { delayDays: number; statusL
 // Public API
 // ──────────────────────────────────────────────────────────────────
 
-export async function getActionCenterRows(
-  alertsByBatch: Map<number, ActiveAlert[]> = new Map(),
-): Promise<ActionCenterRow[]> {
+export async function getActionCenterRows(): Promise<ActionCenterRow[]> {
   // Pull every batch, plus its dealer name.
   const batchRows = await db
     .select({ b: batches, dealerName: dealers.name })
@@ -449,9 +439,6 @@ export async function getActionCenterRows(
       operationsConfidence: b.operationsConfidence ?? null,
       operationsLocked: b.operationsConfidenceAtLock != null,
 
-      alertCount:           (alertsByBatch.get(b.id) ?? []).length,
-      highestAlertSeverity: highestSeverity(alertsByBatch.get(b.id) ?? []),
-
       openActions,
     };
   });
@@ -553,15 +540,11 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     sortOrder:                r.at.sortOrder,
   }));
 
-  const [allDepartments, batchAlerts, colorMatrixRows, leadTimeDays, deliveryLegs, vinStageRows] = await Promise.all([
+  const [allDepartments, colorMatrixRows, leadTimeDays, deliveryLegs, vinStageRows] = await Promise.all([
     db
       .select({ id: departments.id, name: departments.name })
       .from(departments)
       .orderBy(asc(departments.sortOrder)),
-    db
-      .select()
-      .from(alerts)
-      .where(and(eq(alerts.batchId, b.id), eq(alerts.resolved, false))),
     db
       .select({
         color:              batchColorMatrix.color,
@@ -699,20 +682,6 @@ export async function getDrawerData(batchCode: string): Promise<DrawerData | nul
     })),
     vinChaseStages: vinChainForBatch,
     appListedAt: b.appListedAt ?? null,
-    alerts: batchAlerts.map((a) => ({
-      id:             a.id,
-      fingerprint:    a.fingerprint,
-      // Same fingerprint-parse pattern used by the engine. Keeps the wire
-      // shape consistent across both data sources without needing a DB column.
-      actionId:       (() => {
-        const m = a.fingerprint.match(/-action-(\d+)$/);
-        return m ? Number(m[1]) : null;
-      })(),
-      severity:       a.severity as ActiveAlert["severity"],
-      alertType:      a.alertType,
-      message:        a.message,
-      raisedAt:       a.raisedAt ?? new Date().toISOString(),
-    })),
   };
 }
 
