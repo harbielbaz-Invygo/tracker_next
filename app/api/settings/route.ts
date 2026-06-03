@@ -32,8 +32,8 @@ type Body =
   | { resource: "department"; op: "create"; name: string; sortOrder?: number }
   | { resource: "department"; op: "update"; id: number; name?: string; sortOrder?: number }
   | { resource: "department"; op: "delete"; id: number }
-  | { resource: "action-type"; op: "create"; name: string; waitingLabel: string; doneLabel: string; defaultDepartmentId?: number | null; sortOrder?: number }
-  | { resource: "action-type"; op: "update"; id: number; name?: string; waitingLabel?: string; doneLabel?: string; defaultDepartmentId?: number | null; sortOrder?: number }
+  | { resource: "action-type"; op: "create"; name: string; waitingLabel: string; doneLabel: string; defaultDepartmentId?: number | null; sortOrder?: number; slaHours?: number | null }
+  | { resource: "action-type"; op: "update"; id: number; name?: string; waitingLabel?: string; doneLabel?: string; defaultDepartmentId?: number | null; sortOrder?: number; slaHours?: number | null }
   | { resource: "action-type"; op: "delete"; id: number }
   | { resource: "dependency";  op: "add";    actionTypeId: number; dependsOnActionTypeId: number }
   | { resource: "dependency";  op: "remove"; actionTypeId: number; dependsOnActionTypeId: number }
@@ -177,6 +177,39 @@ async function handleDepartment(b: Extract<Body, { resource: "department" }>) {
  */
 const DELIVERY_ACTION_TYPE_NAME = "Delivery";
 
+/**
+ * Normalise an SLA-hours input. Accepts a positive whole-hour budget,
+ * or null to clear (exempt). Anything else (0, negative, NaN) → null.
+ */
+function normaliseSlaHours(raw: number | null | undefined): number | null {
+  if (raw == null) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.round(n);
+}
+
+/**
+ * Write action_types.sla_hours via raw SQL. The column is NOT on the
+ * Drizzle schema (raw-SQL pattern — see settings-data.safeReadSlaHours),
+ * so we can't set it through db.update(actionTypes). Tolerant of the
+ * column not existing yet (pre-migration): logs and no-ops rather than
+ * 500-ing the whole mutation, so SLA config degrades gracefully until
+ * the ensure-sla-columns migration runs.
+ */
+async function writeSlaHours(id: number, hours: number | null): Promise<void> {
+  try {
+    await db.run(sql`UPDATE action_types SET sla_hours = ${hours} WHERE id = ${id}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such column/i.test(msg)) {
+      // eslint-disable-next-line no-console
+      console.warn("[settings] sla_hours column missing — run ensure-sla-columns. SLA value not saved.");
+      return;
+    }
+    throw err;
+  }
+}
+
 async function handleActionType(b: Extract<Body, { resource: "action-type" }>) {
   if (b.op === "create") {
     if (!b.name?.trim() || !b.waitingLabel?.trim() || !b.doneLabel?.trim()) {
@@ -208,6 +241,9 @@ async function handleActionType(b: Extract<Body, { resource: "action-type" }>) {
       defaultDepartmentId: b.defaultDepartmentId ?? null,
       sortOrder: Number.isFinite(b.sortOrder) ? Number(b.sortOrder) : 0,
     }).returning();
+    if (b.slaHours !== undefined && row?.id) {
+      await writeSlaHours(row.id, normaliseSlaHours(b.slaHours));
+    }
     return NextResponse.json({ ok: true, row });
   }
   if (b.op === "update") {
@@ -248,10 +284,18 @@ async function handleActionType(b: Extract<Body, { resource: "action-type" }>) {
     if (b.doneLabel !== undefined)          updates.doneLabel = b.doneLabel.trim();
     if (b.defaultDepartmentId !== undefined) updates.defaultDepartmentId = b.defaultDepartmentId ?? null;
     if (b.sortOrder !== undefined)          updates.sortOrder = Number(b.sortOrder);
-    if (Object.keys(updates).length === 0) {
+    const hasSlaHours = b.slaHours !== undefined;
+    if (Object.keys(updates).length === 0 && !hasSlaHours) {
       return NextResponse.json({ error: "no fields to update" }, { status: 400 });
     }
-    await db.update(actionTypes).set(updates).where(eq(actionTypes.id, b.id));
+    if (Object.keys(updates).length > 0) {
+      await db.update(actionTypes).set(updates).where(eq(actionTypes.id, b.id));
+    }
+    // sla_hours lives off the Drizzle schema (raw-SQL pattern) — write
+    // it separately so it survives even when it's the only changed field.
+    if (hasSlaHours) {
+      await writeSlaHours(b.id, normaliseSlaHours(b.slaHours));
+    }
     return NextResponse.json({ ok: true });
   }
   if (b.op === "delete") {

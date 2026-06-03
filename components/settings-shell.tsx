@@ -416,11 +416,12 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
     waitingLabel: string;
     doneLabel: string;
     defaultDepartmentId: number | null;
+    slaHours: number | null;
   };
   const [drafts, setDrafts] = useState<Record<number, Draft>>({});
   const [creating, setCreating] = useState<Draft>({
     name: "", waitingLabel: "", doneLabel: "",
-    defaultDepartmentId: null,
+    defaultDepartmentId: null, slaHours: null,
   });
 
   function getDraft(id: number, fallback: Draft) { return drafts[id] ?? fallback; }
@@ -434,6 +435,7 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
       waitingLabel: t?.waitingLabel ?? "",
       doneLabel: t?.doneLabel ?? "",
       defaultDepartmentId: t?.defaultDepartmentId ?? null,
+      slaHours: t?.slaHours ?? null,
     };
   }
   function clearDraft(id: number) {
@@ -559,6 +561,7 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
                         waitingLabel: draft.waitingLabel.trim(),
                         doneLabel: draft.doneLabel.trim(),
                         defaultDepartmentId: draft.defaultDepartmentId,
+                        slaHours: draft.slaHours,
                       });
                       clearDraft(t.id);
                     })())}
@@ -593,19 +596,30 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
                 </Field>
               </div>
 
-              {/* Default department — full width */}
-              <Field label="Default department">
-                <select className="input"
-                        value={draft.defaultDepartmentId ?? ""}
-                        onChange={(e) => setDraft(t.id, {
-                          defaultDepartmentId: e.target.value ? parseInt(e.target.value, 10) : null,
-                        })}>
-                  <option value="">— none —</option>
-                  {data.departments.map((d) => (
-                    <option key={d.id} value={d.id}>{d.name}</option>
-                  ))}
-                </select>
-              </Field>
+              {/* Default department + SLA — side by side */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Field label="Default department">
+                  <select className="input"
+                          value={draft.defaultDepartmentId ?? ""}
+                          onChange={(e) => setDraft(t.id, {
+                            defaultDepartmentId: e.target.value ? parseInt(e.target.value, 10) : null,
+                          })}>
+                    <option value="">— none —</option>
+                    {data.departments.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="SLA (hours)">
+                  <input className="input" type="number" min={1} step={1}
+                         placeholder="no SLA"
+                         value={draft.slaHours ?? ""}
+                         onChange={(e) => setDraft(t.id, {
+                           slaHours: e.target.value ? Math.max(1, parseInt(e.target.value, 10) || 0) || null : null,
+                         })} />
+                  <SlaHint hours={draft.slaHours} />
+                </Field>
+              </div>
 
               {/* Dependencies */}
               <DependencyEditor
@@ -652,6 +666,15 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
                    value={creating.doneLabel}
                    onChange={(e) => setCreating((c) => ({ ...c, doneLabel: e.target.value }))} />
           </Field>
+          <Field label="SLA (hours)">
+            <input className="input" type="number" min={1} step={1} placeholder="no SLA"
+                   value={creating.slaHours ?? ""}
+                   onChange={(e) => setCreating((c) => ({
+                     ...c,
+                     slaHours: e.target.value ? Math.max(1, parseInt(e.target.value, 10) || 0) || null : null,
+                   }))} />
+            <SlaHint hours={creating.slaHours} />
+          </Field>
         </div>
         <div className="flex justify-end mt-3">
           <button
@@ -669,10 +692,11 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
                 doneLabel: creating.doneLabel.trim(),
                 defaultDepartmentId: creating.defaultDepartmentId,
                 sortOrder: nextSort,
+                slaHours: creating.slaHours,
               });
               setCreating({
                 name: "", waitingLabel: "", doneLabel: "",
-                defaultDepartmentId: null,
+                defaultDepartmentId: null, slaHours: null,
               });
             })())}
           >+ Add action type</button>
@@ -681,6 +705,26 @@ function ActionTypesEditor({ data }: { data: SettingsData }) {
 
       {error && <p className="mt-3 text-sm text-flame-dark" role="alert">{error}</p>}
     </CollapsibleCard>
+  );
+}
+
+/**
+ * Tiny helper under the SLA-hours input: shows the day/hour equivalent
+ * of a whole-hour budget, or an "exempt" note when there's no SLA.
+ */
+function SlaHint({ hours }: { hours: number | null }) {
+  if (hours == null || hours <= 0) {
+    return <span className="mt-1 block text-[0.65rem] text-ink-400">No SLA — exempt from the countdown</span>;
+  }
+  const d = Math.floor(hours / 24);
+  const h = hours % 24;
+  const parts: string[] = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0) parts.push(`${h}h`);
+  return (
+    <span className="mt-1 block text-[0.65rem] text-ink-500 tabular-nums">
+      = {parts.join(" ") || `${hours}h`} countdown
+    </span>
   );
 }
 
