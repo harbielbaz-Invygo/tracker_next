@@ -1693,6 +1693,52 @@ function MineView({
   );
   const overdueWindows = sorted.filter((r) => r.sortDate < today).length;
 
+  // ── SLA triage ────────────────────────────────────────────────────
+  // A slow (30s) clock drives the SLA-based ranking, counts and filter —
+  // per-second precision lives in the chips, the inbox only needs to
+  // re-bucket every so often. Each PO group is tagged with the worst SLA
+  // state across its pending actions, then breached POs sort to the top.
+  const slaNow = useNow(30_000);
+  const [slaFilter, setSlaFilter] = useState<"all" | "soon" | "overdue" | "critical">("all");
+
+  const groupsWithSla = useMemo(
+    () => poGroups.map((g) => {
+      const acts = [...g.internalPending, ...g.windows.flatMap((w) => w.externalPending)];
+      return { group: g, worst: worstSlaState(acts, slaNow) };
+    }),
+    [poGroups, slaNow],
+  );
+
+  // Counts of POs whose worst pending action is in each state.
+  const slaCounts = useMemo(() => {
+    let warning = 0, overdue = 0, critical = 0;
+    for (const { worst } of groupsWithSla) {
+      if (worst === "warning") warning++;
+      else if (worst === "overdue") overdue++;
+      else if (worst === "critical") critical++;
+    }
+    return { warning, overdue, critical };
+  }, [groupsWithSla]);
+
+  // Breached POs to the top; stable sort preserves nearest-window order
+  // within the same priority bucket.
+  const prioritized = useMemo(
+    () => groupsWithSla.slice().sort((a, b) => slaPriority(b.worst) - slaPriority(a.worst)),
+    [groupsWithSla],
+  );
+
+  const visibleGroups = useMemo(
+    () => prioritized.filter(({ worst }) => {
+      switch (slaFilter) {
+        case "soon":     return worst === "warning";
+        case "overdue":  return worst === "overdue" || worst === "critical";
+        case "critical": return worst === "critical";
+        default:         return true;
+      }
+    }),
+    [prioritized, slaFilter],
+  );
+
   return (
     <>
       <header className="px-4 py-3 border-b border-ink-200 shrink-0 bg-ink-50/50">
@@ -1714,7 +1760,31 @@ function MineView({
               <span className="text-flame-dark font-medium">{overdueWindows} past due</span>
             </>
           )}
+          {(slaCounts.overdue + slaCounts.critical) > 0 && (
+            <>
+              <span className="text-ink-300 mx-1.5">·</span>
+              <span className="text-flame-dark font-semibold">
+                ⚠ {slaCounts.overdue + slaCounts.critical} PO{(slaCounts.overdue + slaCounts.critical) === 1 ? "" : "s"} breaching SLA
+              </span>
+            </>
+          )}
         </p>
+        {/* SLA quick-filters — narrow the inbox to POs by SLA severity.
+            Each button disables itself when nothing matches; clicking the
+            active filter clears back to All. */}
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <SlaFilterButton label="All" active={slaFilter === "all"}
+            onClick={() => setSlaFilter("all")} />
+          <SlaFilterButton label="Remaining soon" count={slaCounts.warning}
+            tone="warning" active={slaFilter === "soon"}
+            onClick={() => setSlaFilter((f) => f === "soon" ? "all" : "soon")} />
+          <SlaFilterButton label="Overdue" count={slaCounts.overdue + slaCounts.critical}
+            tone="overdue" active={slaFilter === "overdue"}
+            onClick={() => setSlaFilter((f) => f === "overdue" ? "all" : "overdue")} />
+          <SlaFilterButton label="Critical delay" count={slaCounts.critical}
+            tone="critical" active={slaFilter === "critical"}
+            onClick={() => setSlaFilter((f) => f === "critical" ? "all" : "critical")} />
+        </div>
       </header>
 
       <div className="flex-1 overflow-auto p-4 space-y-3">
@@ -1733,9 +1803,15 @@ function MineView({
           <p className="text-sm text-ink-500 italic px-2">
             No delivery windows yet — submit an Intake to create one.
           </p>
+        ) : visibleGroups.length === 0 ? (
+          <p className="text-sm text-ink-500 italic px-2">
+            No POs match this filter.{" "}
+            <button type="button" className="underline hover:text-ink-700"
+              onClick={() => setSlaFilter("all")}>Clear filter</button>
+          </p>
         ) : (
           <ul className="space-y-2">
-            {poGroups.map((g) => (
+            {visibleGroups.map(({ group: g }) => (
               <PoInboxCard
                 key={g.poId}
                 group={g}
@@ -1750,6 +1826,44 @@ function MineView({
   );
 }
 
+
+/**
+ * SLA severity quick-filter pill for the Inbox header. Disables itself
+ * when its bucket is empty; the active pill takes its bucket's colour.
+ */
+function SlaFilterButton({
+  label, count, tone, active, onClick,
+}: {
+  label: string;
+  count?: number;
+  tone?: "warning" | "overdue" | "critical";
+  active: boolean;
+  onClick: () => void;
+}) {
+  const disabled = count !== undefined && count === 0;
+  const toneActive =
+    tone === "critical" ? "bg-flame-dark text-white border-flame-dark" :
+    tone === "overdue"  ? "bg-flame-pale text-flame-dark border-flame" :
+    tone === "warning"  ? "bg-gold-pale text-gold-dark border-gold" :
+    "bg-midnight text-white border-midnight";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[0.7rem] font-medium transition-colors",
+        active ? toneActive : "bg-white text-ink-600 border-ink-300 hover:bg-ink-50",
+        disabled && "opacity-40 cursor-not-allowed",
+      )}
+    >
+      {label}
+      {count !== undefined && (
+        <span className={cn("tabular-nums", active ? "" : "text-ink-400")}>{count}</span>
+      )}
+    </button>
+  );
+}
 
 /**
  * One PO card in the Inbox. PO-scope Internal-Phase work renders ONCE
@@ -3488,6 +3602,29 @@ export function computeSlaState(
 }
 
 type SlaInfo = { state: SlaState; overdue: boolean; label: string };
+
+const SLA_RANK: Record<SlaState, number> = { normal: 1, warning: 2, overdue: 3, critical: 4 };
+
+/** Numeric priority for sorting; null (exempt / no clock) ranks lowest. */
+function slaPriority(state: SlaState | null): number {
+  return state ? SLA_RANK[state] : 0;
+}
+
+/**
+ * The worst (highest-priority) SLA state across a set of actions at time
+ * `now` — used to rank and filter PO groups in the Inbox. Only waiting
+ * rows with a configured budget contribute; returns null when none do.
+ */
+function worstSlaState(actions: ScopedActionDetail[], now: number): SlaState | null {
+  let worst: SlaState | null = null;
+  for (const a of actions) {
+    if (a.status !== "waiting") continue;
+    const sla = computeSlaState(a.slaStartedAt, a.slaHours, now);
+    if (!sla) continue;
+    if (worst === null || SLA_RANK[sla.state] > SLA_RANK[worst]) worst = sla.state;
+  }
+  return worst;
+}
 
 /** True when this action has a running SLA clock (waiting + configured). */
 function hasLiveSla(action: ScopedActionDetail): boolean {
