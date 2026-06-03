@@ -2240,6 +2240,9 @@ function appListedSyntheticAction(po: PoNode): ScopedActionDetail | null {
     notes:            null,
     // Sort after every real action by giving it a very large sortOrder.
     sortOrder:        999_999,
+    // Synthetic rows never have an SLA clock — always exempt.
+    slaStartedAt:     null,
+    slaHours:         null,
     blockedByNames:   [],
     pendingDependentNames: [],
   };
@@ -3418,6 +3421,88 @@ function WaveSection({
  * Tooltip carries the full label + due date + (when blocked) the
  * pending parents list.
  */
+// ─────────────────────────────────────────────────────────────────
+// SLA countdown — a live "Xh remaining" / "Overdue by Yd" pill shown
+// under each actionable chip. Derived entirely client-side from the
+// action's slaStartedAt + slaHours so it ticks without a refetch.
+//   Normal   — plenty of budget left
+//   Warning  — ≤25% of the budget remaining (75%+ elapsed)
+//   Overdue  — past the deadline, by < one full budget
+//   Critical — overdue by ≥ one full budget
+// Only waiting rows show it; blocked rows have no running clock, and
+// done/skipped are settled (compliance reporting lands in Phase 4).
+// ─────────────────────────────────────────────────────────────────
+type SlaState = "normal" | "warning" | "overdue" | "critical";
+
+const SLA_PILL_STYLES: Record<SlaState, string> = {
+  normal:   "bg-green-pale text-green-dark border-green/40",
+  warning:  "bg-gold-pale text-gold-dark border-gold/50",
+  overdue:  "bg-flame-pale text-flame-dark border-flame/60",
+  critical: "bg-flame-dark text-white border-flame-dark",
+};
+
+/** Shared 1-second clock so every countdown pill ticks off one timer. */
+function useNow(intervalMs: number): number {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(t);
+  }, [intervalMs]);
+  return now;
+}
+
+function formatSlaDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const d = Math.floor(totalSec / 86_400);
+  const h = Math.floor((totalSec % 86_400) / 3_600);
+  const m = Math.floor((totalSec % 3_600) / 60);
+  const s = totalSec % 60;
+  if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  if (m > 0) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  return `${s}s`;
+}
+
+export function computeSlaState(
+  slaStartedAt: string | null,
+  slaHours: number | null,
+  now: number,
+): { state: SlaState; overdue: boolean; label: string } | null {
+  if (!slaStartedAt || slaHours == null || slaHours <= 0) return null;
+  const start = new Date(slaStartedAt).getTime();
+  if (!Number.isFinite(start)) return null;
+  const budgetMs = slaHours * 3_600_000;
+  const remainingMs = start + budgetMs - now;
+  if (remainingMs >= 0) {
+    const state: SlaState = remainingMs / budgetMs <= 0.25 ? "warning" : "normal";
+    return { state, overdue: false, label: `${formatSlaDuration(remainingMs)} remaining` };
+  }
+  const overdueMs = -remainingMs;
+  const state: SlaState = overdueMs >= budgetMs ? "critical" : "overdue";
+  return { state, overdue: true, label: `Overdue by ${formatSlaDuration(overdueMs)}` };
+}
+
+function SlaCountdown({ action, className }: { action: ScopedActionDetail; className?: string }) {
+  const now = useNow(1000);
+  // Only actionable (waiting) rows run a live clock.
+  if (action.status !== "waiting") return null;
+  const sla = computeSlaState(action.slaStartedAt, action.slaHours, now);
+  if (!sla) return null;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[0.65rem] font-semibold tabular-nums whitespace-nowrap",
+        SLA_PILL_STYLES[sla.state],
+        className,
+      )}
+      title={`SLA budget: ${action.slaHours}h${action.slaStartedAt ? ` · started ${localIsoDate(action.slaStartedAt)}` : ""}`}
+    >
+      {sla.overdue && <span aria-hidden>⚠</span>}
+      {sla.label}
+    </span>
+  );
+}
+
 function ActionChip({
   action, busy, onChangeStatus, vinsBadge, onClickOverride, onEditDate, size = "sm",
 }: {
@@ -3571,6 +3656,9 @@ function ActionChip({
           </button>
         )}
       </span>
+      {/* Live SLA countdown — sits under the chip; self-hides unless
+          this is a waiting row with an SLA budget configured. */}
+      <SlaCountdown action={action} className="mt-1 self-start" />
       {/* Local date popover for chips without an external handler.
           Renders below the chip and unhooks on submit/cancel. */}
       {usesLocalPopover && dateOpen && (
