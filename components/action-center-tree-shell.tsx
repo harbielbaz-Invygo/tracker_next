@@ -3441,10 +3441,15 @@ const SLA_PILL_STYLES: Record<SlaState, string> = {
   critical: "bg-flame-dark text-white border-flame-dark",
 };
 
-/** Shared 1-second clock so every countdown pill ticks off one timer. */
-function useNow(intervalMs: number): number {
+/**
+ * Live clock. Pass an interval in ms to tick, or `null` to disable the
+ * timer entirely (returns a stable initial value). Settled chips pass
+ * null so only chips with a running SLA actually schedule a timer.
+ */
+function useNow(intervalMs: number | null): number {
   const [now, setNow] = useState<number>(() => Date.now());
   useEffect(() => {
+    if (intervalMs == null) return;
     const t = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(t);
   }, [intervalMs]);
@@ -3482,12 +3487,30 @@ export function computeSlaState(
   return { state, overdue: true, label: `Overdue by ${formatSlaDuration(overdueMs)}` };
 }
 
-function SlaCountdown({ action, className }: { action: ScopedActionDetail; className?: string }) {
-  const now = useNow(1000);
-  // Only actionable (waiting) rows run a live clock.
-  if (action.status !== "waiting") return null;
-  const sla = computeSlaState(action.slaStartedAt, action.slaHours, now);
-  if (!sla) return null;
+type SlaInfo = { state: SlaState; overdue: boolean; label: string };
+
+/** True when this action has a running SLA clock (waiting + configured). */
+function hasLiveSla(action: ScopedActionDetail): boolean {
+  return action.status === "waiting"
+    && !!action.slaStartedAt
+    && action.slaHours != null
+    && action.slaHours > 0;
+}
+
+/**
+ * Escalation ring for the chip shell, by SLA state. Overdue chips get a
+ * flame ring; critical ones a heavier solid-flame ring so a breached
+ * action pops out of a dense list. Returns "" for non-overdue / exempt.
+ */
+function slaChipRing(sla: SlaInfo | null): string {
+  if (!sla?.overdue) return "";
+  return sla.state === "critical"
+    ? "ring-2 ring-flame-dark ring-offset-1"
+    : "ring-2 ring-flame/70";
+}
+
+/** Presentational countdown pill — state is computed by the caller. */
+function SlaPill({ sla, title, className }: { sla: SlaInfo; title?: string; className?: string }) {
   return (
     <span
       className={cn(
@@ -3495,7 +3518,7 @@ function SlaCountdown({ action, className }: { action: ScopedActionDetail; class
         SLA_PILL_STYLES[sla.state],
         className,
       )}
-      title={`SLA budget: ${action.slaHours}h${action.slaStartedAt ? ` · started ${localIsoDate(action.slaStartedAt)}` : ""}`}
+      title={title}
     >
       {sla.overdue && <span aria-hidden>⚠</span>}
       {sla.label}
@@ -3536,8 +3559,18 @@ function ActionChip({
   const [dateOpen, setDateOpen] = useState<boolean>(false);
   const usesLocalPopover = !onEditDate && action.status !== "skipped";
 
+  // Live SLA clock — only schedule a timer when this chip actually has a
+  // running SLA (waiting + configured), so settled chips cost nothing.
+  const slaActive = hasLiveSla(action);
+  const slaNow = useNow(slaActive ? 1000 : null);
+  const sla = slaActive
+    ? computeSlaState(action.slaStartedAt, action.slaHours, slaNow)
+    : null;
+
   const today = todayIso();
-  const overdue = isOverdue(action, today);
+  // SLA breach is the authoritative overdue signal when a budget is set;
+  // otherwise fall back to the legacy expected-date check.
+  const overdue = sla ? sla.overdue : isOverdue(action, today);
   const label = action.doneLabel || action.waitingLabel;
 
   const icon = action.status === "done"    ? "✅"
@@ -3610,6 +3643,8 @@ function ActionChip({
           shellFlexCls,
           "rounded border transition-colors items-stretch overflow-hidden",
           toneCls,
+          // Overdue/critical SLA → escalation ring so breaches pop.
+          slaChipRing(sla),
           busy && "opacity-50 cursor-wait",
         )}
       >
@@ -3656,9 +3691,15 @@ function ActionChip({
           </button>
         )}
       </span>
-      {/* Live SLA countdown — sits under the chip; self-hides unless
-          this is a waiting row with an SLA budget configured. */}
-      <SlaCountdown action={action} className="mt-1 self-start" />
+      {/* Live SLA countdown — sits under the chip; only present for a
+          waiting row with an SLA budget configured. */}
+      {sla && (
+        <SlaPill
+          sla={sla}
+          className="mt-1 self-start"
+          title={`SLA budget: ${action.slaHours}h${action.slaStartedAt ? ` · started ${localIsoDate(action.slaStartedAt)}` : ""}`}
+        />
+      )}
       {/* Local date popover for chips without an external handler.
           Renders below the chip and unhooks on submit/cancel. */}
       {usesLocalPopover && dateOpen && (
