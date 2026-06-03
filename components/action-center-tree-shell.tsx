@@ -2778,7 +2778,7 @@ function VinChaseView({
       {/* End-to-end retrospective — only renders once the PO is closed. */}
       <ClosedPoRetrospective po={po} />
       {/* Who moved this PO + how on-time — closed POs only. */}
-      <PoDeptStakeholderPerformance po={po} />
+      <PoPhasePerformance po={po} />
     </div>
   );
 }
@@ -2920,64 +2920,88 @@ function RetroStat({
 type PerfAgg = { name: string; done: number; onTime: number; late: number };
 
 /**
- * Department & stakeholder performance for a closed PO — who moved the
- * work and how on-time they were. Rolls up the actionable work units by
- * department and by stakeholder: how many they completed, and of those
- * with a planned date, how many landed on/before it vs late.
- *
- * Counts PO-scope Internal-Phase actions + each batch's own External-
- * Phase rows. The wave-scope external copies are deliberately EXCLUDED:
- * they're the bulk/roll-up layer mirroring the per-batch rows, so
- * counting both would credit each external step once per batch PLUS once
- * at wave level. This matches the window progress count (batches × steps).
- * Renders under the retrospective; closed POs only.
+ * Aggregate completed actions into PerfAgg rows keyed by department,
+ * stakeholder, or action-type step. For each group: how many were done,
+ * and of those with a planned date, how many landed on/before it vs
+ * late. Most-active first.
  */
-function PoDeptStakeholderPerformance({ po }: { po: PoNode }) {
-  if (!po.closedAt) return null;
-
-  const allActions: ScopedActionDetail[] = [
-    ...po.actions,
-    ...po.waves.flatMap((w) => w.batches.flatMap((b) => b.actions)),
-  ].filter((a) => a.id >= 0 && a.actionTypeName !== "Delivery");
-
-  if (allActions.length === 0) return null;
-
-  function aggregate(keyOf: (a: ScopedActionDetail) => string | null): PerfAgg[] {
-    const map = new Map<string, PerfAgg>();
-    for (const a of allActions) {
-      const name = keyOf(a) ?? "— unassigned —";
-      let g = map.get(name);
-      if (!g) { g = { name, done: 0, onTime: 0, late: 0 }; map.set(name, g); }
-      if (a.status === "done") {
-        g.done++;
-        if (a.expectedDate && a.completedAt) {
-          // completedAt is an ISO datetime; compare its local date to
-          // the planned (date-only) expectedDate.
-          if (localIsoDate(a.completedAt) <= a.expectedDate) g.onTime++;
-          else g.late++;
-        }
+function aggregatePerf(
+  actions: ScopedActionDetail[],
+  keyOf: (a: ScopedActionDetail) => string | null,
+): PerfAgg[] {
+  const map = new Map<string, PerfAgg>();
+  for (const a of actions) {
+    const name = keyOf(a) ?? "— unassigned —";
+    let g = map.get(name);
+    if (!g) { g = { name, done: 0, onTime: 0, late: 0 }; map.set(name, g); }
+    if (a.status === "done") {
+      g.done++;
+      if (a.expectedDate && a.completedAt) {
+        // completedAt is an ISO datetime; compare its local date to the
+        // planned (date-only) expectedDate.
+        if (localIsoDate(a.completedAt) <= a.expectedDate) g.onTime++;
+        else g.late++;
       }
     }
-    // Most-active first; then by name for stability.
-    return Array.from(map.values()).sort(
-      (x, y) => y.done - x.done || x.name.localeCompare(y.name),
-    );
   }
+  return Array.from(map.values()).sort(
+    (x, y) => y.done - x.done || x.name.localeCompare(y.name),
+  );
+}
 
-  const byDept = aggregate((a) => a.departmentName);
-  const byStakeholder = aggregate((a) => a.stakeholderName);
+/**
+ * Phase performance for a closed PO — two boxes:
+ *   1. Internal phase — department & stakeholder on-time (the work our
+ *      own teams own).
+ *   2. External phase — dealer-side. Any delay here is on the dealer,
+ *      so we deliberately do NOT attribute it to a department or
+ *      stakeholder; it's broken down by step (action type) instead.
+ *
+ * Internal = PO-scope actions. External = each batch's own external
+ * rows (wave-scope copies excluded to avoid double-count; Delivery
+ * excluded). Closed POs only.
+ */
+function PoPhasePerformance({ po }: { po: PoNode }) {
+  if (!po.closedAt) return null;
+
+  const internalActions = po.actions.filter((a) => a.id >= 0);
+  const externalActions = po.waves
+    .flatMap((w) => w.batches.flatMap((b) => b.actions))
+    .filter((a) => a.id >= 0 && a.actionTypeName !== "Delivery");
+
+  if (internalActions.length === 0 && externalActions.length === 0) return null;
+
+  const byDept        = aggregatePerf(internalActions, (a) => a.departmentName);
+  const byStakeholder = aggregatePerf(internalActions, (a) => a.stakeholderName);
+  const byStep        = aggregatePerf(externalActions, (a) => a.actionTypeName);
 
   return (
-    <section className="border-2 border-ink-700 rounded-md bg-white overflow-hidden">
-      <div className="px-3 py-2 border-b border-ink-200 bg-ink-50/50 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className="text-sm font-bold text-midnight">👥 Department &amp; stakeholder performance</span>
-        <span className="text-[0.7rem] text-ink-500">who moved this PO, and how on-time</span>
-      </div>
-      <div className="p-3 grid gap-4 md:grid-cols-2">
-        <PerfList title="Departments" rows={byDept} />
-        <PerfList title="Stakeholders" rows={byStakeholder} />
-      </div>
-    </section>
+    <>
+      {internalActions.length > 0 && (
+        <section className="border-2 border-ink-700 rounded-md bg-white overflow-hidden">
+          <div className="px-3 py-2 border-b border-ink-200 bg-ink-50/50 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-sm font-bold text-midnight">🛠 Internal-phase performance</span>
+            <span className="text-[0.7rem] text-ink-500">department &amp; stakeholder on-time — the work our teams own</span>
+          </div>
+          <div className="p-3 grid gap-4 md:grid-cols-2">
+            <PerfList title="Departments" rows={byDept} />
+            <PerfList title="Stakeholders" rows={byStakeholder} />
+          </div>
+        </section>
+      )}
+
+      {externalActions.length > 0 && (
+        <section className="border-2 border-ink-700 rounded-md bg-white overflow-hidden">
+          <div className="px-3 py-2 border-b border-ink-200 bg-ink-50/50 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-sm font-bold text-midnight">🤝 External-phase performance</span>
+            <span className="text-[0.7rem] text-ink-500">dealer-side — any delay here is on the dealer (broken down by step)</span>
+          </div>
+          <div className="p-3">
+            <PerfList title="By step" rows={byStep} />
+          </div>
+        </section>
+      )}
+    </>
   );
 }
 
