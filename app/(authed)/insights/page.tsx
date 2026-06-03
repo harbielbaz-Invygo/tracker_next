@@ -15,6 +15,7 @@
  */
 import InsightsShell from "@/components/insights-shell";
 import { getInsightsData } from "@/lib/insights-data";
+import { getSlaMetrics } from "@/lib/sla-metrics";
 import type { ReportPeriod } from "@/lib/reports-period";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +32,11 @@ export default async function InsightsPage({
   const period: ReportPeriod = VALID_PERIODS.includes(raw as ReportPeriod)
     ? (raw as ReportPeriod)
     : "all";
-  const data = await getInsightsData(period);
-  return <InsightsShell data={data} period={period} />;
+  // SLA health is a NOW snapshot (not period-scoped), fetched alongside
+  // the period-scoped insights payload.
+  const [data, sla] = await Promise.all([
+    getInsightsData(period),
+    getSlaMetrics(),
+  ]);
+  return <InsightsShell data={data} period={period} sla={sla} />;
 }

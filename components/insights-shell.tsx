@@ -25,6 +25,7 @@ import type {
   PoReliabilityRowFull,
 } from "@/lib/reports-data";
 import type { DashboardRow, TimelineData, StatusBucket } from "@/lib/dashboard-data";
+import type { SlaMetrics } from "@/lib/sla-metrics";
 import BatchTable from "./batch-table";
 import CompactMetric from "./compact-metric";
 import PageHeader from "./page-header";
@@ -48,11 +49,13 @@ interface Props {
   data: InsightsData;
   /** Active period filter from the URL — scopes the entire payload. */
   period: ReportPeriod;
+  /** Live SLA health snapshot (not period-scoped). */
+  sla: SlaMetrics;
 }
 
 type TrustTab = "dealer" | "ops" | "cities" | "forecast" | "po" | "risk";
 
-export default function InsightsShell({ data, period }: Props) {
+export default function InsightsShell({ data, period, sla }: Props) {
   const [trustTab, setTrustTab] = useState<TrustTab>("dealer");
   const periodLabel = REPORT_PERIODS.find((p) => p.value === period)?.label ?? "All time";
 
@@ -70,6 +73,8 @@ export default function InsightsShell({ data, period }: Props) {
       />
 
       <HeroRow hero={data.hero} />
+
+      <SlaHealthPanel sla={sla} />
 
       {/* Period selector + scope + generation timestamp. Replaces the
           "(period filter wiring is in the roadmap)" placeholder.
@@ -107,6 +112,121 @@ export default function InsightsShell({ data, period }: Props) {
      </div>
     </FluentProvider>
   );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// SLA health — live snapshot of the SLA countdown system
+// ──────────────────────────────────────────────────────────────────
+
+function SlaHealthPanel({ sla }: { sla: SlaMetrics }) {
+  // Not migrated yet → quiet hint instead of a wall of zeros.
+  if (!sla.available) {
+    return (
+      <section aria-label="SLA health" className="card">
+        <h2 className="text-sm font-semibold text-midnight">⏱ SLA health</h2>
+        <p className="text-xs text-ink-500 mt-1">
+          SLA tracking isn’t enabled yet. Run <strong>Settings → Maintenance → “SLA countdown columns”</strong>,
+          then set an SLA on the action types you want measured.
+        </p>
+      </section>
+    );
+  }
+
+  // Nothing configured / tracked yet → encourage setting durations.
+  if (sla.trackedActions === 0) {
+    return (
+      <section aria-label="SLA health" className="card">
+        <h2 className="text-sm font-semibold text-midnight">⏱ SLA health</h2>
+        <p className="text-xs text-ink-500 mt-1">
+          No actions are under an SLA yet. Set an <strong>SLA (hours)</strong> on action types in
+          Settings → Action Types and the live compliance, delayed count and overdue stats appear here.
+        </p>
+      </section>
+    );
+  }
+
+  const breaching = sla.currentlyOverdue;
+  const complianceAccent: "neutral" | "green" | "gold" | "flame" =
+    sla.compliancePct == null ? "neutral"
+      : sla.compliancePct >= 90 ? "green"
+      : sla.compliancePct >= 70 ? "gold"
+      : "flame";
+
+  return (
+    <section aria-label="SLA health" className="space-y-2">
+      <div className="flex items-baseline justify-between gap-2">
+        <h2 className="text-sm font-semibold text-midnight">⏱ SLA health</h2>
+        <span className="text-[0.65rem] text-ink-400">
+          Live snapshot · {sla.trackedActions} action{sla.trackedActions === 1 ? "" : "s"} under SLA
+        </span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <HeroTile
+          label="SLA compliance"
+          value={sla.compliancePct == null ? "—" : `${sla.compliancePct}%`}
+          accent={complianceAccent}
+          emphasis
+          sub={sla.doneTotal > 0
+            ? `${sla.doneOnTime}/${sla.doneTotal} completed on time`
+            : "no completed SLA actions yet"}
+          title="Of completed actions that had an SLA budget, the share that finished within budget."
+        />
+        <HeroTile
+          label="Delayed now"
+          value={breaching.toLocaleString()}
+          accent={breaching > 0 ? "flame" : "green"}
+          sub={sla.currentlyCritical > 0
+            ? `${sla.currentlyCritical} critical (overdue ≥ budget)`
+            : "actions currently past SLA"}
+          title="Waiting actions whose live countdown is past the deadline right now."
+        />
+        <HeroTile
+          label="Avg overdue"
+          value={sla.avgOverdueHours == null ? "—" : fmtHours(sla.avgOverdueHours)}
+          accent={sla.avgOverdueHours == null ? "neutral" : "gold"}
+          sub="mean lateness of current breaches"
+          title="Average time past deadline across all currently-overdue actions."
+        />
+        <HeroTile
+          label="Worst overdue"
+          value={sla.maxOverdueHours == null ? "—" : fmtHours(sla.maxOverdueHours)}
+          accent={sla.maxOverdueHours == null ? "neutral" : "flame"}
+          sub="single most-overdue action"
+          title="The largest current overdue duration."
+        />
+      </div>
+
+      {sla.byType.length > 0 && (
+        <div className="card">
+          <h3 className="text-xs font-semibold text-ink-600 uppercase tracking-wide mb-2">
+            Breaches by action type
+          </h3>
+          <ul className="space-y-1">
+            {sla.byType.map((b) => (
+              <li key={b.name} className="flex items-center justify-between text-xs">
+                <span className="text-ink-700">{b.name}</span>
+                <span className="tabular-nums text-flame-dark font-medium">
+                  {b.overdue} overdue
+                  <span className="text-ink-400 font-normal"> / {b.tracked} tracked</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Compact "Xd Yh" / "Zh" for an hours value (may be fractional). */
+function fmtHours(hours: number): string {
+  if (hours >= 24) {
+    const d = Math.floor(hours / 24);
+    const h = Math.round(hours - d * 24);
+    return h > 0 ? `${d}d ${h}h` : `${d}d`;
+  }
+  if (hours >= 1) return `${Math.round(hours)}h`;
+  return `${Math.round(hours * 60)}m`;
 }
 
 // ──────────────────────────────────────────────────────────────────
