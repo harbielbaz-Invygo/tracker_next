@@ -377,7 +377,11 @@ export default function IntakeForm({ options, initialForecastBatchId = null }: P
             quantity: Number(s.quantity),
             city: s.city.trim(),
             date: s.date,
-            opsExpectedDate: s.opsExpectedDate,
+            // opsExpectedDate mirrors the availability date at Intake (ops
+            // projects later). Fall back to `date` so a split whose
+            // opsExpectedDate was never populated still submits a valid
+            // yyyy-mm-dd instead of an empty string the server rejects.
+            opsExpectedDate: s.opsExpectedDate || s.date,
           })),
         })),
         actions: actions
@@ -1048,7 +1052,12 @@ function ItemEditor({
                   value={s.date}
                   aria-label="PO Availability date"
                   title="PO Availability date — dealer-promised date from the PO. Editable so manual entries / new items can be filled in."
-                  onChange={(e) => onSplitChange(j, { date: e.target.value })}
+                  // Intake doesn't capture a separate Ops-expected date (ops
+                  // projects later in the Action Center), so opsExpectedDate
+                  // mirrors the availability date — keep them in sync as the
+                  // user edits, otherwise a manually-added split submits an
+                  // empty opsExpectedDate and the server rejects it.
+                  onChange={(e) => onSplitChange(j, { date: e.target.value, opsExpectedDate: e.target.value })}
                 />
                 <button type="button" onClick={() => onRemoveSplit(j)}
                         disabled={item.splits.length === 1}
