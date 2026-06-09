@@ -895,8 +895,8 @@ function poStatusBucket(po: PoNode): Exclude<PoStatusFilter, "all"> {
 const PO_STATUS_FILTERS: { value: PoStatusFilter; label: string; title: string }[] = [
   { value: "active",    label: "Active",    title: "Open POs still in progress (incl. Pre-PO bets)" },
   { value: "all",       label: "All",       title: "Every PO" },
-  { value: "completed", label: "Completed", title: "Closed — every batch delivered in full" },
-  { value: "partly",    label: "Partly",    title: "Closed — partly delivered (mixed / partial)" },
+  { value: "completed", label: "Completed", title: "Closed & delivered — full or partial (everything except cancelled)" },
+  { value: "partly",    label: "Partly",    title: "Closed — partly delivered (mixed / partial) only" },
   { value: "cancelled", label: "Cancelled", title: "Closed — every batch cancelled" },
 ];
 
@@ -965,8 +965,15 @@ function DealerTree({
       }
       return false;
     };
-    const matchStatus = (p: PoNode) =>
-      statusFilter === "all" || poStatusBucket(p) === statusFilter;
+    const matchStatus = (p: PoNode) => {
+      if (statusFilter === "all") return true;
+      const bucket = poStatusBucket(p);
+      // "Completed" = every closed PO that delivered at least some cars
+      // (full OR partial) — i.e. all closed minus the fully-cancelled.
+      // "Partly" remains the narrower view of just the partial ones.
+      if (statusFilter === "completed") return bucket === "completed" || bucket === "partly";
+      return bucket === statusFilter;
+    };
     return tree.dealers
       .map((d) => ({ ...d, pos: d.pos.filter((p) => matchPo(p, d.name) && matchStatus(p)) }))
       .filter((d) => d.pos.length > 0)
