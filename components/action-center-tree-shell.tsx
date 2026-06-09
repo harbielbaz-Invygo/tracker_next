@@ -67,6 +67,7 @@ function useShell(): ShellCtx {
   return ctx;
 }
 import { cn } from "@/lib/utils";
+import { computeBaselineReliability } from "@/lib/baseline-reliability";
 
 type Status = ScopedActionDetail["status"];
 
@@ -2885,6 +2886,27 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
   const workTotal = Array.from(workingByDate.values()).reduce((s, n) => s + n, 0);
   const changed = dates.some((d) => (baselineByDate.get(d) ?? 0) !== (workingByDate.get(d) ?? 0));
 
+  // Baseline reliability — actual deliveries scored against the frozen
+  // promise (Phase 3). Deliveries come from delivered batches' closedAt.
+  const deliveries = po.waves.flatMap((w) =>
+    w.batches
+      .filter((b) => b.closureReason === "delivered" && b.closedAt)
+      .map((b) => ({ date: b.closedAt!.slice(0, 10), quantity: b.deliveredQuantity ?? 0 })));
+  const rel = computeBaselineReliability(po.baseline, deliveries, todayIso());
+  const deliveredByWindow = new Map<string, number>();
+  for (const w of po.waves) {
+    const del = w.batches
+      .filter((b) => b.closureReason === "delivered")
+      .reduce((s, b) => s + (b.deliveredQuantity ?? 0), 0);
+    if (del > 0) deliveredByWindow.set(w.availabilityDate, (deliveredByWindow.get(w.availabilityDate) ?? 0) + del);
+  }
+  const deliveredTotal = Array.from(deliveredByWindow.values()).reduce((s, n) => s + n, 0);
+  const relTone =
+    rel.onTimeRate == null ? "text-ink-400"
+    : rel.onTimeRate >= 90 ? "text-green-dark"
+    : rel.onTimeRate >= 70 ? "text-gold-dark"
+    : "text-flame-dark";
+
   function startEdit() {
     setDraft(dates
       .filter((d) => (workingByDate.get(d) ?? 0) > 0 || baselineByDate.has(d))
@@ -2951,12 +2973,27 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
 
       {!editing ? (
         <>
+          {/* Baseline reliability headline — actual vs the frozen promise. */}
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 pb-1.5 border-b border-ink-200">
+            <span className="text-[0.6rem] font-medium uppercase tracking-wide text-ink-500">📊 Baseline reliability</span>
+            <span className={cn("text-sm font-bold tabular-nums", relTone)}>
+              {rel.onTimeRate == null ? "—" : `${rel.onTimeRate}%`}
+            </span>
+            <span className="text-[0.65rem] text-ink-500 tabular-nums">
+              {rel.onTime}/{rel.promisedTotal} cars on time
+              {rel.deliveredTotal < rel.promisedTotal && ` · ${rel.deliveredTotal}/${rel.promisedTotal} delivered`}
+              {rel.shortfallToDate > 0 && (
+                <span className="text-flame-dark font-medium"> · {rel.shortfallToDate} short of promise</span>
+              )}
+            </span>
+          </div>
           <table className="w-full text-[0.7rem] tabular-nums">
             <thead>
               <tr className="text-ink-500 text-left">
                 <th className="font-medium py-0.5">Window</th>
                 <th className="font-medium py-0.5 text-right">Promised</th>
                 <th className="font-medium py-0.5 text-right">Working</th>
+                <th className="font-medium py-0.5 text-right">Del.</th>
                 <th className="font-medium py-0.5 text-right">Δ</th>
               </tr>
             </thead>
@@ -2971,6 +3008,7 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
                     <td className="py-0.5 text-midnight">{d}{isNew && <span className="ml-1 text-[0.6rem] text-brand-dark">new</span>}</td>
                     <td className="py-0.5 text-right text-ink-600">{promised || "—"}</td>
                     <td className="py-0.5 text-right font-medium text-midnight">{working || "—"}</td>
+                    <td className="py-0.5 text-right text-green-dark">{deliveredByWindow.get(d) || "—"}</td>
                     <td className={cn("py-0.5 text-right font-medium", delta > 0 ? "text-green-dark" : delta < 0 ? "text-flame-dark" : "text-ink-400")}>
                       {delta === 0 ? "0" : delta > 0 ? `+${delta}` : `${delta}`}
                     </td>
@@ -2983,6 +3021,7 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
                 <td className="py-0.5">Total</td>
                 <td className="py-0.5 text-right">{baseTotal}</td>
                 <td className="py-0.5 text-right">{workTotal}</td>
+                <td className="py-0.5 text-right text-green-dark">{deliveredTotal || "—"}</td>
                 <td className={cn("py-0.5 text-right", workTotal === baseTotal ? "text-ink-400" : "text-flame-dark")}>
                   {workTotal === baseTotal ? "0" : workTotal - baseTotal}
                 </td>
