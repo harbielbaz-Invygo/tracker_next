@@ -2848,6 +2848,91 @@ function PrePoLegsSection({
   );
 }
 
+/**
+ * Read-only "promised vs working" delivery-plan panel (frozen baseline).
+ * Shows the immutable baseline (planned cars per window at PO upload) next
+ * to the current working allocation, with the per-window delta. Self-hides
+ * until the baseline is frozen (po_delivery_baseline migration run).
+ */
+function DeliveryPlanPanel({ po }: { po: PoNode }) {
+  if (po.baseline.length === 0) return null;
+
+  const workingByDate = new Map<string, number>();
+  for (const w of po.waves) {
+    const qty = w.batches.reduce((s, b) => s + b.requestedQuantity, 0);
+    workingByDate.set(w.availabilityDate, (workingByDate.get(w.availabilityDate) ?? 0) + qty);
+  }
+  const baselineByDate = new Map<string, number>();
+  for (const b of po.baseline) baselineByDate.set(b.windowDate, b.quantity);
+
+  const dates = Array.from(new Set([...baselineByDate.keys(), ...workingByDate.keys()])).sort();
+  const baseTotal = po.baseline.reduce((s, b) => s + b.quantity, 0);
+  const workTotal = Array.from(workingByDate.values()).reduce((s, n) => s + n, 0);
+  const changed = dates.some((d) => (baselineByDate.get(d) ?? 0) !== (workingByDate.get(d) ?? 0));
+
+  return (
+    <section className="border border-ink-200 rounded-md bg-ink-50/40 p-3 space-y-2">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h4 className="text-[0.7rem] font-semibold uppercase tracking-wide text-ink-600">
+          🚚 Delivery plan — promised vs working
+        </h4>
+        <span className={cn("text-[0.65rem] font-medium", changed ? "text-gold-dark" : "text-green-dark")}>
+          {changed ? "↪ redistributed" : "✓ matches the promise"}
+        </span>
+      </div>
+      <table className="w-full text-[0.7rem] tabular-nums">
+        <thead>
+          <tr className="text-ink-500 text-left">
+            <th className="font-medium py-0.5">Window</th>
+            <th className="font-medium py-0.5 text-right">Promised</th>
+            <th className="font-medium py-0.5 text-right">Working</th>
+            <th className="font-medium py-0.5 text-right">Δ</th>
+          </tr>
+        </thead>
+        <tbody>
+          {dates.map((d) => {
+            const promised = baselineByDate.get(d) ?? 0;
+            const working = workingByDate.get(d) ?? 0;
+            const delta = working - promised;
+            const isNew = !baselineByDate.has(d);
+            return (
+              <tr key={d} className="border-t border-ink-100">
+                <td className="py-0.5 text-midnight">
+                  {d}
+                  {isNew && <span className="ml-1 text-[0.6rem] text-brand-dark">new</span>}
+                </td>
+                <td className="py-0.5 text-right text-ink-600">{promised || "—"}</td>
+                <td className="py-0.5 text-right font-medium text-midnight">{working || "—"}</td>
+                <td className={cn(
+                  "py-0.5 text-right font-medium",
+                  delta > 0 ? "text-green-dark" : delta < 0 ? "text-flame-dark" : "text-ink-400",
+                )}>
+                  {delta === 0 ? "0" : delta > 0 ? `+${delta}` : `${delta}`}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+        <tfoot>
+          <tr className="border-t border-ink-200 font-semibold text-midnight">
+            <td className="py-0.5">Total</td>
+            <td className="py-0.5 text-right">{baseTotal}</td>
+            <td className="py-0.5 text-right">{workTotal}</td>
+            <td className={cn("py-0.5 text-right", workTotal === baseTotal ? "text-ink-400" : "text-flame-dark")}>
+              {workTotal === baseTotal ? "0" : workTotal - baseTotal}
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+      <p className="text-[0.6rem] text-ink-400 leading-snug">
+        <strong>Promised</strong> = the frozen plan captured at PO upload (the reliability baseline).{" "}
+        <strong>Working</strong> = current windows. Reliability is always scored against Promised, so
+        moving cars between windows never hides a missed commitment.
+      </p>
+    </section>
+  );
+}
+
 function VinChaseView({
   po, busyActionId, busyBatchId, onChangeStatus, onBulkSetStatus, onBatchOp,
   expandedWaveIds, onToggleWave, inlineForm, onOpenInlineForm, onCloseInlineForm,
@@ -2865,6 +2950,7 @@ function VinChaseView({
   }
   return (
     <div className="space-y-4">
+      <DeliveryPlanPanel po={po} />
       {po.waves.map((w) => (
         <WaveSection
           key={w.id}

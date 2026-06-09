@@ -20,6 +20,7 @@ import {
   batchForecasts, users,
 } from "@/lib/db/schema";
 import { computePoReliability, type ReliabilityBatch } from "@/lib/po-reliability";
+import { getAllPoBaselines, type BaselineWindow } from "@/lib/po-baseline";
 
 type BatchRow = typeof batches.$inferSelect;
 
@@ -383,6 +384,13 @@ export interface PoNode {
    */
   reliabilityScore:    number | null;
   /**
+   * Frozen delivery baseline — the original window plan {date, planned
+   * cars} snapshotted at intake (immutable). Empty until the
+   * po_delivery_baseline migration runs / for pre-feature POs. Drives the
+   * "promised vs working" delivery-plan panel + redistribution scoring.
+   */
+  baseline:            BaselineWindow[];
+  /**
    * True when this node is a virtual stand-in for a Pre-PO (Forecast)
    * batch — no real PO exists yet, so the drawer hides the Internal /
    * External Phase tabs and shows only the Pre-PO follow-up view.
@@ -488,7 +496,7 @@ export interface ActionTouchpoint {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, slaStartedByAction, slaHoursByActionType] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, slaStartedByAction, slaHoursByActionType, baselinesByPo] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     fetchBatchesTolerant(),
@@ -608,6 +616,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     })(),
     fetchSlaStartedByAction(),
     fetchSlaHoursByActionType(),
+    getAllPoBaselines(),
   ]);
 
   // Index per-city legs by batch — order preserved (intake order).
@@ -976,6 +985,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       daysSinceSubmission,
       daysToListed,
       reliabilityScore,
+      baseline:     baselinesByPo.get(p.id) ?? [],
       isPrePo:      false,
       prePoBatchId: null,
       prePoSummary: null,
@@ -1099,6 +1109,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       daysSinceSubmission: null,
       daysToListed:        null,
       reliabilityScore:    null,
+      baseline:            [],
       isPrePo:             true,
       prePoBatchId:        b.id,
       prePoSummary: {

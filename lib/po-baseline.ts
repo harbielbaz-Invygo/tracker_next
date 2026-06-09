@@ -59,6 +59,30 @@ export async function snapshotPoBaseline(poId: number): Promise<void> {
 }
 
 /**
+ * Bulk-read every PO's frozen baseline windows, grouped by po_id. One
+ * query for the whole Action Center tree. Tolerant → empty Map when the
+ * table isn't migrated.
+ */
+export async function getAllPoBaselines(): Promise<Map<number, BaselineWindow[]>> {
+  const out = new Map<number, BaselineWindow[]>();
+  try {
+    const rows = await db.all<{ po_id: number; window_date: string; quantity: number }>(sql`
+      SELECT po_id, window_date, quantity
+        FROM po_delivery_baseline
+       ORDER BY window_date
+    `);
+    for (const r of rows) {
+      const arr = out.get(Number(r.po_id)) ?? [];
+      arr.push({ windowDate: String(r.window_date), quantity: Number(r.quantity) || 0 });
+      out.set(Number(r.po_id), arr);
+    }
+  } catch {
+    /* not migrated — empty. */
+  }
+  return out;
+}
+
+/**
  * Read a PO's frozen baseline windows, ordered by date. Tolerant → []
  * when the table isn't migrated or the PO was never snapshotted.
  */
