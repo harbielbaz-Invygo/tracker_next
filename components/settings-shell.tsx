@@ -33,6 +33,7 @@ interface Props {
 export default function SettingsShell({ data, currentUserId }: Props) {
   return (
     <div className="space-y-3">
+      <ExportAllCard />
       <DepartmentsEditor data={data} />
       <ActionTypesEditor data={data} />
       <VinChaseStagesEditor data={data} />
@@ -40,6 +41,33 @@ export default function SettingsShell({ data, currentUserId }: Props) {
       <UsersEditor users={data.users} currentUserId={currentUserId} />
       <SettingsBatches data={data} />
       <MaintenancePanel />
+    </div>
+  );
+}
+
+/**
+ * Export every table to a multi-sheet Excel workbook. The endpoint
+ * (/api/admin/export-all) streams a SpreadsheetML .xls with one sheet
+ * per table and the Content-Disposition attachment header, so a plain
+ * link triggers the download. Admin-gated server-side.
+ */
+function ExportAllCard() {
+  return (
+    <div className="card flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 className="text-sm font-semibold text-midnight">⬇ Export all data</h2>
+        <p className="text-xs text-ink-500 mt-0.5">
+          Download the entire database as an Excel workbook — one sheet per table. Admin only;
+          passwords are never included.
+        </p>
+      </div>
+      <a
+        href="/api/admin/export-all"
+        className="btn btn-primary whitespace-nowrap"
+        title="Downloads a .xls workbook with one sheet per table. Excel may show a one-time “open anyway” notice."
+      >
+        Export all data (Excel)
+      </a>
     </div>
   );
 }
