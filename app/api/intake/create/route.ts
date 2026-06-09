@@ -792,17 +792,23 @@ export async function POST(req: NextRequest) {
   });
 
   // ── SLA clock (Phase 1b) ──────────────────────────────────────────
-  // Start the countdown for the freshly-created `waiting` actions — root
-  // PO-scope actions and all wave-scope (VIN-chase) actions. Anchored to
-  // creation time (= the intake-submission moment), so a new PO never
-  // starts already-overdue. Dependent (`blocked`) actions are skipped
-  // here; the unblock cascade stamps them when their parent completes.
+  // Start the countdown for the freshly-created `waiting` actions on the
+  // two authoritative layers:
+  //   • PO-scope    — Internal-Phase root actions.
+  //   • batch-scope — External-Phase per-batch action rows (the source of
+  //     truth the drawer + Inbox read; see WaveSection / MineView).
+  // The wave-scope "bulk" external set is deliberately NOT stamped — it's a
+  // roll-up handle that drifts out of sync with the per-batch work, so it's
+  // excluded from SLA everywhere (Inbox uses batch-scope; getSlaMetrics
+  // filters wave-scope out). Anchored to creation time (= the intake-submit
+  // moment) so a new PO never starts already-overdue. Dependent (`blocked`)
+  // actions are skipped here; the unblock cascade stamps them on unblock.
   // Best-effort + tolerant of the un-migrated column (see lib/sla.ts).
   const slaNow = new Date().toISOString();
   await stampSlaStartForScopes(
     [
       { scope: "po" as const, scopeId: slaPoId },
-      ...slaWaveIds.map((id) => ({ scope: "wave" as const, scopeId: id })),
+      ...created.map((b) => ({ scope: "batch" as const, scopeId: b.id })),
     ],
     slaNow,
   );

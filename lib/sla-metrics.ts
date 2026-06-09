@@ -68,6 +68,10 @@ export async function getSlaMetrics(now: number = Date.now()): Promise<SlaMetric
        WHERE t.sla_hours      IS NOT NULL
          AND a.sla_started_at IS NOT NULL
          AND a.status IN ('waiting', 'done')
+         -- External SLA is tracked on the authoritative batch-scope rows;
+         -- the wave-scope "bulk" set is a roll-up that drifts out of sync,
+         -- so exclude it to avoid double-counting / stale breaches.
+         AND a.scope != 'wave'
     `);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
