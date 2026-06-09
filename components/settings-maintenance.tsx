@@ -136,6 +136,13 @@ const SCHEMA_MIGRATIONS: MigrationEndpoint[] = [
       "action_types.sla_hours (nullable SLA budget) + actions.sla_started_at (nullable clock-start). Backfills waiting rows to created_at. Run before SLA durations appear in Settings.",
     supportsGet: true,
   },
+  {
+    path: "ensure-po-delivery-baseline",
+    label: "PO delivery baseline",
+    detail:
+      "po_delivery_baseline table — the frozen original delivery plan (window date + planned cars) per PO. Backfills existing POs from their current windows. Foundation for car redistribution + reliability scoring.",
+    supportsGet: true,
+  },
 ];
 
 // ── Backfills — mutate data but never delete; idempotent ──
