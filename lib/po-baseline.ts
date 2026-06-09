@@ -15,6 +15,7 @@
  */
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { computeBaselineReliability } from "@/lib/baseline-reliability";
 
 export interface BaselineWindow {
   windowDate: string;
@@ -97,6 +98,71 @@ export async function snapshotPoBaselineModel(poId: number): Promise<void> {
     }
   } catch {
     /* po_delivery_baseline_model not migrated yet — no-op. */
+  }
+}
+
+export interface PortfolioBaselineReliability {
+  /** False when the per-model baseline table isn't migrated yet. */
+  available:  boolean;
+  onTimeRate: number | null;
+  onTime:     number;
+  promised:   number;
+  delivered:  number;
+  posScored:  number;
+}
+
+/**
+ * Portfolio-wide baseline reliability — actual deliveries scored against
+ * every PO's frozen per-model baseline, aggregated. Tolerant of the
+ * un-migrated table (returns available:false). Pure read.
+ */
+export async function getPortfolioBaselineReliability(now?: string): Promise<PortfolioBaselineReliability> {
+  const empty: PortfolioBaselineReliability = {
+    available: false, onTimeRate: null, onTime: 0, promised: 0, delivered: 0, posScored: 0,
+  };
+  try {
+    const base = await db.all<{ po_id: number; window_date: string; model: string; year: number; quantity: number }>(sql`
+      SELECT po_id, window_date, model, year, quantity FROM po_delivery_baseline_model
+    `);
+    if (base.length === 0) return empty;
+    const deliv = await db.all<{ po_id: number; model: string; year: number; closed_at: string; qty: number }>(sql`
+      SELECT w.po_id AS po_id, b.model AS model, b.year AS year,
+             b.closed_at AS closed_at, b.delivered_quantity AS qty
+        FROM batches b
+        JOIN waves w ON b.wave_id = w.id
+       WHERE b.closure_reason = 'delivered' AND b.closed_at IS NOT NULL
+    `);
+
+    const key = (p: number, m: string, y: number) => `${p}|${m}|${y}`;
+    const baseByKey = new Map<string, { windowDate: string; quantity: number }[]>();
+    for (const r of base) {
+      const k = key(Number(r.po_id), String(r.model), Number(r.year));
+      const arr = baseByKey.get(k) ?? [];
+      arr.push({ windowDate: String(r.window_date), quantity: Number(r.quantity) || 0 });
+      baseByKey.set(k, arr);
+    }
+    const delByKey = new Map<string, { date: string; quantity: number }[]>();
+    for (const r of deliv) {
+      const k = key(Number(r.po_id), String(r.model), Number(r.year));
+      const arr = delByKey.get(k) ?? [];
+      arr.push({ date: String(r.closed_at).slice(0, 10), quantity: Number(r.qty) || 0 });
+      delByKey.set(k, arr);
+    }
+
+    let onTime = 0, promised = 0, delivered = 0;
+    const pos = new Set<number>();
+    for (const [k, bl] of baseByKey) {
+      const r = computeBaselineReliability(bl, delByKey.get(k) ?? [], now);
+      onTime += r.onTime; promised += r.promisedTotal; delivered += r.deliveredTotal;
+      pos.add(Number(k.split("|")[0]));
+    }
+    return {
+      available: true,
+      onTimeRate: promised > 0 ? Math.round((onTime / promised) * 100) : null,
+      onTime, promised, delivered, posScored: pos.size,
+    };
+  } catch {
+    return empty;
   }
 }
 
