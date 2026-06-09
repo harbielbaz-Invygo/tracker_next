@@ -17,11 +17,13 @@ import AccessGate from "@/components/access-gate";
 import PageHeader from "@/components/page-header";
 import ActionCenterTreeShell from "@/components/action-center-tree-shell";
 import { getActionCenterTree } from "@/lib/action-center-tree-data";
+import { auth } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export default async function ActionCenterPage() {
-  const tree = await getActionCenterTree();
+  const [tree, session] = await Promise.all([getActionCenterTree(), auth()]);
+  const isAdmin = ((session?.user as { role?: string } | undefined)?.role) === "admin";
   return (
     <AccessGate view="Action Center">
       <div>
@@ -30,7 +32,7 @@ export default async function ActionCenterPage() {
           subtitleClassName="max-w-none"
           subtitle={<>Dealer ▸ PO ▸ Delivery Window. Internal-Phase actions apply to the whole PO; External-Phase actions apply per delivery window.</>}
         />
-        <ActionCenterTreeShell tree={tree} />
+        <ActionCenterTreeShell tree={tree} isAdmin={isAdmin} />
       </div>
     </AccessGate>
   );

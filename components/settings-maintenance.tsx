@@ -143,6 +143,13 @@ const SCHEMA_MIGRATIONS: MigrationEndpoint[] = [
       "po_delivery_baseline table — the frozen original delivery plan (window date + planned cars) per PO. Backfills existing POs from their current windows. Foundation for car redistribution + reliability scoring.",
     supportsGet: true,
   },
+  {
+    path: "ensure-po-redistribution-log",
+    label: "PO redistribution log",
+    detail:
+      "po_redistribution_log audit table — who/when/why + before/after allocation for each car-redistribution. Run before using Redistribute in the External Phase.",
+    supportsGet: true,
+  },
 ];
 
 // ── Backfills — mutate data but never delete; idempotent ──
