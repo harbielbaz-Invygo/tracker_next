@@ -57,6 +57,8 @@ interface ShellCtx {
   confirm: ReturnType<typeof useConfirmDialog>["confirm"];
   alert:   ReturnType<typeof useConfirmDialog>["alert"];
   prompt:  ReturnType<typeof useConfirmDialog>["prompt"];
+  /** True when the signed-in user is an admin — gates the Redistribute UI. */
+  isAdmin: boolean;
 }
 const ShellContext = createContext<ShellCtx | null>(null);
 function useShell(): ShellCtx {
@@ -180,6 +182,8 @@ const DRAWER_VIEW_KEY = "action-center-v2-drawer-view";
 
 interface Props {
   tree: ActionCenterTree;
+  /** Signed-in user is an admin — gates the Redistribute controls. */
+  isAdmin?: boolean;
 }
 
 /** Drawer selection mode — a single PO, or the "Mine" cross-PO view. */
@@ -194,7 +198,7 @@ const TREE_W_DEFAULT = 320;
 const TREE_W_MIN = 240;
 const TREE_W_MAX = 560;
 
-export default function ActionCenterTreeShell({ tree }: Props) {
+export default function ActionCenterTreeShell({ tree, isAdmin = false }: Props) {
   const router = useRouter();
 
   // ── Drag-to-resize the split between the PO tree and the detail
@@ -680,6 +684,7 @@ export default function ActionCenterTreeShell({ tree }: Props) {
       confirm,
       alert,
       prompt,
+      isAdmin,
     }}>
     <ConfirmDialog {...dialogProps} />
     <InputDialog   {...inputProps} />
@@ -2849,12 +2854,22 @@ function PrePoLegsSection({
 }
 
 /**
- * Read-only "promised vs working" delivery-plan panel (frozen baseline).
- * Shows the immutable baseline (planned cars per window at PO upload) next
- * to the current working allocation, with the per-window delta. Self-hides
- * until the baseline is frozen (po_delivery_baseline migration run).
+ * "Promised vs working" delivery-plan panel (frozen baseline). Read-only
+ * for everyone; admins also get a Redistribute mode to move cars between
+ * windows (and add new ones). The baseline is never edited — reliability
+ * is always scored against it. Self-hides until the baseline is frozen.
  */
+type DraftWindow = { windowDate: string; quantity: number; isNew: boolean };
+
 function DeliveryPlanPanel({ po }: { po: PoNode }) {
+  const { isAdmin } = useShell();
+  const router = useRouter();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<DraftWindow[]>([]);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   if (po.baseline.length === 0) return null;
 
   const workingByDate = new Map<string, number>();
@@ -2870,65 +2885,166 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
   const workTotal = Array.from(workingByDate.values()).reduce((s, n) => s + n, 0);
   const changed = dates.some((d) => (baselineByDate.get(d) ?? 0) !== (workingByDate.get(d) ?? 0));
 
+  function startEdit() {
+    setDraft(dates
+      .filter((d) => (workingByDate.get(d) ?? 0) > 0 || baselineByDate.has(d))
+      .map((d) => ({ windowDate: d, quantity: workingByDate.get(d) ?? 0, isNew: false })));
+    setReason("");
+    setError(null);
+    setEditing(true);
+  }
+  function patch(i: number, p: Partial<DraftWindow>) {
+    setDraft((cur) => cur.map((r, idx) => (idx === i ? { ...r, ...p } : r)));
+    setError(null);
+  }
+  const draftTotal = draft.reduce((s, r) => s + (Number.isFinite(r.quantity) ? r.quantity : 0), 0);
+  const balanced = draftTotal === baseTotal;
+
+  async function save() {
+    if (!reason.trim()) { setError("Add a reason for the redistribution."); return; }
+    if (!balanced) { setError(`Cars must total ${baseTotal} (currently ${draftTotal}).`); return; }
+    for (const r of draft) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(r.windowDate)) { setError("Every window needs a date."); return; }
+      if (!Number.isInteger(r.quantity) || r.quantity < 1) { setError(`"${r.windowDate}" needs a whole number ≥ 1.`); return; }
+    }
+    setBusy(true); setError(null);
+    try {
+      const res = await fetch("/api/po-redistribute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          poId: po.id,
+          reason: reason.trim(),
+          allocation: draft.map((r) => ({ windowDate: r.windowDate, quantity: r.quantity })),
+        }),
+      });
+      if (!res.ok) {
+        const t = await res.json().catch(() => ({} as { error?: string }));
+        throw new Error(t.error || `Redistribute failed (${res.status})`);
+      }
+      setEditing(false);
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="border border-ink-200 rounded-md bg-ink-50/40 p-3 space-y-2">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h4 className="text-[0.7rem] font-semibold uppercase tracking-wide text-ink-600">
           🚚 Delivery plan — promised vs working
         </h4>
-        <span className={cn("text-[0.65rem] font-medium", changed ? "text-gold-dark" : "text-green-dark")}>
-          {changed ? "↪ redistributed" : "✓ matches the promise"}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className={cn("text-[0.65rem] font-medium", changed ? "text-gold-dark" : "text-green-dark")}>
+            {changed ? "↪ redistributed" : "✓ matches the promise"}
+          </span>
+          {isAdmin && !editing && (
+            <button type="button" onClick={startEdit} className="text-[0.65rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel">
+              ↪ Redistribute
+            </button>
+          )}
+        </div>
       </div>
-      <table className="w-full text-[0.7rem] tabular-nums">
-        <thead>
-          <tr className="text-ink-500 text-left">
-            <th className="font-medium py-0.5">Window</th>
-            <th className="font-medium py-0.5 text-right">Promised</th>
-            <th className="font-medium py-0.5 text-right">Working</th>
-            <th className="font-medium py-0.5 text-right">Δ</th>
-          </tr>
-        </thead>
-        <tbody>
-          {dates.map((d) => {
-            const promised = baselineByDate.get(d) ?? 0;
-            const working = workingByDate.get(d) ?? 0;
-            const delta = working - promised;
-            const isNew = !baselineByDate.has(d);
-            return (
-              <tr key={d} className="border-t border-ink-100">
-                <td className="py-0.5 text-midnight">
-                  {d}
-                  {isNew && <span className="ml-1 text-[0.6rem] text-brand-dark">new</span>}
-                </td>
-                <td className="py-0.5 text-right text-ink-600">{promised || "—"}</td>
-                <td className="py-0.5 text-right font-medium text-midnight">{working || "—"}</td>
-                <td className={cn(
-                  "py-0.5 text-right font-medium",
-                  delta > 0 ? "text-green-dark" : delta < 0 ? "text-flame-dark" : "text-ink-400",
-                )}>
-                  {delta === 0 ? "0" : delta > 0 ? `+${delta}` : `${delta}`}
+
+      {!editing ? (
+        <>
+          <table className="w-full text-[0.7rem] tabular-nums">
+            <thead>
+              <tr className="text-ink-500 text-left">
+                <th className="font-medium py-0.5">Window</th>
+                <th className="font-medium py-0.5 text-right">Promised</th>
+                <th className="font-medium py-0.5 text-right">Working</th>
+                <th className="font-medium py-0.5 text-right">Δ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dates.map((d) => {
+                const promised = baselineByDate.get(d) ?? 0;
+                const working = workingByDate.get(d) ?? 0;
+                const delta = working - promised;
+                const isNew = !baselineByDate.has(d);
+                return (
+                  <tr key={d} className="border-t border-ink-100">
+                    <td className="py-0.5 text-midnight">{d}{isNew && <span className="ml-1 text-[0.6rem] text-brand-dark">new</span>}</td>
+                    <td className="py-0.5 text-right text-ink-600">{promised || "—"}</td>
+                    <td className="py-0.5 text-right font-medium text-midnight">{working || "—"}</td>
+                    <td className={cn("py-0.5 text-right font-medium", delta > 0 ? "text-green-dark" : delta < 0 ? "text-flame-dark" : "text-ink-400")}>
+                      {delta === 0 ? "0" : delta > 0 ? `+${delta}` : `${delta}`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr className="border-t border-ink-200 font-semibold text-midnight">
+                <td className="py-0.5">Total</td>
+                <td className="py-0.5 text-right">{baseTotal}</td>
+                <td className="py-0.5 text-right">{workTotal}</td>
+                <td className={cn("py-0.5 text-right", workTotal === baseTotal ? "text-ink-400" : "text-flame-dark")}>
+                  {workTotal === baseTotal ? "0" : workTotal - baseTotal}
                 </td>
               </tr>
-            );
-          })}
-        </tbody>
-        <tfoot>
-          <tr className="border-t border-ink-200 font-semibold text-midnight">
-            <td className="py-0.5">Total</td>
-            <td className="py-0.5 text-right">{baseTotal}</td>
-            <td className="py-0.5 text-right">{workTotal}</td>
-            <td className={cn("py-0.5 text-right", workTotal === baseTotal ? "text-ink-400" : "text-flame-dark")}>
-              {workTotal === baseTotal ? "0" : workTotal - baseTotal}
-            </td>
-          </tr>
-        </tfoot>
-      </table>
-      <p className="text-[0.6rem] text-ink-400 leading-snug">
-        <strong>Promised</strong> = the frozen plan captured at PO upload (the reliability baseline).{" "}
-        <strong>Working</strong> = current windows. Reliability is always scored against Promised, so
-        moving cars between windows never hides a missed commitment.
-      </p>
+            </tfoot>
+          </table>
+          <p className="text-[0.6rem] text-ink-400 leading-snug">
+            <strong>Promised</strong> = the frozen plan from PO upload (the reliability baseline).{" "}
+            <strong>Working</strong> = current windows. Reliability is always scored against Promised,
+            so moving cars never hides a missed commitment.
+          </p>
+        </>
+      ) : (
+        <div className="space-y-2">
+          <p className="text-[0.6rem] text-ink-500">
+            Move cars between windows (or add a window). The total must stay {baseTotal} — the baseline never changes.
+          </p>
+          <div className="space-y-1">
+            {draft.map((r, i) => (
+              <div key={i} className="grid grid-cols-[1fr_5rem_auto] items-center gap-2">
+                {r.isNew ? (
+                  <input type="date" value={r.windowDate} aria-label="New window date"
+                    onChange={(e) => patch(i, { windowDate: e.target.value })}
+                    className="text-[0.7rem] px-2 py-1 border border-ink-300 rounded tabular-nums" />
+                ) : (
+                  <span className="text-[0.7rem] text-midnight tabular-nums">{r.windowDate}</span>
+                )}
+                <input type="number" min={1} value={Number.isFinite(r.quantity) ? r.quantity : ""}
+                  aria-label={`Cars for ${r.windowDate}`}
+                  onChange={(e) => patch(i, { quantity: parseInt(e.target.value, 10) })}
+                  className="text-[0.7rem] px-2 py-1 border border-ink-300 rounded tabular-nums text-right" />
+                {r.isNew ? (
+                  <button type="button" onClick={() => setDraft((c) => c.filter((_, idx) => idx !== i))}
+                    className="text-[0.65rem] text-flame-dark px-1">✕</button>
+                ) : <span />}
+              </div>
+            ))}
+          </div>
+          <button type="button"
+            onClick={() => setDraft((c) => [...c, { windowDate: "", quantity: 0, isNew: true }])}
+            className="text-[0.65rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50">
+            + Add window
+          </button>
+          <div className="flex items-center justify-between gap-2 pt-1 border-t border-ink-200">
+            <span className={cn("text-[0.7rem] font-semibold tabular-nums", balanced ? "text-green-dark" : "text-flame-dark")}>
+              Total {draftTotal} / {baseTotal} {balanced ? "✓" : "✗"}
+            </span>
+          </div>
+          <input type="text" value={reason} placeholder="Reason (e.g. dealer can't supply 5 cars on the 1st)"
+            onChange={(e) => { setReason(e.target.value); setError(null); }}
+            className="w-full text-[0.7rem] px-2 py-1 border border-ink-300 rounded" />
+          {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
+          <div className="flex justify-end gap-1.5">
+            <button type="button" onClick={() => setEditing(false)} disabled={busy}
+              className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50">Cancel</button>
+            <button type="button" onClick={save} disabled={busy || !balanced || !reason.trim()}
+              className="text-[0.7rem] px-2 py-0.5 rounded border border-brand bg-brand text-white disabled:opacity-50 hover:bg-brand-dark">
+              {busy ? "…" : "Save redistribution"}
+            </button>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
