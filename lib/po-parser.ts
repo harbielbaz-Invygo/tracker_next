@@ -167,11 +167,14 @@ function extractDeliveryInstructions(text: string): string | null {
 // items section, and any trailing pricing digits are peeled off later
 // by parseItemChunk's pricing regex.
 //
-// Each token must START with a letter so a year-like 4-digit number
-// in the description ("2030 Special edition") can't be confused for a
-// model token. Tokens MAY contain digits after the first letter so
-// model codes like GS3 / Q5 / X3 / E300 / C-HR / GT-R parse cleanly.
-const ITEM_HEAD_RE = /^([A-Z][A-Za-z0-9\-]*(?:\s+[A-Za-z][A-Za-z0-9\-]*){1,4})\s+(20[2-3][0-9])/gm;
+// The first token must START with a letter so a year-like 4-digit number
+// in the description ("2030 Special edition") can't be confused for the
+// model. Tokens MAY contain digits after the first letter so model codes
+// like GS3 / Q5 / X3 / E300 / C-HR / GT-R parse cleanly. A later token may
+// ALSO be a standalone 1–3 digit number so split-word models like "MG 5"
+// or "BMW 320" parse — 1–3 digits can never be a 4-digit year, so the
+// year-discrimination still holds.
+const ITEM_HEAD_RE = /^([A-Z][A-Za-z0-9\-]*(?:\s+(?:[A-Za-z][A-Za-z0-9\-]*|\d{1,3})){1,4})\s+(20[2-3][0-9])/gm;
 
 /**
  * Drop table-header garbage that some PDFs concatenate into a row, e.g.
@@ -201,6 +204,10 @@ function cleanModelName(raw: string): string {
       if (/^[A-Z][A-Za-z0-9]*\d[A-Za-z0-9]*$/.test(w)) return true;
       // Hyphenated alphanumeric model code (C-HR, GT-R, X-Trail, GS-3).
       if (/^[A-Z][A-Za-z0-9]*(?:-[A-Z0-9][A-Za-z0-9]*)+$/.test(w)) return true;
+      // Standalone short number that's part of a split-word model
+      // ("MG 5" → MG + 5, "BMW 320" → BMW + 320). 1–3 digits so a 4-digit
+      // year can never be mistaken for a model token.
+      if (/^\d{1,3}$/.test(w)) return true;
       return false;
     })
     .join(" ");
@@ -370,6 +377,7 @@ function extractDeliverySplits(text: string): DeliverySplit[] {
 
     itemRe.lastIndex = 0;
     let im: RegExpExecArray | null;
+    let cityFound = false;
     while ((im = itemRe.exec(prefix)) !== null) {
       const qty = parseInt(im[1], 10);
       const cityRaw = im[2];
@@ -378,6 +386,22 @@ function extractDeliverySplits(text: string): DeliverySplit[] {
       if (seen.has(key)) continue;
       seen.add(key);
       out.push({ quantity: qty, city, date: dateIso });
+      cityFound = true;
+    }
+    // Cityless format — "<qty> cars on <Date>" with no "in <City>"
+    // (single-destination POs). Take the last "<qty> cars/units" in the
+    // prefix and emit a split with an empty city for ops to fill.
+    if (!cityFound) {
+      const carMatches = [...prefix.matchAll(/(\d+)\s*(?:cars?|units?|vehicles?)\b/gi)];
+      const last = carMatches.at(-1);
+      const qty = last ? parseInt(last[1], 10) : NaN;
+      if (Number.isFinite(qty) && qty > 0) {
+        const key = `${qty}||${dateIso}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push({ quantity: qty, city: "", date: dateIso });
+        }
+      }
     }
   }
   return out;
