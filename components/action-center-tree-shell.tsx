@@ -2926,6 +2926,7 @@ function DeliveryPlanReadonlyFallback({ po }: { po: PoNode }) {
 function DeliveryPlanPanel({ po }: { po: PoNode }) {
   const { isAdmin } = useShell();
   const router = useRouter();
+  const [collapsed, setCollapsed] = useState(true);
   const [selModel, setSelModel] = useState<string>("");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<DraftWindow[]>([]);
@@ -3072,21 +3073,39 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
 
   return (
     <section className="border border-ink-200 rounded-md bg-ink-50/40 p-3 space-y-2">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h4 className="text-[0.7rem] font-semibold uppercase tracking-wide text-ink-600">
-          🚚 Delivery plan — promised vs working
-        </h4>
-        <div className="flex items-center gap-2">
-          <span className={cn("text-[0.65rem] font-medium", changed ? "text-gold-dark" : "text-green-dark")}>
-            {changed ? "↪ redistributed" : "✓ matches the promise"}
+      {/* Collapsed by default — click the header to expand. The summary
+          (reliability % + redistributed/on-plan) stays visible collapsed. */}
+      <button
+        type="button"
+        onClick={() => setCollapsed((c) => !c)}
+        aria-expanded={!collapsed}
+        className="w-full flex flex-wrap items-center justify-between gap-2 text-left"
+      >
+        <span className="flex items-center gap-1.5">
+          <span className="text-ink-400 text-[0.7rem] leading-none">{collapsed ? "▸" : "▾"}</span>
+          <span className="text-[0.7rem] font-semibold uppercase tracking-wide text-ink-600">
+            🚚 Delivery plan — promised vs working
           </span>
-          {isAdmin && !editing && (
-            <button type="button" onClick={startEdit} className="text-[0.65rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel">
-              ↪ Redistribute
-            </button>
+        </span>
+        <span className="flex items-center gap-2">
+          {poRate != null && (
+            <span className={cn("text-[0.7rem] font-bold tabular-nums", poRelTone)}>{poRate}%</span>
           )}
+          <span className={cn("text-[0.65rem] font-medium", changed ? "text-gold-dark" : "text-green-dark")}>
+            {changed ? "↪ redistributed" : "✓ on plan"}
+          </span>
+        </span>
+      </button>
+
+      {!collapsed && (
+      <>
+      {isAdmin && !editing && (
+        <div className="flex justify-end">
+          <button type="button" onClick={startEdit} className="text-[0.65rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel">
+            ↪ Redistribute
+          </button>
         </div>
-      </div>
+      )}
 
       {/* PO-level baseline reliability — across all models (scorecard). */}
       {models.length > 1 && (
@@ -3225,6 +3244,8 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
             </button>
           </div>
         </div>
+      )}
+      </>
       )}
     </section>
   );
