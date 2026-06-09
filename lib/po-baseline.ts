@@ -21,6 +21,14 @@ export interface BaselineWindow {
   quantity: number;
 }
 
+/** Per-(window × model) frozen baseline — the per-model promise. */
+export interface BaselineModelWindow {
+  windowDate: string;
+  model: string;
+  year: number;
+  quantity: number;
+}
+
 /**
  * Freeze a PO's delivery plan as its reliability baseline — one row per
  * delivery window (availability date) with the original planned car count
@@ -56,6 +64,65 @@ export async function snapshotPoBaseline(poId: number): Promise<void> {
   } catch {
     /* po_delivery_baseline not migrated yet — no-op. */
   }
+}
+
+/**
+ * Freeze a PO's plan per (window × model) — one row per window/model with
+ * the original planned car count. Immutable + idempotent (skips if any
+ * per-model baseline already exists). Tolerant of the un-migrated table.
+ */
+export async function snapshotPoBaselineModel(poId: number): Promise<void> {
+  if (!Number.isInteger(poId) || poId <= 0) return;
+  try {
+    const existing = await db.all(
+      sql`SELECT 1 FROM po_delivery_baseline_model WHERE po_id = ${poId} LIMIT 1`,
+    );
+    if (existing.length > 0) return;
+    const rows = await db.all<{ window_date: string; model: string; year: number; qty: number }>(sql`
+      SELECT w.availability_date AS window_date,
+             b.model             AS model,
+             b.year              AS year,
+             COALESCE(SUM(b.requested_quantity), 0) AS qty
+        FROM waves w
+        JOIN batches b ON b.wave_id = w.id
+       WHERE w.po_id = ${poId}
+       GROUP BY w.id, w.availability_date, b.model, b.year
+    `);
+    for (const r of rows) {
+      if (!r.window_date) continue;
+      await db.run(sql`
+        INSERT INTO po_delivery_baseline_model (po_id, window_date, model, year, quantity)
+        VALUES (${poId}, ${r.window_date}, ${r.model ?? ""}, ${Number(r.year) || 0}, ${Number(r.qty) || 0})
+      `);
+    }
+  } catch {
+    /* po_delivery_baseline_model not migrated yet — no-op. */
+  }
+}
+
+/** Bulk-read every PO's per-(window × model) baseline, grouped by po_id. */
+export async function getAllPoBaselinesModel(): Promise<Map<number, BaselineModelWindow[]>> {
+  const out = new Map<number, BaselineModelWindow[]>();
+  try {
+    const rows = await db.all<{ po_id: number; window_date: string; model: string; year: number; quantity: number }>(sql`
+      SELECT po_id, window_date, model, year, quantity
+        FROM po_delivery_baseline_model
+       ORDER BY window_date, model
+    `);
+    for (const r of rows) {
+      const arr = out.get(Number(r.po_id)) ?? [];
+      arr.push({
+        windowDate: String(r.window_date),
+        model: String(r.model ?? ""),
+        year: Number(r.year) || 0,
+        quantity: Number(r.quantity) || 0,
+      });
+      out.set(Number(r.po_id), arr);
+    }
+  } catch {
+    /* not migrated — empty. */
+  }
+  return out;
 }
 
 /**

@@ -27,7 +27,7 @@ import { getLeadTimeDays } from "@/lib/rules";
 import { requireAuth } from "@/lib/api-auth";
 import { computeExpectedDate } from "@/lib/expected-date";
 import { stampSlaStartForScopes } from "@/lib/sla";
-import { snapshotPoBaseline } from "@/lib/po-baseline";
+import { snapshotPoBaseline, snapshotPoBaselineModel } from "@/lib/po-baseline";
 
 export const runtime = "nodejs";
 
@@ -816,8 +816,10 @@ export async function POST(req: NextRequest) {
 
   // Freeze the delivery plan as the reliability baseline (Idea 1) — the
   // immutable promise that car redistribution is later scored against.
-  // Best-effort + tolerant of the un-migrated table (see lib/po-baseline).
+  // Both the per-window total and the per-(window × model) breakdown.
+  // Best-effort + tolerant of the un-migrated tables (see lib/po-baseline).
   await snapshotPoBaseline(slaPoId);
+  await snapshotPoBaselineModel(slaPoId);
 
   return NextResponse.json({
     ok: true,
