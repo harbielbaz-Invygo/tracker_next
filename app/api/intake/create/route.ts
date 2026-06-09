@@ -27,6 +27,7 @@ import { getLeadTimeDays } from "@/lib/rules";
 import { requireAuth } from "@/lib/api-auth";
 import { computeExpectedDate } from "@/lib/expected-date";
 import { stampSlaStartForScopes } from "@/lib/sla";
+import { snapshotPoBaseline } from "@/lib/po-baseline";
 
 export const runtime = "nodejs";
 
@@ -812,6 +813,11 @@ export async function POST(req: NextRequest) {
     ],
     slaNow,
   );
+
+  // Freeze the delivery plan as the reliability baseline (Idea 1) — the
+  // immutable promise that car redistribution is later scored against.
+  // Best-effort + tolerant of the un-migrated table (see lib/po-baseline).
+  await snapshotPoBaseline(slaPoId);
 
   return NextResponse.json({
     ok: true,
