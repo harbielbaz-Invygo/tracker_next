@@ -1517,7 +1517,14 @@ function MineView({
         const internalPending = p.actions.filter(isPending);
         for (const w of p.waves) {
           const externalPending: ScopedActionDetail[] = [];
-          for (const a of w.actions) if (isPending(a)) externalPending.push(a);
+          // External-Phase pending comes from the BATCH-scope action rows
+          // only — the same authoritative source the drawer's External
+          // Phase uses ("NOT the single wave-scope set"; see WaveSection).
+          // The wave-scope set is a bulk roll-up that ISN'T marked done as
+          // ops completes the per-batch work, so including it surfaced a
+          // stale head (e.g. "Sending Dealer Confirmation" / "Awaiting
+          // VIN") on windows whose batch-scope external phase is already
+          // done, and made those windows falsely count as breaching SLA.
           for (const b of w.batches) {
             for (const a of b.actions) {
               if (!isPending(a)) continue;
