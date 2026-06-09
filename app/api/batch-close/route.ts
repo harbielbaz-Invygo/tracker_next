@@ -37,6 +37,13 @@ interface CloseBody {
   note?: string | null;
   /** Closure date (ISO yyyy-mm-dd). Defaults to today. Allows backdating. */
   closedAt?: string;
+  /**
+   * Full delivery datetime (ISO, date + time) — when the cars actually
+   * landed. When provided for reason='delivered', its date drives
+   * `closedAt` and its full value is stamped on the Delivery action's
+   * completedAt. Must not post-date the batch's delivery window.
+   */
+  deliveredAt?: string;
   /** Actually-delivered quantity (only used when reason="delivered"). */
   deliveredQuantity?: number;
   /** Per-colour confirmations (only used when reason="delivered"). */
@@ -73,11 +80,19 @@ export async function POST(req: NextRequest) {
   if (body.reason !== "cancelled" && body.reason !== "delivered") {
     return apiError("reason must be 'cancelled' or 'delivered'", 400);
   }
-  // Closure date — use provided ISO, else today.
+  // Full delivery datetime (date + time), when supplied and parseable.
+  const deliveredAtIso =
+    body.deliveredAt && !Number.isNaN(new Date(body.deliveredAt).getTime())
+      ? new Date(body.deliveredAt).toISOString()
+      : null;
+
+  // Closure date — deliveredAt's date wins, then explicit closedAt, else today.
   const closedAt =
-    body.closedAt && /^\d{4}-\d{2}-\d{2}$/.test(body.closedAt)
-      ? body.closedAt
-      : new Date().toISOString().slice(0, 10);
+    deliveredAtIso
+      ? deliveredAtIso.slice(0, 10)
+      : body.closedAt && /^\d{4}-\d{2}-\d{2}$/.test(body.closedAt)
+        ? body.closedAt
+        : new Date().toISOString().slice(0, 10);
 
   // Server-side gate (G3): when closing as 'delivered', enforce the
   // same 5 checks the client tooltip shows. Cancellation skips this
@@ -86,6 +101,23 @@ export async function POST(req: NextRequest) {
     const gate = await checkBatchDeliveryGate(db, body.batchId);
     if (!gate.ok) {
       return apiError(`Cannot mark as delivered: ${gate.reason}`, 409);
+    }
+    // Window cap: a recorded delivery can't post-date the agreed window
+    // (ops-projected date, falling back to the dealer-promised date).
+    const [win] = await db
+      .select({
+        projected: batches.currentProjectedDeliveryDate,
+        promised:  batches.dealerPromisedDeliveryDate,
+      })
+      .from(batches)
+      .where(eq(batches.id, body.batchId))
+      .limit(1);
+    const windowDate = (win?.projected ?? win?.promised ?? "").slice(0, 10);
+    if (windowDate && closedAt > windowDate) {
+      return apiError(
+        `Delivery date ${closedAt} can't be after the delivery window (${windowDate}).`,
+        400,
+      );
     }
   }
 
@@ -152,15 +184,31 @@ export async function POST(req: NextRequest) {
         .from(actionTypes)
         .where(eq(actionTypes.name, "Delivery"))
         .limit(1);
+      // Use the real delivery datetime when ops supplied one; else fall
+      // back to noon on the closure date (legacy behaviour).
+      const deliveryCompletedAt = deliveredAtIso ?? `${closedAt}T12:00:00Z`;
       if (deliveryType.length > 0) {
         await tx.update(batchActions)
           .set({
             status: "done",
-            completedAt: `${closedAt}T12:00:00Z`,
+            completedAt: deliveryCompletedAt,
           })
           .where(and(
             eq(batchActions.batchId, body.batchId),
             eq(batchActions.actionTypeId, deliveryType[0].id),
+          ));
+        // Keep the scope-aware Delivery row (the live system) in sync so
+        // the timeline / SLA reflect the actual delivery moment.
+        await tx.update(actionsTable)
+          .set({
+            status: "done",
+            completedAt: deliveryCompletedAt,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(and(
+            eq(actionsTable.scope, "batch"),
+            eq(actionsTable.scopeId, body.batchId),
+            eq(actionsTable.actionTypeId, deliveryType[0].id),
           ));
       }
     }
