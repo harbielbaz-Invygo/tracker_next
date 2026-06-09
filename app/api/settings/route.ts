@@ -20,6 +20,7 @@ import { db } from "@/lib/db";
 import {
   departments, stakeholders, actionTypes, actionDependencies, batchActions, batches, users,
   vinChaseStages, batchVinStages,
+  actions as actionsTable,
 } from "@/lib/db/schema";
 import { setRuleNumber, RULE_KEYS, getLeadTimeDays } from "@/lib/rules";
 import { requireAuth } from "@/lib/api-auth";
@@ -544,6 +545,46 @@ async function handleBatch(b: Extract<Body, { resource: "batch" }>) {
 
     updates.updatedAt = new Date().toISOString();
     await db.update(batches).set(updates).where(eq(batches.id, b.id));
+
+    // Reflect a changed delivery/closure date onto the Delivery action's
+    // completedAt so the Plan-vs-Reality timeline + SLA stay in sync —
+    // mirrors /api/batch-close. Only applies when the batch is closed as
+    // 'delivered'. Date-only input → noon UTC on that day.
+    const newClosedAt = typeof updates.closedAt === "string" ? updates.closedAt : null;
+    if (newClosedAt && /^\d{4}-\d{2}-\d{2}$/.test(newClosedAt)) {
+      let reason = typeof updates.closureReason === "string" ? updates.closureReason : undefined;
+      if (reason === undefined) {
+        const [cur] = await db
+          .select({ r: batches.closureReason })
+          .from(batches)
+          .where(eq(batches.id, b.id))
+          .limit(1);
+        reason = cur?.r ?? undefined;
+      }
+      if (reason === "delivered") {
+        const completedAt = `${newClosedAt}T12:00:00Z`;
+        const [deliveryType] = await db
+          .select({ id: actionTypes.id })
+          .from(actionTypes)
+          .where(eq(actionTypes.name, "Delivery"))
+          .limit(1);
+        if (deliveryType) {
+          await db.update(batchActions)
+            .set({ status: "done", completedAt })
+            .where(and(
+              eq(batchActions.batchId, b.id),
+              eq(batchActions.actionTypeId, deliveryType.id),
+            ));
+          await db.update(actionsTable)
+            .set({ status: "done", completedAt, updatedAt: new Date().toISOString() })
+            .where(and(
+              eq(actionsTable.scope, "batch"),
+              eq(actionsTable.scopeId, b.id),
+              eq(actionsTable.actionTypeId, deliveryType.id),
+            ));
+        }
+      }
+    }
     return NextResponse.json({ ok: true });
   }
 
