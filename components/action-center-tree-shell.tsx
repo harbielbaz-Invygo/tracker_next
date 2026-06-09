@@ -81,6 +81,37 @@ function toLocalDatetimeValue(d: Date): string {
     + `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** Whole days from `todayIso` to `targetIso` (positive = future, negative
+ *  = past). Both are yyyy-mm-dd. */
+function daysUntil(targetIso: string, todayIso: string): number {
+  const a = Date.parse(`${todayIso}T00:00:00Z`);
+  const b = Date.parse(`${targetIso}T00:00:00Z`);
+  if (Number.isNaN(a) || Number.isNaN(b)) return 0;
+  return Math.round((b - a) / 86_400_000);
+}
+
+/** Prominent "days remaining" pill for a delivery window — big + coloured
+ *  so it stands out at the front of the window line. */
+function WindowDaysLeftBadge({ targetIso, today }: { targetIso: string; today: string }) {
+  const d = daysUntil(targetIso, today);
+  const label = d < 0 ? `${Math.abs(d)}d overdue` : d === 0 ? "Today" : `${d}d left`;
+  const tone =
+    d < 0   ? "bg-flame-dark text-white border-flame-dark"
+    : d <= 2 ? "bg-gold-pale text-gold-dark border-gold"
+    :          "bg-brand-pastel text-brand-dark border-brand/40";
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-md border px-2 py-0.5 text-sm font-bold tabular-nums leading-none",
+        tone,
+      )}
+      title={`${Math.abs(d)} day${Math.abs(d) === 1 ? "" : "s"} ${d < 0 ? "past" : "until"} this delivery window`}
+    >
+      {label}
+    </span>
+  );
+}
+
 /** Today + N days, ISO yyyy-mm-dd. Used as the default next-follow-up
  *  date for Log-contact / Escalate touchpoints. */
 function addDaysIso(n: number): string {
@@ -1899,8 +1930,10 @@ function WindowExternalRow({
       "rounded px-2 py-1.5",
       isOverdueWindow ? "bg-flame-pale/40" : "bg-ink-50/60",
     )}>
-      {/* Window date line — PO Expected (the window date) + Ops Expected. */}
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+      {/* Window date line — prominent days-remaining badge, then PO
+          Expected (the window date) + Ops Expected. */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+        <WindowDaysLeftBadge targetIso={row.sortDate} today={today} />
         <span className="text-[0.72rem] font-semibold text-midnight tabular-nums" title="PO Expected Date for this delivery window">
           📅 {row.windowDate}
         </span>
