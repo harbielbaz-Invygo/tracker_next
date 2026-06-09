@@ -2993,6 +2993,29 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
     : rel.onTimeRate >= 70 ? "text-gold-dark"
     : "text-flame-dark";
 
+  // PO-level rollup — baseline reliability across ALL models (the
+  // scorecard number; the per-model headline below is the selected model).
+  let poOnTime = 0, poPromised = 0;
+  for (const m of models) {
+    const bl = po.baselineModel
+      .filter((b) => modelKey(b.model, b.year) === m.key)
+      .map((b) => ({ windowDate: b.windowDate, quantity: b.quantity }));
+    const del: { date: string; quantity: number }[] = [];
+    for (const w of po.waves) for (const b of w.batches) {
+      if (b.modelYear === m.key && b.closureReason === "delivered" && b.closedAt) {
+        del.push({ date: b.closedAt.slice(0, 10), quantity: b.deliveredQuantity ?? 0 });
+      }
+    }
+    const r = computeBaselineReliability(bl, del, todayIso());
+    poOnTime += r.onTime; poPromised += r.promisedTotal;
+  }
+  const poRate = poPromised > 0 ? Math.round((poOnTime / poPromised) * 100) : null;
+  const poRelTone =
+    poRate == null ? "text-ink-400"
+    : poRate >= 90 ? "text-green-dark"
+    : poRate >= 70 ? "text-gold-dark"
+    : "text-flame-dark";
+
   function selectModel(key: string) {
     setSelModel(key);
     setEditing(false);
@@ -3064,6 +3087,15 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
           )}
         </div>
       </div>
+
+      {/* PO-level baseline reliability — across all models (scorecard). */}
+      {models.length > 1 && (
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="text-[0.6rem] font-medium uppercase tracking-wide text-ink-500">📊 PO baseline reliability</span>
+          <span className={cn("text-sm font-bold tabular-nums", poRelTone)}>{poRate == null ? "—" : `${poRate}%`}</span>
+          <span className="text-[0.65rem] text-ink-500 tabular-nums">{poOnTime}/{poPromised} cars on time · {models.length} models</span>
+        </div>
+      )}
 
       {/* Model selector — one model redistributed at a time. */}
       {models.length > 1 && (

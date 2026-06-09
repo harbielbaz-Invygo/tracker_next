@@ -26,6 +26,7 @@ import type {
 } from "@/lib/reports-data";
 import type { DashboardRow, TimelineData, StatusBucket } from "@/lib/dashboard-data";
 import type { SlaMetrics } from "@/lib/sla-metrics";
+import type { PortfolioBaselineReliability } from "@/lib/po-baseline";
 import BatchTable from "./batch-table";
 import CompactMetric from "./compact-metric";
 import PageHeader from "./page-header";
@@ -51,11 +52,13 @@ interface Props {
   period: ReportPeriod;
   /** Live SLA health snapshot (not period-scoped). */
   sla: SlaMetrics;
+  /** Portfolio baseline reliability — deliveries vs the frozen per-model promise. */
+  baselineReliability: PortfolioBaselineReliability;
 }
 
 type TrustTab = "dealer" | "ops" | "cities" | "forecast" | "po" | "risk";
 
-export default function InsightsShell({ data, period, sla }: Props) {
+export default function InsightsShell({ data, period, sla, baselineReliability }: Props) {
   const [trustTab, setTrustTab] = useState<TrustTab>("dealer");
   const periodLabel = REPORT_PERIODS.find((p) => p.value === period)?.label ?? "All time";
 
@@ -75,6 +78,8 @@ export default function InsightsShell({ data, period, sla }: Props) {
       <HeroRow hero={data.hero} />
 
       <SlaHealthPanel sla={sla} />
+
+      <BaselineReliabilityPanel rel={baselineReliability} />
 
       {/* Period selector + scope + generation timestamp. Replaces the
           "(period filter wiring is in the roadmap)" placeholder.
@@ -111,6 +116,55 @@ export default function InsightsShell({ data, period, sla }: Props) {
       <BatchExplorer rows={data.batchRows} />
      </div>
     </FluentProvider>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Baseline reliability — deliveries vs each PO's frozen per-model promise
+// ──────────────────────────────────────────────────────────────────
+
+function BaselineReliabilityPanel({ rel }: { rel: PortfolioBaselineReliability }) {
+  if (!rel.available) {
+    return (
+      <section aria-label="Baseline reliability" className="card">
+        <h2 className="text-sm font-semibold text-midnight">📊 Baseline reliability</h2>
+        <p className="text-xs text-ink-500 mt-1">
+          Not enabled yet. Run <strong>Settings → Maintenance → “PO baseline (per-model)”</strong> to
+          score deliveries against each PO’s frozen per-model promise.
+        </p>
+      </section>
+    );
+  }
+  const accent: "neutral" | "green" | "gold" | "flame" =
+    rel.onTimeRate == null ? "neutral"
+      : rel.onTimeRate >= 90 ? "green"
+      : rel.onTimeRate >= 70 ? "gold"
+      : "flame";
+  return (
+    <section aria-label="Baseline reliability" className="space-y-2">
+      <div className="flex items-baseline justify-between gap-2">
+        <h2 className="text-sm font-semibold text-midnight">📊 Baseline reliability</h2>
+        <span className="text-[0.65rem] text-ink-400">
+          Deliveries vs the frozen per-model promise · {rel.posScored} PO{rel.posScored === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <HeroTile
+          label="On-time vs promise"
+          value={rel.onTimeRate == null ? "—" : `${rel.onTimeRate}%`}
+          accent={accent}
+          emphasis
+          sub={`${rel.onTime}/${rel.promised} cars by promised date`}
+          title="Cars delivered by the date of the baseline window they fill — across every PO and model. Redistribution can't improve it (the baseline is frozen)."
+        />
+        <HeroTile label="Cars promised" value={rel.promised.toLocaleString()} sub="frozen baseline total" />
+        <HeroTile
+          label="Cars delivered"
+          value={rel.delivered.toLocaleString()}
+          sub={`${Math.max(0, rel.promised - rel.delivered)} still to deliver`}
+        />
+      </div>
+    </section>
   );
 }
 
