@@ -278,7 +278,10 @@ export default function IntakeForm({ options, initialForecastBatchId = null }: P
       splits: it.deliverySplits.length > 0
         ? it.deliverySplits.map((s) => ({
             quantity: s.quantity,
-            city: s.city,
+            // Cityless splits (PO listed only "N cars on <date>") parse
+            // with an empty city — default to the matched dealer's home
+            // city so single-destination POs need no manual entry.
+            city: s.city || matched?.homeCity || "",
             date: s.date,
             // Ops doesn't project at Intake any more — no signal yet
             // (no VIN, no dealer confirmation). The field stays in
