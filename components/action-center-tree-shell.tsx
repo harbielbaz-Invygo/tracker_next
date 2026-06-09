@@ -2907,6 +2907,11 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
     : rel.onTimeRate >= 70 ? "text-gold-dark"
     : "text-flame-dark";
 
+  // Multi-model guard (v1): redistribution only handles single-batch
+  // windows. A window with >1 batch (mixed models / splits) is disabled
+  // until per-model support lands — see /api/po-redistribute.
+  const hasMultiBatchWindow = po.waves.some((w) => w.batches.length > 1);
+
   function startEdit() {
     setDraft(dates
       .filter((d) => (workingByDate.get(d) ?? 0) > 0 || baselineByDate.has(d))
@@ -2963,10 +2968,18 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
           <span className={cn("text-[0.65rem] font-medium", changed ? "text-gold-dark" : "text-green-dark")}>
             {changed ? "↪ redistributed" : "✓ matches the promise"}
           </span>
-          {isAdmin && !editing && (
+          {isAdmin && !editing && !hasMultiBatchWindow && (
             <button type="button" onClick={startEdit} className="text-[0.65rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel">
               ↪ Redistribute
             </button>
+          )}
+          {isAdmin && !editing && hasMultiBatchWindow && (
+            <span
+              className="text-[0.6rem] text-ink-400 italic"
+              title="A delivery window holds multiple models/splits. Per-model redistribution isn't supported yet, so it's disabled here to keep car counts correct."
+            >
+              redistribute n/a (mixed models)
+            </span>
           )}
         </div>
       </div>

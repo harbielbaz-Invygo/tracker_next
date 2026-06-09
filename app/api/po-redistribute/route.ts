@@ -94,6 +94,20 @@ export async function POST(req: NextRequest) {
     batchesByWave.set(b.waveId, arr);
   }
 
+  // Multi-model guard (v1). Re-bucketing adjusts only a window's largest
+  // batch, which silently picks which model moves AND breaks car
+  // conservation when the move exceeds that batch. So any window holding
+  // more than one batch (mixed models / splits) is unsafe — block the
+  // whole PO until per-model redistribution lands.
+  const multiBatchWave = waveRows.find((w) => (batchesByWave.get(w.id) ?? []).length > 1);
+  if (multiBatchWave) {
+    return apiError(
+      `Window ${multiBatchWave.availabilityDate} holds multiple batches (mixed models or splits). `
+      + "Per-model redistribution isn't supported yet — redistribution is disabled for this PO to keep car counts correct.",
+      409,
+    );
+  }
+
   // "before" snapshot for the audit log.
   const before = waveRows.map((w) => ({
     windowDate: w.availabilityDate,
