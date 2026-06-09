@@ -2862,17 +2862,15 @@ function PrePoLegsSection({
  */
 type DraftWindow = { windowDate: string; quantity: number; isNew: boolean };
 
-function DeliveryPlanPanel({ po }: { po: PoNode }) {
-  const { isAdmin } = useShell();
-  const router = useRouter();
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<DraftWindow[]>([]);
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+/** Model key = the same join the data layer uses for BatchNode.modelYear. */
+const modelKey = (model: string, year: number) => [model, year].filter(Boolean).join(" ");
 
-  if (po.baseline.length === 0) return null;
-
+/**
+ * Read-only per-window delivery plan + baseline reliability, shown when the
+ * per-model baseline hasn't been migrated yet. No redistribution — that
+ * needs the per-model baseline (run the migration to enable it).
+ */
+function DeliveryPlanReadonlyFallback({ po }: { po: PoNode }) {
   const workingByDate = new Map<string, number>();
   for (const w of po.waves) {
     const qty = w.batches.reduce((s, b) => s + b.requestedQuantity, 0);
@@ -2880,38 +2878,126 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
   }
   const baselineByDate = new Map<string, number>();
   for (const b of po.baseline) baselineByDate.set(b.windowDate, b.quantity);
-
   const dates = Array.from(new Set([...baselineByDate.keys(), ...workingByDate.keys()])).sort();
   const baseTotal = po.baseline.reduce((s, b) => s + b.quantity, 0);
   const workTotal = Array.from(workingByDate.values()).reduce((s, n) => s + n, 0);
-  const changed = dates.some((d) => (baselineByDate.get(d) ?? 0) !== (workingByDate.get(d) ?? 0));
-
-  // Baseline reliability — actual deliveries scored against the frozen
-  // promise (Phase 3). Deliveries come from delivered batches' closedAt.
   const deliveries = po.waves.flatMap((w) =>
-    w.batches
-      .filter((b) => b.closureReason === "delivered" && b.closedAt)
+    w.batches.filter((b) => b.closureReason === "delivered" && b.closedAt)
       .map((b) => ({ date: b.closedAt!.slice(0, 10), quantity: b.deliveredQuantity ?? 0 })));
   const rel = computeBaselineReliability(po.baseline, deliveries, todayIso());
-  const deliveredByWindow = new Map<string, number>();
-  for (const w of po.waves) {
-    const del = w.batches
-      .filter((b) => b.closureReason === "delivered")
-      .reduce((s, b) => s + (b.deliveredQuantity ?? 0), 0);
-    if (del > 0) deliveredByWindow.set(w.availabilityDate, (deliveredByWindow.get(w.availabilityDate) ?? 0) + del);
+  const relTone = rel.onTimeRate == null ? "text-ink-400"
+    : rel.onTimeRate >= 90 ? "text-green-dark" : rel.onTimeRate >= 70 ? "text-gold-dark" : "text-flame-dark";
+  return (
+    <section className="border border-ink-200 rounded-md bg-ink-50/40 p-3 space-y-2">
+      <h4 className="text-[0.7rem] font-semibold uppercase tracking-wide text-ink-600">🚚 Delivery plan — promised vs working</h4>
+      <div className="flex flex-wrap items-baseline gap-x-2 pb-1.5 border-b border-ink-200">
+        <span className="text-[0.6rem] font-medium uppercase tracking-wide text-ink-500">📊 Baseline reliability</span>
+        <span className={cn("text-sm font-bold tabular-nums", relTone)}>{rel.onTimeRate == null ? "—" : `${rel.onTimeRate}%`}</span>
+        <span className="text-[0.65rem] text-ink-500 tabular-nums">{rel.onTime}/{rel.promisedTotal} cars on time</span>
+      </div>
+      <table className="w-full text-[0.7rem] tabular-nums">
+        <thead><tr className="text-ink-500 text-left">
+          <th className="font-medium py-0.5">Window</th>
+          <th className="font-medium py-0.5 text-right">Promised</th>
+          <th className="font-medium py-0.5 text-right">Working</th>
+        </tr></thead>
+        <tbody>
+          {dates.map((d) => (
+            <tr key={d} className="border-t border-ink-100">
+              <td className="py-0.5 text-midnight">{d}</td>
+              <td className="py-0.5 text-right text-ink-600">{baselineByDate.get(d) || "—"}</td>
+              <td className="py-0.5 text-right font-medium text-midnight">{workingByDate.get(d) || "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot><tr className="border-t border-ink-200 font-semibold text-midnight">
+          <td className="py-0.5">Total</td>
+          <td className="py-0.5 text-right">{baseTotal}</td>
+          <td className="py-0.5 text-right">{workTotal}</td>
+        </tr></tfoot>
+      </table>
+      <p className="text-[0.6rem] text-ink-400 leading-snug">
+        Run <strong>Settings → Maintenance → &quot;PO baseline (per-model)&quot;</strong> to enable per-model redistribution.
+      </p>
+    </section>
+  );
+}
+
+function DeliveryPlanPanel({ po }: { po: PoNode }) {
+  const { isAdmin } = useShell();
+  const router = useRouter();
+  const [selModel, setSelModel] = useState<string>("");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<DraftWindow[]>([]);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Distinct models from the per-model baseline.
+  const models = useMemo(() => {
+    const m = new Map<string, { key: string; model: string; year: number; total: number }>();
+    for (const b of po.baselineModel) {
+      const key = modelKey(b.model, b.year);
+      const e = m.get(key) ?? { key, model: b.model, year: b.year, total: 0 };
+      e.total += b.quantity;
+      m.set(key, e);
+    }
+    return Array.from(m.values()).sort((a, b) => a.key.localeCompare(b.key));
+  }, [po.baselineModel]);
+
+  // No per-model baseline yet → graceful read-only per-window fallback.
+  if (po.baselineModel.length === 0) {
+    if (po.baseline.length === 0) return null;
+    return <DeliveryPlanReadonlyFallback po={po} />;
   }
+
+  const activeKey = (selModel && models.some((m) => m.key === selModel)) ? selModel : (models[0]?.key ?? "");
+  const active = models.find((m) => m.key === activeKey);
+  if (!active) return null;
+
+  // Per-active-model: baseline (frozen) / working (current) / delivered.
+  const baselineByDate = new Map<string, number>();
+  for (const b of po.baselineModel) {
+    if (modelKey(b.model, b.year) !== activeKey) continue;
+    baselineByDate.set(b.windowDate, (baselineByDate.get(b.windowDate) ?? 0) + b.quantity);
+  }
+  const workingByDate = new Map<string, number>();
+  const deliveredByWindow = new Map<string, number>();
+  const deliveries: { date: string; quantity: number }[] = [];
+  for (const w of po.waves) {
+    let work = 0, del = 0;
+    for (const b of w.batches) {
+      if (b.modelYear !== activeKey) continue;
+      work += b.requestedQuantity;
+      if (b.closureReason === "delivered") {
+        del += b.deliveredQuantity ?? 0;
+        if (b.closedAt) deliveries.push({ date: b.closedAt.slice(0, 10), quantity: b.deliveredQuantity ?? 0 });
+      }
+    }
+    if (work > 0) workingByDate.set(w.availabilityDate, work);
+    if (del > 0) deliveredByWindow.set(w.availabilityDate, del);
+  }
+
+  const dates = Array.from(new Set([...baselineByDate.keys(), ...workingByDate.keys()])).sort();
+  const baseTotal = active.total;
+  const workTotal = Array.from(workingByDate.values()).reduce((s, n) => s + n, 0);
   const deliveredTotal = Array.from(deliveredByWindow.values()).reduce((s, n) => s + n, 0);
+  const changed = dates.some((d) => (baselineByDate.get(d) ?? 0) !== (workingByDate.get(d) ?? 0));
+
+  const rel = computeBaselineReliability(
+    Array.from(baselineByDate, ([windowDate, quantity]) => ({ windowDate, quantity })),
+    deliveries, todayIso());
   const relTone =
     rel.onTimeRate == null ? "text-ink-400"
     : rel.onTimeRate >= 90 ? "text-green-dark"
     : rel.onTimeRate >= 70 ? "text-gold-dark"
     : "text-flame-dark";
 
-  // Multi-model guard (v1): redistribution only handles single-batch
-  // windows. A window with >1 batch (mixed models / splits) is disabled
-  // until per-model support lands — see /api/po-redistribute.
-  const hasMultiBatchWindow = po.waves.some((w) => w.batches.length > 1);
-
+  function selectModel(key: string) {
+    setSelModel(key);
+    setEditing(false);
+    setError(null);
+  }
   function startEdit() {
     setDraft(dates
       .filter((d) => (workingByDate.get(d) ?? 0) > 0 || baselineByDate.has(d))
@@ -2928,8 +3014,9 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
   const balanced = draftTotal === baseTotal;
 
   async function save() {
+    if (!active) return;
     if (!reason.trim()) { setError("Add a reason for the redistribution."); return; }
-    if (!balanced) { setError(`Cars must total ${baseTotal} (currently ${draftTotal}).`); return; }
+    if (!balanced) { setError(`${active.key} must total ${baseTotal} (currently ${draftTotal}).`); return; }
     for (const r of draft) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(r.windowDate)) { setError("Every window needs a date."); return; }
       if (!Number.isInteger(r.quantity) || r.quantity < 1) { setError(`"${r.windowDate}" needs a whole number ≥ 1.`); return; }
@@ -2941,6 +3028,8 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           poId: po.id,
+          model: active.model,
+          year: active.year,
           reason: reason.trim(),
           allocation: draft.map((r) => ({ windowDate: r.windowDate, quantity: r.quantity })),
         }),
@@ -2968,21 +3057,29 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
           <span className={cn("text-[0.65rem] font-medium", changed ? "text-gold-dark" : "text-green-dark")}>
             {changed ? "↪ redistributed" : "✓ matches the promise"}
           </span>
-          {isAdmin && !editing && !hasMultiBatchWindow && (
+          {isAdmin && !editing && (
             <button type="button" onClick={startEdit} className="text-[0.65rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel">
               ↪ Redistribute
             </button>
           )}
-          {isAdmin && !editing && hasMultiBatchWindow && (
-            <span
-              className="text-[0.6rem] text-ink-400 italic"
-              title="A delivery window holds multiple models/splits. Per-model redistribution isn't supported yet, so it's disabled here to keep car counts correct."
-            >
-              redistribute n/a (mixed models)
-            </span>
-          )}
         </div>
       </div>
+
+      {/* Model selector — one model redistributed at a time. */}
+      {models.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-[0.6rem] text-ink-500">Model:</span>
+          {models.map((m) => (
+            <button key={m.key} type="button" onClick={() => selectModel(m.key)}
+              className={cn(
+                "text-[0.65rem] px-2 py-0.5 rounded-full border tabular-nums",
+                m.key === activeKey ? "bg-midnight text-white border-midnight" : "bg-white text-ink-600 border-ink-300 hover:bg-ink-50",
+              )}>
+              {m.key} <span className="opacity-70">({m.total})</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {!editing ? (
         <>

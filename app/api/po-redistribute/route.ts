@@ -1,19 +1,22 @@
 /**
- * POST /api/po-redistribute — move cars between a PO's delivery windows
- * (the "working allocation"). The frozen baseline (po_delivery_baseline)
- * is NEVER touched — reliability is always scored against it.
+ * POST /api/po-redistribute — move cars of ONE model between a PO's
+ * delivery windows (the "working allocation"). Per-model: each model is
+ * redistributed and conserved independently, so windows holding multiple
+ * models are handled correctly. The frozen baseline is never touched —
+ * reliability is always scored against it.
  *
  * Admin-only. Body:
- *   { poId, allocation: [{ windowDate, quantity }], reason }
+ *   { poId, model, year, allocation: [{ windowDate, quantity }], reason }
  *
  * Rules:
- *   - Cars are conserved: Σ allocation.quantity must equal the PO's frozen
- *     baseline total (you move cars, never invent/lose them).
- *   - A window can't be reduced below what's already committed (VINs
- *     received / delivered).
- *   - A window date not currently present creates a NEW window (wave +
- *     cloned batch + fresh external-phase action rows).
- *   - Every redistribution is logged (who/when/why + before/after).
+ *   - Cars of this model are conserved: Σ allocation.quantity must equal
+ *     the model's frozen baseline total.
+ *   - A (window × this model) can't be reduced below what's already
+ *     committed (VINs received / delivered) for this model in that window.
+ *   - A window date not present creates a NEW window (wave + cloned batch
+ *     of this model + fresh external-phase action rows). An existing
+ *     window without this model gets a new batch of this model.
+ *   - Logged (who/when/why + before/after, scoped to the model).
  */
 import { eq, inArray, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
@@ -27,6 +30,8 @@ const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
 interface Body {
   poId: number;
+  model: string;
+  year: number;
   allocation: { windowDate: string; quantity: number }[];
   reason: string;
 }
@@ -37,10 +42,13 @@ export async function POST(req: NextRequest) {
 
   const body = (await req.json().catch(() => null)) as Body | null;
   const poId = Number(body?.poId);
+  const model = typeof body?.model === "string" ? body.model : "";
+  const year = Number(body?.year);
   const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
   const rawAllocation = Array.isArray(body?.allocation) ? body!.allocation : [];
 
   if (!Number.isInteger(poId) || poId <= 0) return apiError("poId required", 400);
+  if (!model || !Number.isInteger(year)) return apiError("model + year required", 400);
   if (!reason) return apiError("A reason is required", 400);
   if (rawAllocation.length === 0) return apiError("allocation required", 400);
 
@@ -57,145 +65,147 @@ export async function POST(req: NextRequest) {
     alloc.push({ windowDate: d, quantity: q });
   }
 
-  // Frozen baseline total — cars must be conserved against the promise.
+  // This model's frozen baseline total — cars of this model are conserved.
   let baselineTotal = 0;
   try {
-    const rows = await db.all<{ total: number }>(
-      sql`SELECT COALESCE(SUM(quantity), 0) AS total FROM po_delivery_baseline WHERE po_id = ${poId}`,
-    );
+    const rows = await db.all<{ total: number }>(sql`
+      SELECT COALESCE(SUM(quantity), 0) AS total
+        FROM po_delivery_baseline_model
+       WHERE po_id = ${poId} AND model = ${model} AND year = ${year}
+    `);
     baselineTotal = Number(rows[0]?.total ?? 0);
   } catch {
-    return apiError("Baseline table missing — run the PO delivery baseline migration first.", 409);
+    return apiError("Per-model baseline table missing — run the PO baseline (per-model) migration first.", 409);
   }
   if (baselineTotal <= 0) {
-    return apiError("This PO has no frozen baseline yet — run the PO delivery baseline migration.", 409);
+    return apiError(`No frozen baseline for ${model} ${year} on this PO — run the per-model baseline migration.`, 409);
   }
   const allocTotal = alloc.reduce((s, a) => s + a.quantity, 0);
   if (allocTotal !== baselineTotal) {
     return apiError(
-      `Cars must stay balanced: this allocation totals ${allocTotal}, but the baseline is ${baselineTotal}.`,
+      `${model} ${year} must stay balanced: this allocation totals ${allocTotal}, baseline is ${baselineTotal}.`,
       400,
     );
   }
 
-  // Current working state.
+  // Current working state for this PO.
   const waveRows = await db.select().from(waves).where(eq(waves.poId, poId));
   if (waveRows.length === 0) return apiError("PO has no delivery windows.", 409);
   const waveIds = waveRows.map((w) => w.id);
   const waveByDate = new Map(waveRows.map((w) => [w.availabilityDate, w]));
 
-  const batchRows = await db.select().from(batches).where(inArray(batches.waveId, waveIds));
-  if (batchRows.length === 0) return apiError("PO has no batches to redistribute.", 409);
-  const batchesByWave = new Map<number, typeof batchRows>();
-  for (const b of batchRows) {
-    if (b.waveId == null) continue;
-    const arr = batchesByWave.get(b.waveId) ?? [];
+  const allBatchRows = await db.select().from(batches).where(inArray(batches.waveId, waveIds));
+  // Only this model's batches, grouped by wave.
+  const modelBatchesByWave = new Map<number, typeof allBatchRows>();
+  for (const b of allBatchRows) {
+    if (b.waveId == null || b.model !== model || b.year !== year) continue;
+    const arr = modelBatchesByWave.get(b.waveId) ?? [];
     arr.push(b);
-    batchesByWave.set(b.waveId, arr);
+    modelBatchesByWave.set(b.waveId, arr);
   }
+  const template = allBatchRows.find((b) => b.model === model && b.year === year) ?? allBatchRows[0];
+  if (!template) return apiError("PO has no batches to redistribute.", 409);
 
-  // Multi-model guard (v1). Re-bucketing adjusts only a window's largest
-  // batch, which silently picks which model moves AND breaks car
-  // conservation when the move exceeds that batch. So any window holding
-  // more than one batch (mixed models / splits) is unsafe — block the
-  // whole PO until per-model redistribution lands.
-  const multiBatchWave = waveRows.find((w) => (batchesByWave.get(w.id) ?? []).length > 1);
-  if (multiBatchWave) {
-    return apiError(
-      `Window ${multiBatchWave.availabilityDate} holds multiple batches (mixed models or splits). `
-      + "Per-model redistribution isn't supported yet — redistribution is disabled for this PO to keep car counts correct.",
-      409,
-    );
-  }
+  // "before" snapshot (this model only) for the audit log.
+  const before = waveRows
+    .map((w) => ({
+      windowDate: w.availabilityDate,
+      quantity: (modelBatchesByWave.get(w.id) ?? []).reduce((s, b) => s + b.requestedQuantity, 0),
+    }))
+    .filter((r) => r.quantity > 0);
 
-  // "before" snapshot for the audit log.
-  const before = waveRows.map((w) => ({
-    windowDate: w.availabilityDate,
-    quantity: (batchesByWave.get(w.id) ?? []).reduce((s, b) => s + b.requestedQuantity, 0),
-  }));
-
-  // Committed guard — a window can't drop below its VIN/delivered cars.
+  // Committed guard — this model in a window can't drop below its
+  // VIN/delivered cars.
   for (const a of alloc) {
     const w = waveByDate.get(a.windowDate);
     if (!w) continue;
-    const committed = (batchesByWave.get(w.id) ?? []).reduce(
+    const committed = (modelBatchesByWave.get(w.id) ?? []).reduce(
       (s, b) => s + Math.max(b.deliveredQuantity ?? 0, b.vinsReceivedQuantity ?? 0), 0);
     if (a.quantity < committed) {
       return apiError(
-        `Window ${a.windowDate} already has ${committed} car(s) committed (VINs/delivered) — can't reduce below that.`,
+        `${model} in window ${a.windowDate} already has ${committed} car(s) committed (VINs/delivered) — can't reduce below that.`,
         409,
       );
     }
   }
 
-  const template = batchRows[0];
   const waveActionTypes = await db.select().from(actionTypes).where(eq(actionTypes.scope, "wave"));
   const [deliveryType] = await db
     .select().from(actionTypes).where(eq(actionTypes.name, "Delivery")).limit(1);
   const nowIso = new Date().toISOString();
 
   await db.transaction(async (tx) => {
-    for (const a of alloc) {
-      const existing = waveByDate.get(a.windowDate);
-
-      if (existing) {
-        // Hit the target by adjusting this window's largest batch.
-        const wbatches = (batchesByWave.get(existing.id) ?? [])
-          .slice().sort((x, y) => y.requestedQuantity - x.requestedQuantity);
-        const current = wbatches.reduce((s, b) => s + b.requestedQuantity, 0);
-        const delta = a.quantity - current;
-        if (delta !== 0 && wbatches.length > 0) {
-          const primary = wbatches[0];
-          const newQty = Math.max(0, primary.requestedQuantity + delta);
-          await tx.update(batches)
-            .set({ requestedQuantity: newQty, updatedAt: nowIso })
-            .where(eq(batches.id, primary.id));
-        }
-        continue;
+    const insertAction = async (scope: "wave" | "batch", scopeId: number, actionTypeId: number, deptId: number | null) => {
+      try {
+        await tx.insert(actionsTable).values({ scope, scopeId, actionTypeId, departmentId: deptId ?? undefined, status: "waiting" });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
       }
-
-      // New window — create a wave + cloned batch + fresh external actions.
-      const [newWave] = await tx.insert(waves)
-        .values({ poId, availabilityDate: a.windowDate })
-        .returning({ id: waves.id });
-      const newWaveId = newWave.id;
-
+    };
+    const cloneBatchInto = async (waveId: number, qty: number) => {
       const { id: _omitId, createdAt: _omitC, updatedAt: _omitU, ...clone } = template;
-      const newCode = `${template.batchCode}-RW${a.windowDate.replace(/-/g, "")}`;
-      const [newBatch] = await tx.insert(batches).values({
+      const date = waveRows.find((w) => w.id === waveId)?.availabilityDate ?? nowIso.slice(0, 10);
+      const [nb] = await tx.insert(batches).values({
         ...clone,
-        batchCode:                    newCode,
-        waveId:                       newWaveId,
-        requestedQuantity:            a.quantity,
+        batchCode:                    `${template.batchCode}-RW${date.replace(/-/g, "")}`,
+        waveId,
+        requestedQuantity:            qty,
         allocatedQuantity:            0,
         deliveredQuantity:            0,
         vinsReceivedQuantity:         0,
-        dealerPromisedDeliveryDate:   a.windowDate,
-        currentProjectedDeliveryDate: a.windowDate,
+        dealerPromisedDeliveryDate:   date,
+        currentProjectedDeliveryDate: date,
         closedAt:                     null,
         closureReason:                null,
-        notes:                        `Redistributed window — ${reason}`,
+        notes:                        `Redistributed (${model} ${year}) — ${reason}`,
       }).returning({ id: batches.id });
-      const newBatchId = newBatch.id;
+      for (const at of waveActionTypes) await insertAction("batch", nb.id, at.id, at.defaultDepartmentId ?? null);
+      if (deliveryType) await insertAction("batch", nb.id, deliveryType.id, deliveryType.defaultDepartmentId ?? null);
+    };
 
-      const insertAction = async (scope: "wave" | "batch", scopeId: number, actionTypeId: number, deptId: number | null) => {
-        try {
-          await tx.insert(actionsTable).values({
-            scope, scopeId, actionTypeId,
-            departmentId: deptId ?? undefined,
-            status: "waiting",
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
-        }
-      };
-      for (const at of waveActionTypes) {
-        await insertAction("wave", newWaveId, at.id, at.defaultDepartmentId ?? null);
-        await insertAction("batch", newBatchId, at.id, at.defaultDepartmentId ?? null);
+    for (const a of alloc) {
+      let wave = waveByDate.get(a.windowDate);
+
+      // Create a brand-new window (wave + its wave-scope actions) if needed.
+      if (!wave) {
+        const [nw] = await tx.insert(waves).values({ poId, availabilityDate: a.windowDate }).returning();
+        wave = nw;
+        waveByDate.set(a.windowDate, nw);
+        for (const at of waveActionTypes) await insertAction("wave", nw.id, at.id, at.defaultDepartmentId ?? null);
       }
-      if (deliveryType) {
-        await insertAction("batch", newBatchId, deliveryType.id, deliveryType.defaultDepartmentId ?? null);
+
+      const modelBatches = (modelBatchesByWave.get(wave.id) ?? [])
+        .slice().sort((x, y) => y.requestedQuantity - x.requestedQuantity);
+      const current = modelBatches.reduce((s, b) => s + b.requestedQuantity, 0);
+      const delta = a.quantity - current;
+      if (delta === 0) continue;
+
+      if (delta > 0) {
+        // Grow: add to the largest existing batch of this model, or make one.
+        if (modelBatches.length > 0) {
+          const primary = modelBatches[0];
+          await tx.update(batches)
+            .set({ requestedQuantity: primary.requestedQuantity + delta, updatedAt: nowIso })
+            .where(eq(batches.id, primary.id));
+        } else {
+          await cloneBatchInto(wave.id, a.quantity);
+        }
+      } else {
+        // Shrink: reduce largest-first, never below each batch's committed.
+        let need = -delta;
+        for (const b of modelBatches) {
+          if (need <= 0) break;
+          const committed = Math.max(b.deliveredQuantity ?? 0, b.vinsReceivedQuantity ?? 0);
+          const room = b.requestedQuantity - committed;
+          const take = Math.min(Math.max(0, room), need);
+          if (take > 0) {
+            await tx.update(batches)
+              .set({ requestedQuantity: b.requestedQuantity - take, updatedAt: nowIso })
+              .where(eq(batches.id, b.id));
+            need -= take;
+          }
+        }
       }
     }
   });
@@ -204,11 +214,11 @@ export async function POST(req: NextRequest) {
   try {
     await db.run(sql`
       INSERT INTO po_redistribution_log (po_id, reason, before_json, after_json, redistributed_by)
-      VALUES (${poId}, ${reason}, ${JSON.stringify(before)}, ${JSON.stringify(alloc)}, ${gate.user.username})
+      VALUES (${poId}, ${`[${model} ${year}] ${reason}`}, ${JSON.stringify(before)}, ${JSON.stringify(alloc)}, ${gate.user.username})
     `);
   } catch {
     /* log table not migrated — the redistribution still succeeded. */
   }
 
-  return NextResponse.json({ ok: true, poId, allocation: alloc });
+  return NextResponse.json({ ok: true, poId, model, year, allocation: alloc });
 }
