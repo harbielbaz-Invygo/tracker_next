@@ -318,29 +318,66 @@ function Group({
   endpoints,
   states,
   onCall,
+  defaultCollapsed = false,
 }: {
   title: string;
   note: string;
   endpoints: MigrationEndpoint[];
   states: Record<string, RowState>;
   onCall: (ep: MigrationEndpoint, method: "GET" | "POST") => void;
+  /** Render the group collapsed behind a disclosure (declutters the
+   *  long, run-once schema-migration list). All endpoints stay reachable
+   *  — the toggle just hides them until needed. */
+  defaultCollapsed?: boolean;
 }) {
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+
+  // Surfaced results inside this group, so a collapsed group still
+  // signals "something happened in here" — and never hides a failure.
+  const doneCount = endpoints.reduce((n, ep) => n + (states[ep.path]?.phase === "done" ? 1 : 0), 0);
+  const errorCount = endpoints.reduce((n, ep) => n + (states[ep.path]?.phase === "error" ? 1 : 0), 0);
+
   return (
     <div>
-      <h3 className="text-xs font-bold uppercase tracking-wide text-ink-500">
-        {title}
-      </h3>
-      <p className="text-xs text-ink-400 mt-0.5 mb-1">{note}</p>
-      <div>
-        {endpoints.map((ep) => (
-          <EndpointRow
-            key={ep.path}
-            ep={ep}
-            state={states[ep.path] ?? IDLE}
-            onCall={onCall}
-          />
-        ))}
-      </div>
+      {defaultCollapsed ? (
+        <button
+          type="button"
+          onClick={() => setCollapsed((c) => !c)}
+          aria-expanded={!collapsed}
+          className="w-full flex items-center gap-2 text-left group/disc"
+        >
+          <span aria-hidden="true" className="text-ink-400 text-xs">{collapsed ? "▸" : "▾"}</span>
+          <h3 className="text-xs font-bold uppercase tracking-wide text-ink-500 group-hover/disc:text-midnight">
+            {title}
+          </h3>
+          <span className="text-[0.7rem] text-ink-400 tabular-nums">({endpoints.length})</span>
+          {collapsed && errorCount > 0 && (
+            <span className="text-[0.65rem] font-semibold text-flame-dark tabular-nums">· {errorCount} failed</span>
+          )}
+          {collapsed && errorCount === 0 && doneCount > 0 && (
+            <span className="text-[0.65rem] text-green-dark tabular-nums">· {doneCount} ok</span>
+          )}
+        </button>
+      ) : (
+        <h3 className="text-xs font-bold uppercase tracking-wide text-ink-500">
+          {title}
+        </h3>
+      )}
+      {!collapsed && (
+        <>
+          <p className="text-xs text-ink-400 mt-0.5 mb-1">{note}</p>
+          <div>
+            {endpoints.map((ep) => (
+              <EndpointRow
+                key={ep.path}
+                ep={ep}
+                state={states[ep.path] ?? IDLE}
+                onCall={onCall}
+              />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -488,10 +525,11 @@ export default function MaintenancePanel() {
 
         <Group
           title="Schema migrations"
-          note="Idempotent — each checks for existence before writing, so re-running is a no-op. Run once per environment if drizzle-kit push skipped the addition."
+          note="Idempotent — each checks for existence before writing, so re-running is a no-op. Run once per environment if drizzle-kit push skipped the addition. Use “Run all schema migrations” above instead of expanding these one by one."
           endpoints={SCHEMA_MIGRATIONS}
           states={states}
           onCall={onCall}
+          defaultCollapsed
         />
         <Group
           title="Backfills"
