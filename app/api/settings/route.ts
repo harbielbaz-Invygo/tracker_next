@@ -445,8 +445,9 @@ const EDITABLE_BATCH_FIELDS = new Set<string>([
   "poTotalSar", "poSubtotalSar", "poTaxTotalSar",
   // Identity
   "dealerId", "model", "year", "category",
-  // Quantities
-  "requestedQuantity", "allocatedQuantity", "deliveredQuantity",
+  // Quantities. (`confirmedQuantity` is handled separately — it lives off
+  // the Drizzle schema and is written via raw SQL below.)
+  "requestedQuantity", "deliveredQuantity",
   // Cities
   "appDisplayCities", "dealerReceivingCity",
   // Dates
@@ -457,8 +458,9 @@ const EDITABLE_BATCH_FIELDS = new Set<string>([
   "vinsReceivedQuantity", "vinReceivedAtIntake",
   // Closure (realised outcome)
   "closedAt", "closureReason", "cancellationNote",
-  // Status
-  "currentStage", "lifecycleState", "feasibilityStatus",
+  // Status. (`currentStage` is a legacy stage machine — read-only now, no
+  // longer editable from the batch editor.)
+  "lifecycleState", "feasibilityStatus",
   // Commercial
   "buyBackRate", "contractLengthMonths", "colorSummary",
   "unitPriceSar", "taxPct", "lineAmountSar",
@@ -492,13 +494,31 @@ async function handleBatch(b: Extract<Body, { resource: "batch" }>) {
       // null is a legal "clear" for nullable fields.
       updates[k] = v === undefined ? null : v;
     }
-    if (Object.keys(updates).length === 0) {
+
+    // confirmed_quantity lives OFF the Drizzle schema (raw SQL, like
+    // sla_hours) so it isn't in EDITABLE_BATCH_FIELDS — validate it here
+    // and write it separately after the main update.
+    const fields = (b.fields ?? {}) as Record<string, unknown>;
+    const hasConfirmed = "confirmedQuantity" in fields;
+    let confirmedVal: number | null = null;
+    if (hasConfirmed) {
+      const rc = fields.confirmedQuantity;
+      if (rc !== null && rc !== "" && rc !== undefined) {
+        const n = Number(rc);
+        if (!Number.isFinite(n)) {
+          return NextResponse.json({ error: "confirmedQuantity must be a number" }, { status: 400 });
+        }
+        confirmedVal = n;
+      }
+    }
+
+    if (Object.keys(updates).length === 0 && !hasConfirmed) {
       return NextResponse.json({ error: "no valid fields to update" }, { status: 400 });
     }
 
     // Coerce numeric fields that arrive as strings from <input type="number">
     const numericFields = [
-      "year", "dealerId", "requestedQuantity", "allocatedQuantity", "deliveredQuantity",
+      "year", "dealerId", "requestedQuantity", "deliveredQuantity",
       "vinsReceivedQuantity",
       "buyBackRate", "contractLengthMonths", "unitPriceSar", "taxPct", "lineAmountSar",
       "poTotalSar", "poSubtotalSar", "poTaxTotalSar",
@@ -545,6 +565,14 @@ async function handleBatch(b: Extract<Body, { resource: "batch" }>) {
 
     updates.updatedAt = new Date().toISOString();
     await db.update(batches).set(updates).where(eq(batches.id, b.id));
+
+    // confirmed_quantity → raw SQL, tolerant of the column not being
+    // migrated yet (mirrors the off-schema read in settings-data).
+    if (hasConfirmed) {
+      try {
+        await db.run(sql`UPDATE batches SET confirmed_quantity = ${confirmedVal} WHERE id = ${b.id}`);
+      } catch { /* column not migrated yet — confirmed qty simply not stored */ }
+    }
 
     // Reflect a changed delivery/closure date onto the Delivery action's
     // completedAt so the Plan-vs-Reality timeline + SLA stay in sync —

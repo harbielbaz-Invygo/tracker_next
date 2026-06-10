@@ -5,13 +5,15 @@
  *
  * Accordion-style admin override for any batch's fields. One row at a time
  * expands inline to a full edit form grouped by section (PO header /
- * Identity / Dates / Commercial / Confidence / Notes / Actions).
+ * Identity / Dates / Closure / Commercial / Confidence / Notes).
  *
  * Save mutates via /api/settings { resource: "batch", op: "update", … }.
  * Delete via { resource: "batch", op: "delete", id }.
  *
- * The action list inside the expanded row is editable too (status flip +
- * department reassign) — same APIs the Action Center uses.
+ * Action STATUS is NOT edited here — that lives in the live, scope-aware
+ * Action Center (one click via the footer link). The collapsed row shows a
+ * read-only "X/Y done" chip sourced from the same scope-aware `actions`
+ * table the Action Center uses, so the two never diverge.
  *
  * Per the design call: PO-level edits do NOT propagate. A warning chip on
  * the PO header section tells the admin when other batches share the PO,
@@ -27,21 +29,8 @@ interface Props {
   data: SettingsData;
 }
 
-const STAGE_OPTIONS = [
-  "request_submitted", "contract_signed", "po_issued",
-  "dealer_policy_resolved", "color_matrix_received",
-  "dummy_listed", "dummy_approved",
-  "dealer_confirmation", "vin_assigned", "plate_assigned",
-  "customs_card_received", "registration", "insurance",
-  "inspection", "system_setup", "app_listing_real",
-  "booking_enabled", "first_booking", "delivered",
-];
-
 const FEASIBILITY_OPTIONS: Array<"feasible" | "at_risk" | "infeasible"> =
   ["feasible", "at_risk", "infeasible"];
-
-const ACTION_STATUS_OPTIONS: Array<"waiting" | "blocked" | "done" | "skipped"> =
-  ["waiting", "blocked", "done", "skipped"];
 
 export default function SettingsBatches({ data }: Props) {
   const router = useRouter();
@@ -383,6 +372,24 @@ function PhaseChip({ lifecycle }: { lifecycle: "pre_po" | "post_po" }) {
   );
 }
 
+/** Read-only status pill for the batch editor's action mirror. */
+function StatusBadge({ status }: { status: "waiting" | "blocked" | "done" | "skipped" }) {
+  const style: Record<typeof status, string> = {
+    done:    "bg-green-pale text-green-dark border-green",
+    blocked: "bg-flame-pale text-flame-dark border-flame",
+    skipped: "bg-ink-100 text-ink-500 border-ink-300",
+    waiting: "bg-gold-pale text-gold-dark border-gold",
+  };
+  return (
+    <span className={cn(
+      "inline-block px-2 py-0.5 rounded-md text-[0.7rem] font-medium border whitespace-nowrap tabular-nums",
+      style[status],
+    )}>
+      {status}
+    </span>
+  );
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Detail form (expanded row)
 // ──────────────────────────────────────────────────────────────────
@@ -414,8 +421,8 @@ function DetailForm({
     year: batch.year,
     category: batch.category,
     requestedQuantity: batch.requestedQuantity,
-    allocatedQuantity: batch.allocatedQuantity,
     deliveredQuantity: batch.deliveredQuantity,
+    confirmedQuantity: batch.confirmedQuantity,
     appDisplayCities: batch.appDisplayCities,
     dealerReceivingCity: batch.dealerReceivingCity,
 
@@ -434,7 +441,6 @@ function DetailForm({
     closureReason: batch.closureReason,
     cancellationNote: batch.cancellationNote,
 
-    currentStage: batch.currentStage,
     lifecycleState: batch.lifecycleState,
     feasibilityStatus: batch.feasibilityStatus,
 
@@ -468,15 +474,6 @@ function DetailForm({
     }
   }
 
-  async function callBatchAction(body: unknown): Promise<void> {
-    const res = await fetch("/api/batch-action", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(await res.text());
-  }
-
   function run(promise: Promise<void>) {
     startTransition(async () => {
       try {
@@ -504,10 +501,6 @@ function DetailForm({
   function deleteBatch() {
     if (!confirm(`Delete batch ${batch.batchCode}? This also deletes its actions, vehicles, and milestones. Cannot be undone.`)) return;
     run(callApi({ resource: "batch", op: "delete", id: batch.id }));
-  }
-
-  function setActionStatus(actionId: number, newStatus: "waiting" | "done" | "blocked" | "skipped") {
-    run(callBatchAction({ batchActionId: actionId, newStatus }));
   }
 
   return (
@@ -576,9 +569,9 @@ function DetailForm({
             <input type="number" className="input tabular-nums" value={draft.requestedQuantity ?? ""}
                    onChange={(e) => set("requestedQuantity", numOrZero(e.target.value))} />
           </Field>
-          <Field label="Allocated">
-            <input type="number" className="input tabular-nums" value={draft.allocatedQuantity ?? ""}
-                   onChange={(e) => set("allocatedQuantity", numOrZero(e.target.value))} />
+          <Field label="Confirmed" hint="dealer-confirmed cars · set by the Confirmation action">
+            <input type="number" className="input tabular-nums" value={draft.confirmedQuantity ?? ""}
+                   onChange={(e) => set("confirmedQuantity", numOrNull(e.target.value))} />
           </Field>
           <Field label="Delivered">
             <input type="number" className="input tabular-nums" value={draft.deliveredQuantity ?? ""}
@@ -640,14 +633,6 @@ function DetailForm({
           <Field label="Target PO date" hint="computed from promised − lead time">
             <input className="input bg-ink-100" value={batch.targetPoDate ?? "—"} disabled />
           </Field>
-          <Field label="Current stage">
-            <select className="input" value={draft.currentStage ?? ""}
-                    onChange={(e) => set("currentStage", e.target.value)}>
-              {STAGE_OPTIONS.map((s) => (
-                <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
-              ))}
-            </select>
-          </Field>
           <Field label="Lifecycle">
             <select className="input" value={draft.lifecycleState ?? "post_po"}
                     onChange={(e) => set("lifecycleState", e.target.value as "pre_po" | "post_po")}>
@@ -674,7 +659,7 @@ function DetailForm({
                  ? "Closed date set without a closure reason — set 'delivered' for it to count as an on-time delivery on Insights."
                  : undefined}>
         <FieldGrid>
-          <Field label="Closed / actual availability" hint="realised delivery date">
+          <Field label="Delivered / closed on" hint="actual delivery date · stamps the Delivery action when reason = delivered">
             <input type="date" className="input" value={draft.closedAt ?? ""}
                    onChange={(e) => set("closedAt", e.target.value || null)} />
           </Field>
@@ -755,8 +740,15 @@ function DetailForm({
                   onChange={(e) => set("notes", e.target.value || null)} />
       </Section>
 
-      {/* Actions */}
+      {/* Actions — READ-ONLY mirror of the live, scope-aware action state.
+          Status is changed in the Action Center (footer link), never here,
+          so there's a single source of truth and no legacy/scope-aware
+          drift. This block exists only so the admin can see the canonical
+          state inline while editing a batch's fields. */}
       <Section title={`Actions (${batch.actions.length})`}>
+        <p className="text-[0.7rem] text-ink-500 mb-2">
+          Read-only — change action status in the Action Center.
+        </p>
         {batch.actions.length === 0 ? (
           <p className="text-xs text-ink-500 italic">
             No actions yet. {batch.lifecycleState === "pre_po"
@@ -782,33 +774,7 @@ function DetailForm({
                     : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
                   return <span className="text-[0.7rem] text-ink-500 tabular-nums">✓ {local}</span>;
                 })()}
-                <select
-                  className="input text-xs py-1 max-w-[8rem]"
-                  value={a.status}
-                  onChange={(e) => setActionStatus(a.id, e.target.value as typeof ACTION_STATUS_OPTIONS[number])}
-                  disabled={pending}
-                  aria-label={`Status of ${a.actionTypeName}`}
-                >
-                  {ACTION_STATUS_OPTIONS.map((s) => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
-                </select>
-                {/* Undo — reset the action to its pristine "never taken"
-                    state. Setting status back to "waiting" clears the
-                    completed_at stamp and cascade-reverts any dependents
-                    server-side (see /api/batch-action). Hidden when the
-                    action is already waiting (nothing to undo). */}
-                {a.status !== "waiting" && (
-                  <button
-                    type="button"
-                    onClick={() => setActionStatus(a.id, "waiting")}
-                    disabled={pending}
-                    title="Undo — reset this action as if it was never taken"
-                    className="text-xs px-2 py-1 rounded-md border border-ink-300 text-ink-600 hover:bg-ink-100 hover:text-midnight disabled:opacity-50 whitespace-nowrap"
-                  >
-                    ↶ Undo
-                  </button>
-                )}
+                <StatusBadge status={a.status} />
               </li>
             ))}
           </ul>
