@@ -3043,7 +3043,7 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
     if (!balanced) { setError(`${active.key} must total ${baseTotal} (currently ${draftTotal}).`); return; }
     for (const r of draft) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(r.windowDate)) { setError("Every window needs a date."); return; }
-      if (!Number.isInteger(r.quantity) || r.quantity < 1) { setError(`"${r.windowDate}" needs a whole number ≥ 1.`); return; }
+      if (!Number.isInteger(r.quantity) || r.quantity < 0) { setError(`"${r.windowDate}" needs a whole number ≥ 0 (0 empties the window).`); return; }
     }
     setBusy(true); setError(null);
     try {
@@ -3210,8 +3210,9 @@ function DeliveryPlanPanel({ po }: { po: PoNode }) {
                 ) : (
                   <span className="text-[0.7rem] text-midnight tabular-nums">{r.windowDate}</span>
                 )}
-                <input type="number" min={1} value={Number.isFinite(r.quantity) ? r.quantity : ""}
+                <input type="number" min={0} value={Number.isFinite(r.quantity) ? r.quantity : ""}
                   aria-label={`Cars for ${r.windowDate}`}
+                  title="0 empties this window — it's removed when no model has cars left in it."
                   onChange={(e) => patch(i, { quantity: parseInt(e.target.value, 10) })}
                   className="text-[0.7rem] px-2 py-1 border border-ink-300 rounded tabular-nums text-right" />
                 {r.isNew ? (

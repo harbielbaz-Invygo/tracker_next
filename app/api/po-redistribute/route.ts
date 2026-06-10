@@ -18,7 +18,7 @@
  *     window without this model gets a new batch of this model.
  *   - Logged (who/when/why + before/after, scoped to the model).
  */
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { waves, batches, actions as actionsTable, actionTypes } from "@/lib/db/schema";
@@ -59,7 +59,9 @@ export async function POST(req: NextRequest) {
     const d = String(a?.windowDate ?? "");
     const q = Number(a?.quantity);
     if (!ISO.test(d)) return apiError(`window date "${d}" must be yyyy-mm-dd`, 400);
-    if (!Number.isInteger(q) || q < 1) return apiError(`quantity for ${d} must be a whole number ≥ 1`, 400);
+    // 0 is allowed — it empties this model's cars from the window (the
+    // window is deleted if no model has cars left there).
+    if (!Number.isInteger(q) || q < 0) return apiError(`quantity for ${d} must be a whole number ≥ 0`, 400);
     if (seen.has(d)) return apiError(`duplicate window ${d}`, 400);
     seen.add(d);
     alloc.push({ windowDate: d, quantity: q });
@@ -164,8 +166,29 @@ export async function POST(req: NextRequest) {
       if (deliveryType) await insertAction("batch", nb.id, deliveryType.id, deliveryType.defaultDepartmentId ?? null);
     };
 
+    const touchedWaveIds = new Set<number>();
+
     for (const a of alloc) {
       let wave = waveByDate.get(a.windowDate);
+
+      // 0 = empty this model from the window — delete its batches (+ their
+      // batch-scope actions). The committed guard already ensured nothing
+      // is committed here, so no VINs/delivered are lost. The window itself
+      // is pruned below if no model has cars left in it.
+      if (a.quantity === 0) {
+        if (!wave) continue;
+        const mb = modelBatchesByWave.get(wave.id) ?? [];
+        if (mb.length > 0) {
+          const ids = mb.map((b) => b.id);
+          await tx.delete(actionsTable).where(and(
+            eq(actionsTable.scope, "batch"),
+            inArray(actionsTable.scopeId, ids),
+          ));
+          await tx.delete(batches).where(inArray(batches.id, ids));
+        }
+        touchedWaveIds.add(wave.id);
+        continue;
+      }
 
       // Create a brand-new window (wave + its wave-scope actions) if needed.
       if (!wave) {
@@ -174,6 +197,7 @@ export async function POST(req: NextRequest) {
         waveByDate.set(a.windowDate, nw);
         for (const at of waveActionTypes) await insertAction("wave", nw.id, at.id, at.defaultDepartmentId ?? null);
       }
+      touchedWaveIds.add(wave.id);
 
       const modelBatches = (modelBatchesByWave.get(wave.id) ?? [])
         .slice().sort((x, y) => y.requestedQuantity - x.requestedQuantity);
@@ -206,6 +230,25 @@ export async function POST(req: NextRequest) {
             need -= take;
           }
         }
+      }
+    }
+
+    // Prune windows left with no batches at all (every model moved out).
+    if (touchedWaveIds.size > 0) {
+      const ids = Array.from(touchedWaveIds);
+      const stillHaveBatches = await tx
+        .select({ waveId: batches.waveId })
+        .from(batches)
+        .where(inArray(batches.waveId, ids));
+      const live = new Set<number>();
+      for (const r of stillHaveBatches) if (r.waveId != null) live.add(r.waveId);
+      const emptyWaveIds = ids.filter((id) => !live.has(id));
+      if (emptyWaveIds.length > 0) {
+        await tx.delete(actionsTable).where(and(
+          eq(actionsTable.scope, "wave"),
+          inArray(actionsTable.scopeId, emptyWaveIds),
+        ));
+        await tx.delete(waves).where(inArray(waves.id, emptyWaveIds));
       }
     }
   });
