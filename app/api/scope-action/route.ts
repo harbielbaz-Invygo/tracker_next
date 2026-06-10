@@ -35,6 +35,7 @@ import { unblockDependents, cascadeRevertDependents } from "@/lib/scope-cascade"
 import { cascadeBatchClosureUp } from "@/lib/closure-cascade";
 import { checkBatchDeliveryGate } from "@/lib/closure-gates";
 import { stampSlaStart, clearSlaStart } from "@/lib/sla";
+import { reanchorVinAnchoredActions } from "@/lib/vin-reanchor";
 
 export const runtime = "nodejs";
 
@@ -205,6 +206,33 @@ export async function PATCH(req: NextRequest) {
           }).where(inArray(actionsTable.id, idsToFlip));
           waveToBatchPropagatedIds = idsToFlip;
         }
+      }
+    }
+
+    // Re-anchor vin-anchored steps once the VIN lands. Intake left their
+    // expectedDate null (the VIN date wasn't known yet); now it is, so
+    // recompute it from the actual VIN date — otherwise those steps stay
+    // unmeasurable for on-time (the legacy batch_actions path did this via
+    // autoShiftFromVin; the scope-aware table had no equivalent).
+    if (current.actionTypeName === "VIN" && status === "done" && completedAt) {
+      const actualVinDate = completedAt.slice(0, 10);
+      if (current.scope === "batch") {
+        await reanchorVinAnchoredActions(tx, {
+          batchIds: [current.scopeId],
+          actualVinDate,
+          slideProjection: true,
+        });
+      } else if (current.scope === "wave") {
+        const childBatches = await tx
+          .select({ id: batches.id })
+          .from(batches)
+          .where(eq(batches.waveId, current.scopeId));
+        await reanchorVinAnchoredActions(tx, {
+          waveIds: [current.scopeId],
+          batchIds: childBatches.map((b) => b.id),
+          actualVinDate,
+          slideProjection: true,
+        });
       }
     }
 

@@ -168,6 +168,13 @@ const BACKFILLS: MigrationEndpoint[] = [
       "Ensures every pre-rollout batch has the full set of batch-scope External-Phase action rows. Idempotent (UNIQUE index dedupes).",
     supportsGet: true,
   },
+  {
+    path: "backfill-vin-anchored-dates",
+    label: "VIN-anchored planned dates",
+    detail:
+      "Fills the missing planned date on vin-anchored steps (Plate, Customs, Tracking, Inspection, Showroom Ready) for batches whose VIN action is already done — re-anchored to the actual VIN date. Without this they show as 'done' with no on-time %. Check counts the gap; Run backfills. Idempotent.",
+    supportsGet: true,
+  },
 ];
 
 // ── Cleanup — DELETES rows. Danger-gated; always Check first. ──
