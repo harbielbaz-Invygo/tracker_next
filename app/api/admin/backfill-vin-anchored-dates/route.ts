@@ -28,7 +28,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { actions as actionsTable, actionTypes } from "@/lib/db/schema";
 import { requireAuth, apiError } from "@/lib/api-auth";
-import { reanchorVinAnchoredActions } from "@/lib/vin-reanchor";
+import { reanchorVinAnchoredActions, isVinActionName } from "@/lib/vin-reanchor";
 
 export const runtime = "nodejs";
 
@@ -45,12 +45,13 @@ interface BackfillReport {
 }
 
 async function buildReport(write: boolean): Promise<BackfillReport> {
-  // The "VIN" action type(s) by name — the trigger that reveals the date.
-  const vinNamed = await db
-    .select({ id: actionTypes.id })
-    .from(actionTypes)
-    .where(eq(actionTypes.name, "VIN"));
-  const vinNamedIds = vinNamed.map((t) => t.id);
+  // The "VIN" action type(s) — the trigger that reveals the date. Matched
+  // tolerantly (prod renamed "VIN" → "VIN Receiving"), so fetch all names
+  // and filter in JS rather than `name = "VIN"`.
+  const allTypes = await db
+    .select({ id: actionTypes.id, name: actionTypes.name })
+    .from(actionTypes);
+  const vinNamedIds = allTypes.filter((t) => isVinActionName(t.name)).map((t) => t.id);
 
   // vin-ANCHORED action types — the downstream steps we re-date.
   const vinAnchored = await db

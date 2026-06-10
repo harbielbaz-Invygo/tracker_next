@@ -26,6 +26,17 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * Is this action type "the VIN action" — the step whose completion reveals
+ * the real VIN date that vin-anchored steps measure from? Matched by a
+ * tolerant name test rather than `=== "VIN"` because production renamed it
+ * (e.g. "VIN Receiving"). The vin-ANCHORED downstream steps are identified
+ * separately by `offsetAnchor === "vin"` (a stable data field, rename-proof).
+ */
+export function isVinActionName(name: string | null | undefined): boolean {
+  return !!name && /\bvin\b/i.test(name);
+}
+
 export interface ReanchorArgs {
   /** Batch ids whose batch-scope vin-anchored actions should re-anchor. */
   batchIds?: number[];

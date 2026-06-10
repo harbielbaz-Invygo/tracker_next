@@ -35,7 +35,7 @@ import { unblockDependents, cascadeRevertDependents } from "@/lib/scope-cascade"
 import { cascadeBatchClosureUp } from "@/lib/closure-cascade";
 import { checkBatchDeliveryGate } from "@/lib/closure-gates";
 import { stampSlaStart, clearSlaStart } from "@/lib/sla";
-import { reanchorVinAnchoredActions } from "@/lib/vin-reanchor";
+import { reanchorVinAnchoredActions, isVinActionName } from "@/lib/vin-reanchor";
 
 export const runtime = "nodejs";
 
@@ -214,7 +214,7 @@ export async function PATCH(req: NextRequest) {
     // recompute it from the actual VIN date — otherwise those steps stay
     // unmeasurable for on-time (the legacy batch_actions path did this via
     // autoShiftFromVin; the scope-aware table had no equivalent).
-    if (current.actionTypeName === "VIN" && status === "done" && completedAt) {
+    if (isVinActionName(current.actionTypeName) && status === "done" && completedAt) {
       const actualVinDate = completedAt.slice(0, 10);
       if (current.scope === "batch") {
         await reanchorVinAnchoredActions(tx, {
