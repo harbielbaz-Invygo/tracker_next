@@ -12,7 +12,7 @@ import { asc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   departments, stakeholders, actionTypes, actionDependencies,
-  dealers, batches, batchActions, users,
+  dealers, batches, actions as actionsTable, users,
   vinChaseStages,
 } from "@/lib/db/schema";
 import { getAllRules } from "@/lib/rules";
@@ -102,6 +102,8 @@ export interface BatchEditRow {
   requestedQuantity: number;
   allocatedQuantity: number;
   deliveredQuantity: number;
+  /** Dealer-confirmed cars (set by the Confirmation action). Off-schema. */
+  confirmedQuantity: number | null;
 
   /* Cities. */
   appDisplayCities: string | null;
@@ -210,10 +212,34 @@ async function safeReadSlaHours(): Promise<Map<number, number>> {
   return out;
 }
 
+/**
+ * Read batches.confirmed_quantity via raw SQL. Like sla_hours, this column
+ * is deliberately OFF the Drizzle schema (the batch query does
+ * `select({ b: batches })` — an un-migrated declared column would 500 the
+ * whole Settings page). Returns a Map keyed by batch id; tolerant of the
+ * column not existing yet (pre-migration) → empty Map.
+ */
+async function safeReadConfirmedQuantities(): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  try {
+    const rows = await db.all<{ id: number; confirmed_quantity: number | null }>(
+      sql`SELECT id, confirmed_quantity FROM batches`,
+    );
+    for (const r of rows) {
+      if (r.confirmed_quantity != null && Number.isFinite(Number(r.confirmed_quantity))) {
+        out.set(Number(r.id), Number(r.confirmed_quantity));
+      }
+    }
+  } catch {
+    /* column not migrated yet — confirmed qty simply unavailable. */
+  }
+  return out;
+}
+
 
 export async function getSettingsData(): Promise<SettingsData> {
   const [
-    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw, vinStagesRaw, slaHoursById,
+    deptsRaw, stakeholdersRaw, typesRaw, depsRaw, dealersRaw, batchesRaw, actionsRaw, rules, usersRaw, vinStagesRaw, slaHoursById, confirmedQtyById,
   ] = await Promise.all([
     db.select().from(departments).orderBy(asc(departments.sortOrder)),
     db.select().from(stakeholders).orderBy(asc(stakeholders.sortOrder)),
@@ -224,19 +250,28 @@ export async function getSettingsData(): Promise<SettingsData> {
       .from(batches)
       .leftJoin(dealers, eq(batches.dealerId, dealers.id))
       .orderBy(asc(batches.batchCode)),
+    // Per-batch action summary — read from the LIVE scope-aware `actions`
+    // table (scope='batch'), NOT the legacy `batch_actions`. This is the
+    // canonical action state the Action Center edits, so the batch row's
+    // "X/Y done" chip stays aligned with what users actually see there.
+    // Explicit column list (no off-schema columns like sla_started_at) so
+    // the query never 500s on an un-migrated column.
     db.select({
-        ba: batchActions,
+        id: actionsTable.id,
+        batchId: actionsTable.scopeId,
+        status: actionsTable.status,
+        completedAt: actionsTable.completedAt,
         atId: actionTypes.id,
         atName: actionTypes.name,
         waitingLabel: actionTypes.waitingLabel,
         doneLabel: actionTypes.doneLabel,
-        sortOrder: actionTypes.sortOrder,
         deptId: departments.id,
         deptName: departments.name,
       })
-      .from(batchActions)
-      .innerJoin(actionTypes, eq(batchActions.actionTypeId, actionTypes.id))
-      .leftJoin(departments,  eq(batchActions.departmentId,  departments.id))
+      .from(actionsTable)
+      .innerJoin(actionTypes, eq(actionsTable.actionTypeId, actionTypes.id))
+      .leftJoin(departments,  eq(actionsTable.departmentId,  departments.id))
+      .where(eq(actionsTable.scope, "batch"))
       .orderBy(asc(actionTypes.sortOrder)),
     getAllRules(),
     // Users — explicit column selection so the password hash never
@@ -251,6 +286,7 @@ export async function getSettingsData(): Promise<SettingsData> {
     }).from(users).orderBy(asc(users.role), asc(users.username)),
     safeListVinChaseStages(),
     safeReadSlaHours(),
+    safeReadConfirmedQuantities(),
   ]);
 
   // Group stakeholders by department for inline rendering.
@@ -273,22 +309,23 @@ export async function getSettingsData(): Promise<SettingsData> {
   const actionTypeNames: Record<number, string> = {};
   for (const t of typesRaw) actionTypeNames[t.id] = t.name;
 
-  // Group actions by batchId
+  // Group actions by batchId (scope_id of the scope='batch' rows).
   const actionsByBatch = new Map<number, BatchEditRow["actions"]>();
   for (const a of actionsRaw) {
-    const arr = actionsByBatch.get(a.ba.batchId) ?? [];
+    if (a.batchId == null) continue;
+    const arr = actionsByBatch.get(a.batchId) ?? [];
     arr.push({
-      id:               a.ba.id,
+      id:               a.id,
       actionTypeId:     a.atId,
       actionTypeName:   a.atName,
       waitingLabel:     a.waitingLabel,
       doneLabel:        a.doneLabel,
-      status:           a.ba.status as BatchEditRow["actions"][number]["status"],
+      status:           a.status as BatchEditRow["actions"][number]["status"],
       departmentId:     a.deptId ?? null,
       departmentName:   a.deptName ?? null,
-      completedAt:      a.ba.completedAt,
+      completedAt:      a.completedAt,
     });
-    actionsByBatch.set(a.ba.batchId, arr);
+    actionsByBatch.set(a.batchId, arr);
   }
 
   // Count batches per PO number for the warning chip
@@ -321,6 +358,7 @@ export async function getSettingsData(): Promise<SettingsData> {
     requestedQuantity: b.requestedQuantity,
     allocatedQuantity: b.allocatedQuantity ?? 0,
     deliveredQuantity: b.deliveredQuantity ?? 0,
+    confirmedQuantity: confirmedQtyById.get(b.id) ?? null,
 
     appDisplayCities:    b.appDisplayCities ?? null,
     dealerReceivingCity: b.dealerReceivingCity ?? null,
