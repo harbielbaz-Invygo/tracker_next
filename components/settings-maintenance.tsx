@@ -173,6 +173,14 @@ const BACKFILLS: MigrationEndpoint[] = [
 // ── Cleanup — DELETES rows. Danger-gated; always Check first. ──
 const CLEANUP: MigrationEndpoint[] = [
   {
+    path: "consolidate-window",
+    label: "Fix PO-0107 window (merge remainder → fully delivered)",
+    detail:
+      "One-off: merges the 9-car remainder back into the 50-car batch on PO-0107’s 2026-05-25 window → one 59-car batch, 59 VINs, 59 delivered on 2026-05-25. Check shows the plan; Run applies it and deletes the remainder.",
+    supportsGet: true,
+    destructive: true,
+  },
+  {
     path: "cleanup-empty-waves",
     label: "Prune empty waves",
     detail:
