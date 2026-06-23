@@ -473,15 +473,25 @@ const EDITABLE_BATCH_FIELDS = new Set<string>([
 async function handleBatch(b: Extract<Body, { resource: "batch" }>) {
   if (b.op === "delete") {
     // batch_actions / vehicles / milestones / batch_color_matrix cascade
-    // via FK ON DELETE CASCADE. The legacy `alerts` table (now dormant —
-    // the alert engine was removed) had a non-cascading `batch_id` FK, so
-    // a batch with leftover alert rows would otherwise fail with a FOREIGN
-    // KEY error. Best-effort clear those rows first via raw SQL (tolerant
-    // of the table being absent) so the batch delete succeeds cleanly.
+    // via FK ON DELETE CASCADE. Two things DON'T cascade and must be
+    // cleared by hand:
+    //   1. The legacy `alerts` table (dormant) — non-cascading batch_id FK,
+    //      so leftover rows would fail the delete with a FOREIGN KEY error.
+    //   2. The scope-aware `actions` rows (scope='batch') — these have no
+    //      FK to batches at all (scope_id is a plain int), so a delete
+    //      orphans them. Orphaned `waiting` actions then count forever as
+    //      "Delayed now / Critical" in the SLA panel and inflate Stuck
+    //      Stages. /api/po-redistribute and /api/admin/consolidate-window
+    //      already delete these explicitly before removing batches — the
+    //      Settings delete path (and its bulk loop) must do the same.
     await db.transaction(async (tx) => {
       try {
         await tx.run(sql`DELETE FROM alerts WHERE batch_id = ${b.id}`);
       } catch { /* alerts table absent — nothing to clean up */ }
+      await tx.delete(actionsTable).where(and(
+        eq(actionsTable.scope, "batch"),
+        eq(actionsTable.scopeId, b.id),
+      ));
       await tx.delete(batches).where(eq(batches.id, b.id));
     });
     return NextResponse.json({ ok: true });
@@ -505,8 +515,9 @@ async function handleBatch(b: Extract<Body, { resource: "batch" }>) {
       const rc = fields.confirmedQuantity;
       if (rc !== null && rc !== "" && rc !== undefined) {
         const n = Number(rc);
-        if (!Number.isFinite(n)) {
-          return NextResponse.json({ error: "confirmedQuantity must be a number" }, { status: 400 });
+        // A car count — whole number, never negative.
+        if (!Number.isInteger(n) || n < 0) {
+          return NextResponse.json({ error: "confirmedQuantity must be a whole number ≥ 0" }, { status: 400 });
         }
         confirmedVal = n;
       }

@@ -16,6 +16,13 @@
  *
  * Server-only (touches the DB). Accepts a transaction handle so callers
  * can compose it into a larger atomic mutation.
+ *
+ * Known limitation: re-opening a done VIN action (done → waiting) does NOT
+ * roll its downstream vin-anchored steps back to null — they keep the
+ * planned dates from the now-retracted VIN date. This is deliberate ("don't
+ * destroy planned dates on a transient reopen"); the next VIN completion
+ * re-anchors them to the corrected date. Callers relying on a clean reset
+ * after reopen should clear those expectedDates themselves.
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "@/lib/db";
