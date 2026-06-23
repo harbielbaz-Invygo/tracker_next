@@ -2470,6 +2470,7 @@ function appListedSyntheticAction(po: PoNode): ScopedActionDetail | null {
     slaStartedAt:     null,
     slaHours:         null,
     blockedByNames:   [],
+    dependsOnNames:   [],
     delayJustification: null,
     pendingDependentNames: [],
   };
@@ -3408,6 +3409,8 @@ function VinChaseView({
       <ClosedPoRetrospective po={po} />
       {/* Who moved this PO + how on-time — closed POs only. */}
       <PoPhasePerformance po={po} />
+      {/* Per-task closeout: duration, owner, SLA, what affected it. */}
+      <PoTaskBreakdown po={po} />
     </div>
   );
 }
@@ -3592,6 +3595,143 @@ function aggregatePerf(
  * rows (wave-scope copies excluded to avoid double-count; Delivery
  * excluded). Closed POs only.
  */
+/** Humanise a millisecond span: "45m" / "6h" / "6h 20m" / "3d" / "3d 4h". */
+function fmtSpan(ms: number): string {
+  const mins = Math.max(0, Math.round(ms / 60_000));
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) { const m = mins % 60; return m ? `${hrs}h ${m}m` : `${hrs}h`; }
+  const days = Math.floor(hrs / 24); const h = hrs % 24;
+  return h ? `${days}d ${h}h` : `${days}d`;
+}
+/** Humanise an SLA budget given in hours: "48h" → "2d", "30h" → "1d 6h". */
+function fmtBudget(hours: number): string {
+  if (hours < 24) return `${hours}h`;
+  const d = Math.floor(hours / 24); const h = Math.round(hours % 24);
+  return h ? `${d}d ${h}h` : `${d}d`;
+}
+
+/**
+ * Per-task closeout table for an ended PO. One row per COMPLETED action
+ * (internal PO-scope + each batch's external steps; wave-scope roll-ups and
+ * synthetic rows excluded) showing: how long it took (SLA-clock start →
+ * completion), the taskholder, the SLA budget + whether it was met, on-time
+ * vs the planned date, and what affected it — a late slip, the upstream
+ * tasks it waited on, and any delay-justification decision. Collapsed by
+ * default since it can be long.
+ */
+function PoTaskBreakdown({ po }: { po: PoNode }) {
+  const [open, setOpen] = useState(false);
+  if (!po.closedAt) return null;
+
+  type Row = { a: ScopedActionDetail; phase: "Internal" | "External"; batchCode?: string };
+  const rows: Row[] = [];
+  for (const a of po.actions) if (a.id >= 0 && a.status === "done") rows.push({ a, phase: "Internal" });
+  for (const w of po.waves) for (const b of w.batches) for (const a of b.actions) {
+    if (a.id >= 0 && a.status === "done") rows.push({ a, phase: "External", batchCode: b.batchCode });
+  }
+  if (rows.length === 0) return null;
+  rows.sort((x, y) => x.a.sortOrder - y.a.sortOrder
+    || (x.a.completedAt ?? "").localeCompare(y.a.completedAt ?? ""));
+
+  return (
+    <section className="border-2 border-ink-700 rounded-md bg-white overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="w-full px-3 py-2 border-b border-ink-200 bg-ink-50/50 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-left hover:bg-ink-100/50"
+      >
+        <span aria-hidden="true" className="text-ink-500 text-xs">{open ? "▾" : "▸"}</span>
+        <span className="text-sm font-bold text-midnight">🧾 Task-by-task breakdown</span>
+        <span className="text-[0.7rem] text-ink-500">duration · owner · SLA · what affected it</span>
+        <span className="ml-auto text-[0.7rem] text-ink-500 tabular-nums">{rows.length} task{rows.length === 1 ? "" : "s"}</span>
+      </button>
+      {open && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[0.72rem] border-collapse">
+            <thead>
+              <tr className="text-ink-500 text-left border-b border-ink-200 bg-ink-50/30">
+                <th className="px-2 py-1.5 font-medium">Task</th>
+                <th className="px-2 py-1.5 font-medium">Owner</th>
+                <th className="px-2 py-1.5 font-medium">Done</th>
+                <th className="px-2 py-1.5 font-medium">Took</th>
+                <th className="px-2 py-1.5 font-medium">SLA</th>
+                <th className="px-2 py-1.5 font-medium">vs plan</th>
+                <th className="px-2 py-1.5 font-medium">What affected it</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ a, phase, batchCode }) => (
+                <PoTaskRow key={a.id} a={a} phase={phase} batchCode={batchCode} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PoTaskRow({ a, phase, batchCode }: { a: ScopedActionDetail; phase: "Internal" | "External"; batchCode?: string }) {
+  const dayDelta = (later: string, earlier: string) =>
+    Math.round((new Date(later + "T12:00:00Z").getTime() - new Date(earlier + "T12:00:00Z").getTime()) / 86_400_000);
+
+  const doneDate = a.completedAt ? localIsoDate(a.completedAt) : null;
+
+  // Took = SLA-clock start → completion (active time since last unblock).
+  const tookMs = a.slaStartedAt && a.completedAt
+    ? new Date(a.completedAt).getTime() - new Date(a.slaStartedAt).getTime()
+    : null;
+  const tookHrs = tookMs != null ? tookMs / 3_600_000 : null;
+  const breachedSla = a.slaHours != null && tookHrs != null && tookHrs > a.slaHours;
+
+  // vs plan
+  let plan: { txt: string; tone: "good" | "bad" | "neutral" } = { txt: "—", tone: "neutral" };
+  if (a.expectedDate && doneDate) {
+    const d = dayDelta(doneDate, a.expectedDate);
+    plan = d <= 0
+      ? { txt: d === 0 ? "On time" : `${-d}d early`, tone: "good" }
+      : { txt: `${d}d late`, tone: "bad" };
+  }
+
+  const j = a.delayJustification;
+
+  return (
+    <tr className="border-b border-ink-100 last:border-0 align-top">
+      <td className="px-2 py-1.5">
+        <span className="text-midnight">{a.doneLabel || a.actionTypeName}</span>
+        <span className={cn("ml-1.5 text-[0.6rem] px-1 py-0.5 rounded uppercase tracking-wide",
+          phase === "Internal" ? "bg-brand-pastel text-brand-dark" : "bg-gold-pale text-gold-dark")}>{phase}</span>
+        {batchCode && <span className="block text-[0.62rem] text-ink-400 font-mono">{batchCode}</span>}
+      </td>
+      <td className="px-2 py-1.5 text-ink-700">{a.stakeholderName ?? a.departmentName ?? "—"}</td>
+      <td className="px-2 py-1.5 tabular-nums text-ink-600">{doneDate ?? "—"}</td>
+      <td className="px-2 py-1.5 tabular-nums text-ink-700">{tookMs != null ? fmtSpan(tookMs) : "—"}</td>
+      <td className="px-2 py-1.5 tabular-nums">
+        {a.slaHours == null ? <span className="text-ink-400">none</span> : (
+          <span className={breachedSla ? "text-flame-dark font-medium" : "text-green-dark"}>
+            {fmtBudget(a.slaHours)}{breachedSla ? " · over" : tookHrs != null ? " · met" : ""}
+          </span>
+        )}
+      </td>
+      <td className={cn("px-2 py-1.5 tabular-nums",
+        plan.tone === "good" ? "text-green-dark" : plan.tone === "bad" ? "text-flame-dark font-medium" : "text-ink-400")}>{plan.txt}</td>
+      <td className="px-2 py-1.5">
+        <div className="flex flex-col gap-0.5">
+          {j?.status === "accepted" && <span className="text-green-dark">✓ excused — {j.reasonLabel}</span>}
+          {j?.status === "pending" && <span className="text-gold-dark">⏳ {j.reasonLabel} · pending</span>}
+          {j?.status === "rejected" && <span className="text-flame-dark">✗ reason rejected</span>}
+          {plan.tone === "bad" && a.dependsOnNames.length > 0 && (
+            <span className="text-ink-500">⛓ waited on {a.dependsOnNames.join(", ")}</span>
+          )}
+          {plan.tone !== "bad" && !j && <span className="text-ink-300">—</span>}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 function PoPhasePerformance({ po }: { po: PoNode }) {
   if (!po.closedAt) return null;
 
