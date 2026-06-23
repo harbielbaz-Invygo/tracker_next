@@ -221,7 +221,14 @@ export interface ScopedActionDetail {
    * "excused"); `pending` is awaiting admin review (still counts as a
    * delay); `rejected` stayed a delay. Null when none submitted.
    */
-  delayJustification: { status: JustificationStatus; reasonLabel: string } | null;
+  delayJustification: {
+    id: number;
+    status: JustificationStatus;
+    reasonLabel: string;
+    submittedBy: string | null;
+    submittedAt: string | null;
+    decisionNote: string | null;
+  } | null;
   /**
    * Names of child action_types currently in a non-settled state on
    * the same scope. Populated for ALL action rows (not just blocked
@@ -731,7 +738,14 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       blockedByNames,
       delayJustification: (() => {
         const j = justByAction.get(a.id);
-        return j ? { status: j.status, reasonLabel: j.reasonLabel } : null;
+        return j ? {
+          id: j.id,
+          status: j.status,
+          reasonLabel: j.reasonLabel,
+          submittedBy: j.submittedBy,
+          submittedAt: j.submittedAt,
+          decisionNote: j.decisionNote,
+        } : null;
       })(),
       pendingDependentNames: [], // filled in by the second pass below
     });
