@@ -18,6 +18,7 @@ import { useRouter } from "next/navigation";
 import type { SettingsData, SettingsUser } from "@/lib/settings-data";
 import SettingsBatches from "./settings-batches";
 import MaintenancePanel from "./settings-maintenance";
+import SettingsDelayReasons from "./settings-delay-reasons";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -40,6 +41,7 @@ export default function SettingsShell({ data, currentUserId }: Props) {
       <RulesEditor data={data} />
       <UsersEditor users={data.users} currentUserId={currentUserId} />
       <SettingsBatches data={data} />
+      <SettingsDelayReasons />
       <MaintenancePanel />
     </div>
   );

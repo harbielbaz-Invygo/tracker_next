@@ -1568,6 +1568,98 @@ function isPending(a: ScopedActionDetail): boolean {
   return a.status === "waiting" || a.status === "blocked";
 }
 
+/**
+ * Admin review queue for pending delay justifications, shown at the top of
+ * the Inbox. Scans the whole tree for actions whose latest justification is
+ * `pending` and offers Excuse / Reject (reject prompts for a note). Accept
+ * excuses the action's lateness everywhere; reject leaves it a delay. Admin
+ * only; renders nothing when there's nothing to review.
+ */
+function PendingDelayReviewPanel({ tree, onJumpToPo }: { tree: ActionCenterTree; onJumpToPo: (poId: number) => void }) {
+  const { isAdmin, prompt } = useShell();
+  const router = useRouter();
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const pending = useMemo(() => {
+    const out: { id: number; reasonLabel: string; submittedBy: string | null; actionLabel: string; poNumber: string; poId: number }[] = [];
+    const scan = (acts: ScopedActionDetail[], poNumber: string, poId: number) => {
+      for (const a of acts) {
+        const j = a.delayJustification;
+        if (j?.status === "pending") {
+          out.push({ id: j.id, reasonLabel: j.reasonLabel, submittedBy: j.submittedBy, actionLabel: a.doneLabel || a.actionTypeName, poNumber, poId });
+        }
+      }
+    };
+    for (const d of tree.dealers) for (const p of d.pos) {
+      scan(p.actions, p.poNumber, p.id);
+      for (const w of p.waves) {
+        scan(w.actions, p.poNumber, p.id);
+        for (const b of w.batches) scan(b.actions, p.poNumber, p.id);
+      }
+    }
+    return out;
+  }, [tree]);
+
+  if (!isAdmin || pending.length === 0) return null;
+
+  async function review(id: number, decision: "accepted" | "rejected", actionLabel: string) {
+    let note: string | null = null;
+    if (decision === "rejected") {
+      note = await prompt({
+        title: "Reject delay reason",
+        description: `Optional note back to the submitter for “${actionLabel}”.`,
+        inputLabel: "Note (optional)",
+        inputType: "text",
+        required: false,
+        confirmLabel: "Reject reason",
+      });
+      if (note === null) return; // cancelled
+    }
+    setBusyId(id);
+    try {
+      const res = await fetch("/api/delay-justification/review", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, decision, note }),
+      });
+      if (res.ok) router.refresh();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section className="border-2 border-gold rounded-md bg-gold-pale/20 overflow-hidden">
+      <div className="px-3 py-2 border-b border-gold/40 bg-gold-pale/40 flex items-baseline gap-2">
+        <span className="text-sm font-bold text-midnight">⚑ Delay justifications to review</span>
+        <span className="text-[0.7rem] text-ink-600 tabular-nums">{pending.length} pending</span>
+      </div>
+      <ul className="divide-y divide-gold/20">
+        {pending.map((r) => (
+          <li key={r.id} className="px-3 py-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+            <button type="button" onClick={() => onJumpToPo(r.poId)} className="font-medium text-midnight hover:underline">{r.poNumber}</button>
+            <span className="text-ink-300">·</span>
+            <span className="text-midnight">{r.actionLabel}</span>
+            <span className="text-ink-600">— {r.reasonLabel}{r.submittedBy ? ` (by ${r.submittedBy})` : ""}</span>
+            <span className="ml-auto flex gap-1.5 shrink-0">
+              <button
+                type="button" disabled={busyId === r.id}
+                onClick={() => review(r.id, "accepted", r.actionLabel)}
+                className="px-2 py-0.5 rounded border border-green text-green-dark hover:bg-green-pale disabled:opacity-50"
+              >✓ Excuse</button>
+              <button
+                type="button" disabled={busyId === r.id}
+                onClick={() => review(r.id, "rejected", r.actionLabel)}
+                className="px-2 py-0.5 rounded border border-flame text-flame-dark hover:bg-flame-pale disabled:opacity-50"
+              >✗ Reject</button>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function MineView({
   tree,
   mutationError, cascadeFlash, onDismissFlash,
@@ -1820,6 +1912,7 @@ function MineView({
             <button type="button" onClick={onDismissFlash} className="px-1">✕</button>
           </div>
         )}
+        <PendingDelayReviewPanel tree={tree} onJumpToPo={onJumpToPo} />
         {poGroups.length === 0 ? (
           <p className="text-sm text-ink-500 italic px-2">
             No delivery windows yet — submit an Intake to create one.
