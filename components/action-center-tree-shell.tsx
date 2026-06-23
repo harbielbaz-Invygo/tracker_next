@@ -3569,11 +3569,15 @@ function aggregatePerf(
     if (a.status === "done") {
       g.done++;
       if (a.expectedDate && a.completedAt) {
-        // completedAt is an ISO datetime; compare its local date to the
-        // planned (date-only) expectedDate. An accepted delay
-        // justification excuses the lateness → counts on-time.
-        const excused = a.delayJustification?.status === "accepted";
-        if (excused || localIsoDate(a.completedAt) <= a.expectedDate) g.onTime++;
+        // The delay justification drives on-time, same rule as the task
+        // breakdown: accepted → excused (on time); pending → a claim not
+        // yet accepted, so NOT on time; rejected/none → the raw
+        // completed-vs-planned date comparison.
+        const st = a.delayJustification?.status;
+        const onTime = st === "accepted" ? true
+          : st === "pending" ? false
+          : localIsoDate(a.completedAt) <= a.expectedDate;
+        if (onTime) g.onTime++;
         else g.late++;
       }
     }
@@ -3686,16 +3690,26 @@ function PoTaskRow({ a, phase, batchCode }: { a: ScopedActionDetail; phase: "Int
   const tookHrs = tookMs != null ? tookMs / 3_600_000 : null;
   const breachedSla = a.slaHours != null && tookHrs != null && tookHrs > a.slaHours;
 
-  // vs plan
-  let plan: { txt: string; tone: "good" | "bad" | "neutral" } = { txt: "—", tone: "neutral" };
-  if (a.expectedDate && doneDate) {
-    const d = dayDelta(doneDate, a.expectedDate);
-    plan = d <= 0
-      ? { txt: d === 0 ? "On time" : `${-d}d early`, tone: "good" }
-      : { txt: `${d}d late`, tone: "bad" };
-  }
-
   const j = a.delayJustification;
+
+  // vs plan — the delay justification drives the outcome:
+  //   • accepted → excused, counts on time
+  //   • pending  → a delay was claimed but NOT yet accepted → NOT on time
+  //   • rejected / none → the real completed-vs-planned date comparison
+  const rawLate = a.expectedDate && doneDate ? dayDelta(doneDate, a.expectedDate) : null;
+  let plan: { txt: string; tone: "good" | "bad" | "neutral" | "pending" };
+  if (j?.status === "accepted") {
+    plan = { txt: "Excused", tone: "good" };
+  } else if (j?.status === "pending") {
+    plan = { txt: rawLate != null && rawLate > 0 ? `${rawLate}d late` : "Pending", tone: "pending" };
+  } else if (rawLate != null) {
+    plan = rawLate <= 0
+      ? { txt: rawLate === 0 ? "On time" : `${-rawLate}d early`, tone: "good" }
+      : { txt: `${rawLate}d late`, tone: "bad" };
+  } else {
+    plan = { txt: "—", tone: "neutral" };
+  }
+  const late = plan.tone === "bad" || plan.tone === "pending";
 
   return (
     <tr className="border-b border-ink-100 last:border-0 align-top">
@@ -3716,16 +3730,19 @@ function PoTaskRow({ a, phase, batchCode }: { a: ScopedActionDetail; phase: "Int
         )}
       </td>
       <td className={cn("px-2 py-1.5 tabular-nums",
-        plan.tone === "good" ? "text-green-dark" : plan.tone === "bad" ? "text-flame-dark font-medium" : "text-ink-400")}>{plan.txt}</td>
+        plan.tone === "good" ? "text-green-dark"
+          : plan.tone === "bad" ? "text-flame-dark font-medium"
+          : plan.tone === "pending" ? "text-gold-dark font-medium"
+          : "text-ink-400")}>{plan.txt}</td>
       <td className="px-2 py-1.5">
         <div className="flex flex-col gap-0.5">
           {j?.status === "accepted" && <span className="text-green-dark">✓ excused — {j.reasonLabel}</span>}
-          {j?.status === "pending" && <span className="text-gold-dark">⏳ {j.reasonLabel} · pending</span>}
-          {j?.status === "rejected" && <span className="text-flame-dark">✗ reason rejected</span>}
-          {plan.tone === "bad" && a.dependsOnNames.length > 0 && (
+          {j?.status === "pending" && <span className="text-gold-dark">⏳ {j.reasonLabel} · pending review</span>}
+          {j?.status === "rejected" && <span className="text-flame-dark">✗ reason rejected — {j.reasonLabel}</span>}
+          {late && a.dependsOnNames.length > 0 && (
             <span className="text-ink-500">⛓ waited on {a.dependsOnNames.join(", ")}</span>
           )}
-          {plan.tone !== "bad" && !j && <span className="text-ink-300">—</span>}
+          {!late && !j && <span className="text-ink-300">—</span>}
         </div>
       </td>
     </tr>
