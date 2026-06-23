@@ -59,6 +59,9 @@ interface ShellCtx {
   prompt:  ReturnType<typeof useConfirmDialog>["prompt"];
   /** True when the signed-in user is an admin — gates the Redistribute UI. */
   isAdmin: boolean;
+  /** Admin-curated preset delay reasons (fetched once) for the
+   *  "Explain delay" form. Empty until the catalog migration is run. */
+  delayReasons: { id: number; label: string }[];
 }
 const ShellContext = createContext<ShellCtx | null>(null);
 function useShell(): ShellCtx {
@@ -252,6 +255,23 @@ export default function ActionCenterTreeShell({ tree, isAdmin = false }: Props) 
   // arbitrary first PO.
   const [selection, setSelection] = useState<Selection>({ kind: "mine" });
   const [view, setView] = useState<DrawerView>("internal");
+
+  // Delay-reason catalog — fetched once for the "Explain delay" form.
+  // Empty (and the form falls back to free-text only) until the catalog
+  // migration has run. Best-effort: a failure just leaves it empty.
+  const [delayReasons, setDelayReasons] = useState<{ id: number; label: string }[]>([]);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/delay-reason")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (alive && Array.isArray(j?.reasons)) {
+          setDelayReasons(j.reasons.map((x: { id: number; label: string }) => ({ id: x.id, label: x.label })));
+        }
+      })
+      .catch(() => { /* catalog unavailable — free-text only */ });
+    return () => { alive = false; };
+  }, []);
 
   /**
    * Help overlay visibility — toggled by `?` or the small ⌨ button
@@ -688,6 +708,7 @@ export default function ActionCenterTreeShell({ tree, isAdmin = false }: Props) 
       alert,
       prompt,
       isAdmin,
+      delayReasons,
     }}>
     <ConfirmDialog {...dialogProps} />
     <InputDialog   {...inputProps} />
@@ -6195,6 +6216,138 @@ function BatchOpBtn({
 // Action card — rich tile used inside Waiting / Blocked / Done columns
 // ─────────────────────────────────────────────────────────────
 
+/** Is the action late — open & past its planned date, or done after it? */
+function actionIsLate(a: ScopedActionDetail, today: string): boolean {
+  if (a.status === "skipped") return false;
+  if (a.status === "done") {
+    return !!(a.expectedDate && a.completedAt && localIsoDate(a.completedAt) > a.expectedDate);
+  }
+  return !!(a.expectedDate && a.expectedDate < today);
+}
+
+/**
+ * "Explain delay" affordance + excused-status line on an action row.
+ * Renders only when the action is late (open-overdue or done-late) or
+ * already carries a justification — so it shows on closed/completed POs
+ * too. Ops pick a preset reason and/or type detail; an admin accepts it in
+ * the Inbox to excuse the lateness.
+ */
+function DelayJustificationBlock({ action }: { action: ScopedActionDetail }) {
+  const { delayReasons } = useShell();
+  const router = useRouter();
+  const j = action.delayJustification;
+  const late = actionIsLate(action, todayIso());
+
+  const [open, setOpen] = useState(false);
+  const [reasonId, setReasonId] = useState("");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!late && !j) return null;
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/delay-justification", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actionId: action.id,
+          reasonId: reasonId ? Number(reasonId) : null,
+          reasonText: text.trim() || null,
+        }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+      setOpen(false); setText(""); setReasonId("");
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Accepted → excused (green, terminal).
+  if (j?.status === "accepted") {
+    return (
+      <p className="mt-1.5 text-[0.7rem] text-green-dark bg-green-pale/50 border border-green-pale rounded px-2 py-1">
+        ✓ Delay excused — {j.reasonLabel}
+      </p>
+    );
+  }
+
+  // Pending → awaiting review (amber); allow editing the submission.
+  if (j?.status === "pending" && !open) {
+    return (
+      <div className="mt-1.5 text-[0.7rem] text-gold-dark bg-gold-pale/50 border border-gold-pale rounded px-2 py-1 flex items-center justify-between gap-2">
+        <span>⏳ Delay explained — {j.reasonLabel} · pending review</span>
+        <button type="button" onClick={() => { setOpen(true); setText(""); }} className="underline hover:no-underline shrink-0">edit</button>
+      </div>
+    );
+  }
+
+  // Rejected note (shown above the re-explain affordance).
+  const rejectedNote = j?.status === "rejected"
+    ? <p className="mt-1.5 text-[0.7rem] text-flame-dark">✗ Reason rejected{j.decisionNote ? ` — ${j.decisionNote}` : ""}</p>
+    : null;
+
+  if (!open) {
+    return (
+      <div>
+        {rejectedNote}
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="mt-1.5 text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50 hover:text-midnight"
+        >
+          ⚑ {j?.status === "rejected" ? "Re-explain delay" : "Explain delay"}
+        </button>
+      </div>
+    );
+  }
+
+  const canSubmit = !!reasonId || text.trim().length > 0;
+  return (
+    <div>
+      {rejectedNote}
+      <form
+        onSubmit={(e) => { e.preventDefault(); if (canSubmit) submit(); }}
+        className="mt-1.5 p-2 border border-brand rounded-md bg-brand-pastel/20 space-y-1.5"
+      >
+        <p className="text-[0.7rem] font-medium text-midnight">⚑ Why was this late?</p>
+        {delayReasons.length > 0 && (
+          <select
+            value={reasonId}
+            onChange={(e) => setReasonId(e.target.value)}
+            className="input text-xs py-1 w-full"
+          >
+            <option value="">— pick a reason —</option>
+            {delayReasons.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+          </select>
+        )}
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={delayReasons.length > 0 ? "Add detail (optional)" : "Describe what happened"}
+          className="input text-xs py-1 w-full"
+        />
+        {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
+        <div className="flex justify-end gap-1.5">
+          <button type="button" onClick={() => setOpen(false)} disabled={busy}
+                  className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50">Cancel</button>
+          <button type="submit" disabled={busy || !canSubmit}
+                  className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel disabled:opacity-50">
+            {busy ? "…" : "Submit for review"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function ActionCard({
   action, busy, onChangeStatus, poForAppListing,
 }: {
@@ -6354,6 +6507,11 @@ function ActionCard({
         )}
       </div>
       )}
+
+      {/* Explain-delay / excused-status — only on real, late (or already
+          justified) rows. Lets ops attach a reason an admin can accept to
+          excuse the lateness. */}
+      {!isSynthetic && <DelayJustificationBlock action={action} />}
     </li>
   );
 }
