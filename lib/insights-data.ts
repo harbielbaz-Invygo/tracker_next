@@ -17,6 +17,7 @@ import {
 import { getDashboardRows, type DashboardRow } from "@/lib/dashboard-data";
 import { getPerformanceReport, type PerformanceReport } from "@/lib/reports-data";
 import { computeDeliveryConfidence, type ConfidenceLevel } from "@/lib/delivery-confidence";
+import { getExcusedActionIds } from "@/lib/delay-justifications";
 import type { ReportPeriod } from "@/lib/reports-period";
 
 export interface InsightsHero {
@@ -1141,6 +1142,7 @@ async function getInternalPhaseStats(period: ReportPeriod): Promise<InternalPhas
   // their own start time, so we measure cumulative days from PO
   // submission to action completion).
   interface Row {
+    id:             number;
     actionTypeId:   number;
     actionTypeName: string;
     sortOrder:      number;
@@ -1159,6 +1161,7 @@ async function getInternalPhaseStats(period: ReportPeriod): Promise<InternalPhas
     // the SQL simple.
     const actionRows = await db
       .select({
+        id:             actionsTable.id,
         actionTypeId:   actionsTable.actionTypeId,
         actionTypeName: actionTypes.name,
         sortOrder:      actionTypes.sortOrder,
@@ -1201,6 +1204,7 @@ async function getInternalPhaseStats(period: ReportPeriod): Promise<InternalPhas
       const submission = submissionByPo.get(r.scopeId);
       if (!submission) return [];
       return [{
+        id:             r.id,
         actionTypeId:   r.actionTypeId,
         actionTypeName: r.actionTypeName,
         sortOrder:      r.sortOrder,
@@ -1233,6 +1237,9 @@ async function getInternalPhaseStats(period: ReportPeriod): Promise<InternalPhas
     onTimeTotal:    number;
   }
   const buckets = new Map<number, Bucket>();
+
+  // Actions whose lateness an admin excused → count on-time, no delay.
+  const excusedIds = await getExcusedActionIds();
 
   for (const r of rows) {
     let b = buckets.get(r.actionTypeId);
@@ -1268,13 +1275,15 @@ async function getInternalPhaseStats(period: ReportPeriod): Promise<InternalPhas
     if (days >= 0) b.daysToComplete.push(days);
 
     if (r.expectedDate) {
-      const delay = Math.round(
+      const rawDelay = Math.round(
         (new Date(completedOn).getTime() - new Date(r.expectedDate).getTime())
           / (24 * 60 * 60 * 1000),
       );
+      const excused = excusedIds.has(r.id);
+      const delay = excused && rawDelay > 0 ? 0 : rawDelay;
       b.delaySamples.push(delay);
       b.onTimeTotal++;
-      if (delay <= 0) b.onTimeHits++;
+      if (excused || delay <= 0) b.onTimeHits++;
     }
   }
 

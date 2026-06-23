@@ -31,6 +31,7 @@ import {
 } from "@/lib/po-reliability";
 import { derivePoClosureOutcome } from "@/lib/po-closure";
 import { daysBetween } from "@/lib/expected-date";
+import { getExcusedActionIds } from "@/lib/delay-justifications";
 
 /**
  * Audit 2 #3 — per-phase performance slice for a department row.
@@ -561,6 +562,7 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
   const scopedRows = await (async () => {
     const q = db
       .select({
+        id:              actionsTable.id,
         scope:           actionsTable.scope,
         scopeId:         actionsTable.scopeId,
         status:          actionsTable.status,
@@ -577,6 +579,10 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       ? q.where(or(isNull(actionsTable.completedAt), gte(actionsTable.completedAt, fromIso)))
       : q;
   })();
+
+  // Actions whose lateness an admin excused (accepted delay justification)
+  // — neutralised below so they count on-time and add no delay.
+  const excusedActionIds = await getExcusedActionIds();
 
   // Build wave→batches and po→batches lookups once. Used to fan out a
   // late wave/PO action's "delayed batches owned" attribution to every
@@ -616,6 +622,12 @@ export async function getPerformanceReport(period: ReportPeriod = "all"): Promis
       isLate = delayDays > 0;
     } else if (isActive && r.expectedDate && todayIso > r.expectedDate) {
       isLate = true;
+    }
+
+    // Excused → neutralise: on-time, zero delay contribution.
+    if (excusedActionIds.has(r.id)) {
+      isLate = false;
+      if (delayDays !== null && delayDays > 0) delayDays = 0;
     }
 
     let bucketIdx: number | null = null;

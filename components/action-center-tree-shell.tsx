@@ -124,11 +124,13 @@ function addDaysIso(n: number): string {
 }
 /**
  * "Overdue" = expectedDate in the past AND the action isn't settled.
- * Skipped/done rows aren't overdue regardless of date. Used to flag
- * action rows in the drawer + roll up an at-risk count per PO.
+ * Skipped/done rows aren't overdue regardless of date. An accepted delay
+ * justification excuses the lateness, so it's no longer overdue. Used to
+ * flag action rows in the drawer + roll up an at-risk count per PO.
  */
 function isOverdue(a: ScopedActionDetail, today: string): boolean {
   if (a.status === "done" || a.status === "skipped") return false;
+  if (a.delayJustification?.status === "accepted") return false;
   if (!a.expectedDate) return false;
   return a.expectedDate < today;
 }
@@ -2354,6 +2356,7 @@ function appListedSyntheticAction(po: PoNode): ScopedActionDetail | null {
     slaStartedAt:     null,
     slaHours:         null,
     blockedByNames:   [],
+    delayJustification: null,
     pendingDependentNames: [],
   };
 }
@@ -3450,8 +3453,10 @@ function aggregatePerf(
       g.done++;
       if (a.expectedDate && a.completedAt) {
         // completedAt is an ISO datetime; compare its local date to the
-        // planned (date-only) expectedDate.
-        if (localIsoDate(a.completedAt) <= a.expectedDate) g.onTime++;
+        // planned (date-only) expectedDate. An accepted delay
+        // justification excuses the lateness → counts on-time.
+        const excused = a.delayJustification?.status === "accepted";
+        if (excused || localIsoDate(a.completedAt) <= a.expectedDate) g.onTime++;
         else g.late++;
       }
     }
