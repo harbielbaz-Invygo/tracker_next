@@ -19,6 +19,7 @@
  */
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { getExcusedActionIds } from "@/lib/delay-justifications";
 
 export interface SlaMetrics {
   /** False when the SLA columns aren't migrated yet — UI shows a hint. */
@@ -53,12 +54,13 @@ function round1(n: number): number { return Math.round(n * 10) / 10; }
 
 export async function getSlaMetrics(now: number = Date.now()): Promise<SlaMetrics> {
   let rows: {
-    status: string; completed_at: string | null;
+    id: number; status: string; completed_at: string | null;
     sla_started_at: string | null; sla_hours: number | null; type_name: string;
   }[];
   try {
     rows = await db.all(sql`
-      SELECT a.status         AS status,
+      SELECT a.id             AS id,
+             a.status         AS status,
              a.completed_at    AS completed_at,
              a.sla_started_at  AS sla_started_at,
              t.sla_hours       AS sla_hours,
@@ -79,6 +81,9 @@ export async function getSlaMetrics(now: number = Date.now()): Promise<SlaMetric
     throw err;
   }
 
+  // Actions whose lateness an admin excused — not counted as a breach.
+  const excused = await getExcusedActionIds();
+
   const byType = new Map<string, { name: string; overdue: number; tracked: number }>();
   let trackedActions = 0, currentlyOverdue = 0, currentlyCritical = 0;
   let doneTotal = 0, doneOnTime = 0;
@@ -91,13 +96,17 @@ export async function getSlaMetrics(now: number = Date.now()): Promise<SlaMetric
     const budgetMs = hours * 3_600_000;
     const deadline = start + budgetMs;
 
+    const isExcused = excused.has(Number(r.id));
+
     trackedActions++;
     const bt = byType.get(r.type_name) ?? { name: r.type_name, overdue: 0, tracked: 0 };
     bt.tracked++;
 
     if (r.status === "waiting") {
       const overdueMs = now - deadline;
-      if (overdueMs > 0) {
+      // An accepted justification excuses the breach — don't count it as
+      // overdue/critical (it would otherwise inflate the live SLA panel).
+      if (overdueMs > 0 && !isExcused) {
         currentlyOverdue++;
         bt.overdue++;
         overdueSumMs += overdueMs;
@@ -110,8 +119,9 @@ export async function getSlaMetrics(now: number = Date.now()): Promise<SlaMetric
       const completed = r.completed_at ? new Date(r.completed_at).getTime() : null;
       // Within budget when completed at/before the deadline. A missing
       // completion timestamp can't be judged late, so it counts on-time
-      // rather than penalising incomplete legacy data.
-      if (completed == null || completed <= deadline) doneOnTime++;
+      // rather than penalising incomplete legacy data. An excused breach
+      // also counts on-time.
+      if (isExcused || completed == null || completed <= deadline) doneOnTime++;
     }
     byType.set(r.type_name, bt);
   }

@@ -21,6 +21,7 @@ import {
 } from "@/lib/db/schema";
 import { computePoReliability, type ReliabilityBatch } from "@/lib/po-reliability";
 import { getAllPoBaselines, getAllPoBaselinesModel, type BaselineWindow, type BaselineModelWindow } from "@/lib/po-baseline";
+import { getJustificationsByAction, type JustificationStatus } from "@/lib/delay-justifications";
 
 type BatchRow = typeof batches.$inferSelect;
 
@@ -214,6 +215,13 @@ export interface ScopedActionDetail {
    * list). Empty when not blocked.
    */
   blockedByNames: string[];
+  /**
+   * Latest delay justification on this action, if any. `accepted` means
+   * its lateness is excused (counts on-time, the slip renders as
+   * "excused"); `pending` is awaiting admin review (still counts as a
+   * delay); `rejected` stayed a delay. Null when none submitted.
+   */
+  delayJustification: { status: JustificationStatus; reasonLabel: string } | null;
   /**
    * Names of child action_types currently in a non-settled state on
    * the same scope. Populated for ALL action rows (not just blocked
@@ -498,7 +506,7 @@ export interface ActionTouchpoint {
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, slaStartedByAction, slaHoursByActionType, baselinesByPo, baselinesModelByPo] = await Promise.all([
+  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, slaStartedByAction, slaHoursByActionType, baselinesByPo, baselinesModelByPo, justByAction] = await Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     fetchBatchesTolerant(),
@@ -620,6 +628,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     fetchSlaHoursByActionType(),
     getAllPoBaselines(),
     getAllPoBaselinesModel(),
+    getJustificationsByAction(),
   ]);
 
   // Index per-city legs by batch — order preserved (intake order).
@@ -720,6 +729,10 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       slaStartedAt:     slaStartedByAction.get(a.id) ?? null,
       slaHours:         slaHoursByActionType.get(a.actionTypeId) ?? null,
       blockedByNames,
+      delayJustification: (() => {
+        const j = justByAction.get(a.id);
+        return j ? { status: j.status, reasonLabel: j.reasonLabel } : null;
+      })(),
       pendingDependentNames: [], // filled in by the second pass below
     });
     actionsByKey.set(key, arr);
