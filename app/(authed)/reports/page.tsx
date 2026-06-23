@@ -17,6 +17,7 @@ import AccessGate from "@/components/access-gate";
 import PageHeader from "@/components/page-header";
 import ReportsShell from "@/components/reports-shell";
 import { getPerformanceReport, type ReportPeriod } from "@/lib/reports-data";
+import { withDbRetry } from "@/lib/db-retry";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +33,7 @@ export default async function ReportsPage({
   const period: ReportPeriod = VALID_PERIODS.includes(raw as ReportPeriod)
     ? (raw as ReportPeriod)
     : "all";
-  const report = await getPerformanceReport(period);
+  const report = await withDbRetry(() => getPerformanceReport(period));
 
   return (
     <AccessGate view="Reports">

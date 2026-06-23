@@ -14,6 +14,7 @@
 import DashboardShell from "@/components/dashboard-shell";
 import PageHeader from "@/components/page-header";
 import { getDashboardRows, summarize, getLateDeliveriesWeekly } from "@/lib/dashboard-data";
+import { withDbRetry } from "@/lib/db-retry";
 import type { ReportPeriod } from "@/lib/reports-period";
 
 export const dynamic = "force-dynamic";
@@ -35,10 +36,10 @@ export default async function DashboardPage({
   // sparkline data lands at the same time as the table. The period
   // filter scopes which BATCHES are shown; the sparkline always covers
   // the last 12 weeks regardless (it's its own trend window).
-  const [rows, lateWeekly] = await Promise.all([
+  const [rows, lateWeekly] = await withDbRetry(() => Promise.all([
     getDashboardRows(period),
     getLateDeliveriesWeekly(),
-  ]);
+  ]));
   const totals = summarize(rows);
 
   if (rows.length === 0) {
