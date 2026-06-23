@@ -217,6 +217,14 @@ export interface ScopedActionDetail {
    */
   blockedByNames: string[];
   /**
+   * ALL dependency-parent task names for this action (regardless of their
+   * current status), sorted by workflow order. Unlike blockedByNames
+   * (which is only the still-pending parents), this is the static "this
+   * task could only start after …" list — used by the closed-PO task
+   * breakdown to show what a task waited on.
+   */
+  dependsOnNames: string[];
+  /**
    * Latest delay justification on this action, if any. `accepted` means
    * its lateness is excused (counts on-time, the slip renders as
    * "excused"); `pending` is awaiting admin review (still counts as a
@@ -740,6 +748,11 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       slaStartedAt:     slaStartedByAction.get(a.id) ?? null,
       slaHours:         slaHoursByActionType.get(a.actionTypeId) ?? null,
       blockedByNames,
+      dependsOnNames:   parentIds
+        .map((pid) => typeInfoById.get(pid))
+        .filter((t): t is NonNullable<typeof t> => !!t)
+        .sort((x, y) => x.sortOrder - y.sortOrder)
+        .map((t) => t.name),
       delayJustification: (() => {
         const j = justByAction.get(a.id);
         return j ? {
