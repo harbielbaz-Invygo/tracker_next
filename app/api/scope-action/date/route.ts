@@ -24,8 +24,9 @@
 import { eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { actions as actionsTable } from "@/lib/db/schema";
+import { actions as actionsTable, actionTypes, batches } from "@/lib/db/schema";
 import { requireAuth, apiError } from "@/lib/api-auth";
+import { reanchorVinAnchoredActions, isVinActionName } from "@/lib/vin-reanchor";
 
 export const runtime = "nodejs";
 
@@ -86,11 +87,15 @@ export async function PATCH(req: NextRequest) {
 
   const [current] = await db
     .select({
-      id:          actionsTable.id,
-      status:      actionsTable.status,
-      completedAt: actionsTable.completedAt,
+      id:             actionsTable.id,
+      status:         actionsTable.status,
+      completedAt:    actionsTable.completedAt,
+      scope:          actionsTable.scope,
+      scopeId:        actionsTable.scopeId,
+      actionTypeName: actionTypes.name,
     })
     .from(actionsTable)
+    .innerJoin(actionTypes, eq(actionsTable.actionTypeId, actionTypes.id))
     .where(eq(actionsTable.id, actionId))
     .limit(1);
   if (!current) return apiError("Action not found", 404);
@@ -110,7 +115,43 @@ export async function PATCH(req: NextRequest) {
     updateSet.completedAt = normalisedCompletedAt;
   }
 
-  await db.update(actionsTable).set(updateSet).where(eq(actionsTable.id, actionId));
+  // Correcting a VIN action's completion date must re-anchor its
+  // downstream vin-anchored steps — otherwise this (the exact tool an
+  // admin uses to fix a wrong historical VIN date) leaves Plate/Customs/
+  // Inspection/etc. pinned to the old day. includeDone:true because the
+  // downstream steps on a closed PO are already done; this is a deliberate
+  // correction, not live forward flow. Projection is left untouched (it
+  // may have been hand-set) — only the planned dates move.
+  const reanchorVin =
+    isVinActionName(current.actionTypeName)
+    && current.status === "done"
+    && typeof normalisedCompletedAt === "string";
+
+  await db.transaction(async (tx) => {
+    await tx.update(actionsTable).set(updateSet).where(eq(actionsTable.id, actionId));
+
+    if (reanchorVin) {
+      const actualVinDate = (normalisedCompletedAt as string).slice(0, 10);
+      if (current.scope === "batch") {
+        await reanchorVinAnchoredActions(tx, {
+          batchIds: [current.scopeId],
+          actualVinDate,
+          includeDone: true,
+        });
+      } else if (current.scope === "wave") {
+        const childBatches = await tx
+          .select({ id: batches.id })
+          .from(batches)
+          .where(eq(batches.waveId, current.scopeId));
+        await reanchorVinAnchoredActions(tx, {
+          waveIds: [current.scopeId],
+          batchIds: childBatches.map((row) => row.id),
+          actualVinDate,
+          includeDone: true,
+        });
+      }
+    }
+  });
 
   return NextResponse.json({
     ok: true,

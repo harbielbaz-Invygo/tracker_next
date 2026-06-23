@@ -37,8 +37,14 @@ interface BackfillReport {
   vinAnchoredActionTypes: number;
   batchesWithDoneVin: number;
   wavesWithDoneVin: number;
-  /** vin-anchored actions that currently have NO planned date (the gap). */
+  /** vin-anchored actions with NO planned date (the total gap). */
   actionsMissingPlannedDate: number;
+  /** Of the gap, how many Run can fix now — their batch/wave VIN is done. */
+  fixableNow: number;
+  /** Of the gap, how many are still waiting on their VIN (un-fixable until
+   *  the VIN action completes). This is why the missing count never reaches
+   *  zero: these are correctly excluded, not a backfill failure. */
+  waitingOnVin: number;
   /** Action rows actually re-anchored (0 on a dry run). */
   actionsReanchored: number;
   dryRun: boolean;
@@ -67,6 +73,8 @@ async function buildReport(write: boolean): Promise<BackfillReport> {
       batchesWithDoneVin: 0,
       wavesWithDoneVin: 0,
       actionsMissingPlannedDate: 0,
+      fixableNow: 0,
+      waitingOnVin: 0,
       actionsReanchored: 0,
       dryRun: !write,
     };
@@ -89,14 +97,26 @@ async function buildReport(write: boolean): Promise<BackfillReport> {
   const batchVin = doneVin.filter((r) => r.scope === "batch" && r.completedAt);
   const waveVin = doneVin.filter((r) => r.scope === "wave" && r.completedAt);
 
-  // How many vin-anchored actions still have no planned date at all.
+  // Scopes whose VIN is done → their missing vin-anchored steps are
+  // fixable now. Keyed "scope:scopeId".
+  const readyKeys = new Set<string>([
+    ...batchVin.map((r) => `batch:${r.scopeId}`),
+    ...waveVin.map((r) => `wave:${r.scopeId}`),
+  ]);
+
+  // vin-anchored actions that still have no planned date — split into the
+  // ones Run can fix now (their VIN is done) vs the ones still waiting on
+  // a VIN (correctly skipped, so the total never reaches zero).
   const missing = await db
-    .select({ id: actionsTable.id })
+    .select({ scope: actionsTable.scope, scopeId: actionsTable.scopeId })
     .from(actionsTable)
     .where(and(
       inArray(actionsTable.actionTypeId, vinAnchoredIds),
       isNull(actionsTable.expectedDate),
     ));
+  let fixableNow = 0;
+  for (const r of missing) if (readyKeys.has(`${r.scope}:${r.scopeId}`)) fixableNow++;
+  const waitingOnVin = missing.length - fixableNow;
 
   let actionsReanchored = 0;
   if (write && (batchVin.length > 0 || waveVin.length > 0)) {
@@ -124,6 +144,8 @@ async function buildReport(write: boolean): Promise<BackfillReport> {
     batchesWithDoneVin: batchVin.length,
     wavesWithDoneVin: waveVin.length,
     actionsMissingPlannedDate: missing.length,
+    fixableNow,
+    waitingOnVin,
     actionsReanchored,
     dryRun: !write,
   };

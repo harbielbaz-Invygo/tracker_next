@@ -188,6 +188,14 @@ const CLEANUP: MigrationEndpoint[] = [
     destructive: true,
   },
   {
+    path: "cleanup-orphan-actions",
+    label: "Prune orphaned action rows",
+    detail:
+      "Deletes scope-aware action rows pointing at a deleted PO / wave / batch. Orphaned 'waiting' rows otherwise count forever as Delayed/Critical in the SLA panel and Stuck Stages. Check counts them; Run removes them. Idempotent.",
+    supportsGet: true,
+    destructive: true,
+  },
+  {
     path: "cleanup-empty-waves",
     label: "Prune empty waves",
     detail:
