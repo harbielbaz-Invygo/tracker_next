@@ -22,6 +22,7 @@ import {
 import { computePoReliability, type ReliabilityBatch } from "@/lib/po-reliability";
 import { getAllPoBaselines, getAllPoBaselinesModel, type BaselineWindow, type BaselineModelWindow } from "@/lib/po-baseline";
 import { getJustificationsByAction, type JustificationStatus } from "@/lib/delay-justifications";
+import { withDbRetry } from "@/lib/db-retry";
 
 type BatchRow = typeof batches.$inferSelect;
 
@@ -512,8 +513,11 @@ export interface ActionTouchpoint {
  * Action Center at /action-center until phase 3b swaps the routes.
  */
 export async function getActionCenterTree(): Promise<ActionCenterTree> {
-  // Pull everything in parallel — small dataset, cheap on Turso.
-  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, slaStartedByAction, slaHoursByActionType, baselinesByPo, baselinesModelByPo, justByAction] = await Promise.all([
+  // Pull everything in parallel — small dataset, cheap on Turso. Wrapped
+  // in withDbRetry so a transient Turso socket drop (UND_ERR_SOCKET /
+  // "fetch failed" on a reused keep-alive connection) retries on a fresh
+  // socket instead of crashing the whole page render. Reads only → safe.
+  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, slaStartedByAction, slaHoursByActionType, baselinesByPo, baselinesModelByPo, justByAction] = await withDbRetry(() => Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     fetchBatchesTolerant(),
@@ -636,7 +640,7 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
     getAllPoBaselines(),
     getAllPoBaselinesModel(),
     getJustificationsByAction(),
-  ]);
+  ]));
 
   // Index per-city legs by batch — order preserved (intake order).
   const legsByBatch = new Map<number, BatchNode["legs"]>();

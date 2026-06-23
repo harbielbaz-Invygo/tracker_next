@@ -18,6 +18,7 @@ import { getDashboardRows, type DashboardRow } from "@/lib/dashboard-data";
 import { getPerformanceReport, type PerformanceReport } from "@/lib/reports-data";
 import { computeDeliveryConfidence, type ConfidenceLevel } from "@/lib/delivery-confidence";
 import { getExcusedActionIds } from "@/lib/delay-justifications";
+import { withDbRetry } from "@/lib/db-retry";
 import type { ReportPeriod } from "@/lib/reports-period";
 
 export interface InsightsHero {
@@ -945,12 +946,12 @@ export async function getInsightsData(period: ReportPeriod = "all"): Promise<Ins
   // Same period filter is threaded into both — Insights is just the
   // union of Dashboard + Reports, so scoping them together keeps the
   // hero metrics and the underlying tables in agreement.
-  const [report, batchRows, closure, forecastReliability] = await Promise.all([
+  const [report, batchRows, closure, forecastReliability] = await withDbRetry(() => Promise.all([
     getPerformanceReport(period),
     getDashboardRows(period),
     getClosureSummary(period),
     getForecastReliability(period),
-  ]);
+  ]));
 
   // Pre-VIN critical: derived from the dashboard rows where the row is
   // pre-VIN AND its days-to-availability is ≤ 14 AND not delivered.
