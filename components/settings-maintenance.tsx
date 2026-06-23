@@ -151,6 +151,13 @@ const SCHEMA_MIGRATIONS: MigrationEndpoint[] = [
     supportsGet: true,
   },
   {
+    path: "ensure-delay-justification-tables",
+    label: "Delay justification tables",
+    detail:
+      "Creates delay_reason_catalog + action_delay_justifications (the 'excused delay' workflow) and seeds default reasons. Additive, idempotent.",
+    supportsGet: true,
+  },
+  {
     path: "ensure-po-delivery-baseline-model",
     label: "PO baseline (per-model)",
     detail:
