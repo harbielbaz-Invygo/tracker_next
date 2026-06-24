@@ -898,7 +898,7 @@ interface UiStateProps {
 // Left panel — Dealer → PO tree
 // ─────────────────────────────────────────────────────────────
 
-type PoStatusFilter = "all" | "active" | "completed" | "cancelled" | "partly";
+type PoStatusFilter = "all" | "active" | "completed" | "cancelled" | "partly" | "not_listed";
 
 /**
  * Bucket a PO for the status quick-filter:
@@ -922,11 +922,12 @@ function poStatusBucket(po: PoNode): Exclude<PoStatusFilter, "all"> {
 }
 
 const PO_STATUS_FILTERS: { value: PoStatusFilter; label: string; title: string }[] = [
-  { value: "active",    label: "Active",    title: "Open POs still in progress (incl. Pre-PO bets)" },
-  { value: "all",       label: "All",       title: "Every PO" },
-  { value: "completed", label: "Completed", title: "Closed & delivered — full or partial (everything except cancelled)" },
-  { value: "partly",    label: "Partly",    title: "Closed — partly delivered (mixed / partial) only" },
-  { value: "cancelled", label: "Cancelled", title: "Closed — every batch cancelled" },
+  { value: "active",     label: "Active",     title: "Open POs still in progress (incl. Pre-PO bets)" },
+  { value: "not_listed", label: "Not listed", title: "POs with cars not yet live in-app — some or all still pending App Listing" },
+  { value: "all",        label: "All",        title: "Every PO" },
+  { value: "completed",  label: "Completed",  title: "Closed & delivered — full or partial (everything except cancelled)" },
+  { value: "partly",     label: "Partly",     title: "Closed — partly delivered (mixed / partial) only" },
+  { value: "cancelled",  label: "Cancelled",  title: "Closed — every batch cancelled" },
 ];
 
 function DealerTree({
@@ -996,6 +997,13 @@ function DealerTree({
     };
     const matchStatus = (p: PoNode) => {
       if (statusFilter === "all") return true;
+      // "Not listed" is a listing-state axis (independent of closure):
+      // any PO that still has cars not yet live in-app. Fully-listed,
+      // fully-cancelled and Pre-PO POs (totalCars 0) are excluded.
+      if (statusFilter === "not_listed") {
+        const s = p.appListingSummary;
+        return s.totalCars > 0 && s.listedCars < s.totalCars;
+      }
       const bucket = poStatusBucket(p);
       // "Completed" = every closed PO that delivered at least some cars
       // (full OR partial) — i.e. all closed minus the fully-cancelled.
