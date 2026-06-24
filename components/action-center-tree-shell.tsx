@@ -79,6 +79,13 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Whole days a planned date is past `today` (≥1 once overdue). Both
+ *  args are yyyy-mm-dd; anchored at noon UTC to dodge tz roll. */
+function daysPastDue(expectedDate: string, today: string): number {
+  const ms = Date.parse(today + "T12:00:00Z") - Date.parse(expectedDate + "T12:00:00Z");
+  return Math.max(1, Math.round(ms / 86_400_000));
+}
+
 /** Format a Date as a `datetime-local` input value (`YYYY-MM-DDTHH:mm`)
  *  in the browser's local timezone. */
 function toLocalDatetimeValue(d: Date): string {
@@ -2171,6 +2178,9 @@ function ReadOnlyChipList({
             >
               <span aria-hidden>{icon}</span>
               <span className="font-medium truncate max-w-[10rem]">{label}</span>
+              {overdue && a.expectedDate && (
+                <span className="font-bold tabular-nums shrink-0">{daysPastDue(a.expectedDate, today)}d</span>
+              )}
             </span>
           );
         })}
@@ -6654,9 +6664,9 @@ function ActionCard({
       <div className="space-y-0.5">
         <div className="flex flex-wrap items-baseline gap-x-1.5">
           <span className="text-sm font-semibold text-midnight">{label}</span>
-          {overdue && action.status !== "done" && action.status !== "skipped" && (
+          {overdue && action.status !== "done" && action.status !== "skipped" && action.expectedDate && (
             <span className="text-[0.6rem] font-bold tabular-nums text-flame-dark uppercase tracking-wide">
-              ⚠ Overdue
+              ⚠ {daysPastDue(action.expectedDate, today)}d overdue
             </span>
           )}
         </div>
