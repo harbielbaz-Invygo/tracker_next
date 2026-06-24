@@ -2178,9 +2178,26 @@ function ReadOnlyChipList({
             >
               <span aria-hidden>{icon}</span>
               <span className="font-medium truncate max-w-[10rem]">{label}</span>
-              {overdue && a.expectedDate && (
-                <span className="font-bold tabular-nums shrink-0">{daysPastDue(a.expectedDate, today)}d</span>
-              )}
+              {/* The STEP's own deadline (expectedDate) — distinct from the
+                  window's "days left". Makes the overdue highlight
+                  self-explanatory: a step can be behind its own schedule
+                  while its delivery window is still far off, and vice-versa. */}
+              {a.status !== "blocked" && a.expectedDate && (() => {
+                const untilDays = Math.round(
+                  (Date.parse(a.expectedDate + "T12:00:00Z") - Date.parse(today + "T12:00:00Z")) / 86_400_000,
+                );
+                const text = overdue
+                  ? `${daysPastDue(a.expectedDate, today)}d overdue`
+                  : untilDays > 0 ? `due in ${untilDays}d`
+                  : untilDays === 0 ? "due today"
+                  : null;
+                if (!text) return null;
+                return (
+                  <span className={cn("tabular-nums shrink-0 text-[0.66rem]", overdue ? "font-bold" : "text-ink-500")}>
+                    {text}
+                  </span>
+                );
+              })()}
             </span>
           );
         })}
