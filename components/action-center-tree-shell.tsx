@@ -6692,7 +6692,10 @@ function ActionCard({
           appListedAt at once. Gated on the PO's internalPhaseDone so
           ops can't list before pricing/specs/SKU are settled. */}
       {isAppListedRow && poForAppListing && (
-        <AppListedBulkCta po={poForAppListing} />
+        <>
+          <AppListedBulkCta po={poForAppListing} />
+          <PartialListingPicker po={poForAppListing} />
+        </>
       )}
 
       {/* Status controls — suppressed entirely for synthetic rows. */}
@@ -6765,6 +6768,129 @@ function ActionCard({
           excuse the lateness. */}
       {!isSynthetic && <DelayJustificationBlock action={action} />}
     </li>
+  );
+}
+
+/**
+ * Partial-listing picker — set how many of each batch's cars are live
+ * in-app (0..requested), grouped by delivery window. Sits under the bulk
+ * CTA on the synthetic "App listed" row. Cancelled batches are excluded.
+ * Surfaces the pending balance (requested − listed) so ops can see what
+ * still needs listing or disposing (Phase 3 routes the leftover to a new
+ * window / cancel). Gated on internalPhaseDone, same as the bulk CTA.
+ */
+function PartialListingPicker({ po }: { po: PoNode }) {
+  const router = useRouter();
+  const gateOk = po.internalPhaseDone;
+
+  const liveWaves = po.waves
+    .map((w) => ({ w, batches: w.batches.filter((b) => b.closureReason !== "cancelled") }))
+    .filter((x) => x.batches.length > 0);
+  const allRows = liveWaves.flatMap((x) => x.batches);
+  const totalCars  = allRows.reduce((s, b) => s + b.requestedQuantity, 0);
+  const listedCars = allRows.reduce((s, b) => s + b.listedQuantity, 0);
+  const pending = Math.max(0, totalCars - listedCars);
+
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<Record<number, number>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (allRows.length === 0) return null;
+
+  function openPicker() {
+    const init: Record<number, number> = {};
+    for (const b of allRows) init[b.id] = b.listedQuantity;
+    setDraft(init);
+    setError(null);
+    setOpen(true);
+  }
+
+  const clamp = (b: BatchNode, n: number) => Math.max(0, Math.min(b.requestedQuantity, Math.round(n) || 0));
+
+  async function save() {
+    if (!gateOk) { setError("Finish the internal phase before listing."); return; }
+    setBusy(true); setError(null);
+    try {
+      const changed = allRows.filter((b) => (draft[b.id] ?? b.listedQuantity) !== b.listedQuantity);
+      for (const b of changed) {
+        const res = await fetch("/api/batch-app-listing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ batchId: b.id, listedQuantity: clamp(b, draft[b.id] ?? 0) }),
+        });
+        if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+      }
+      setOpen(false);
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <div className="mt-1.5">
+        <button
+          type="button"
+          onClick={openPicker}
+          className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50 hover:text-midnight"
+        >
+          ⚙ Set listed counts{pending > 0 ? ` · ${pending} car${pending === 1 ? "" : "s"} pending` : ""}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1.5 p-2 border border-brand rounded-md bg-brand-pastel/20 space-y-1.5">
+      <p className="text-[0.7rem] font-medium text-midnight">Cars live in-app, per batch</p>
+      {!gateOk && <p className="text-[0.65rem] text-flame-dark">🔒 Finish the internal phase first.</p>}
+      <div className="space-y-1.5 max-h-64 overflow-auto">
+        {liveWaves.map(({ w, batches }) => (
+          <div key={w.id}>
+            <p className="text-[0.6rem] uppercase tracking-wide text-ink-400 tabular-nums">{w.availabilityDate}</p>
+            {batches.map((b) => (
+              <div key={b.id} className="flex items-center gap-2 text-[0.72rem] py-0.5">
+                <span className="flex-1 min-w-0 truncate text-midnight">
+                  <code className="font-mono text-[0.68rem]">{b.batchCode}</code>
+                  <span className="text-ink-500"> · {b.modelYear}</span>
+                </span>
+                <input
+                  type="number" min={0} max={b.requestedQuantity}
+                  value={draft[b.id] ?? 0}
+                  disabled={!gateOk || busy}
+                  onChange={(e) => setDraft((d) => ({ ...d, [b.id]: clamp(b, Number(e.target.value)) }))}
+                  className="input text-xs py-0.5 w-16 tabular-nums"
+                  aria-label={`Cars listed for ${b.batchCode}`}
+                />
+                <span className="text-ink-400 tabular-nums shrink-0">/ {b.requestedQuantity}</span>
+                <button
+                  type="button"
+                  disabled={!gateOk || busy}
+                  onClick={() => setDraft((d) => ({ ...d, [b.id]: b.requestedQuantity }))}
+                  className="text-[0.62rem] text-brand-dark hover:underline shrink-0 disabled:opacity-50"
+                >all</button>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      {error && <p className="text-[0.65rem] text-flame-dark">{error}</p>}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[0.65rem] text-ink-500 tabular-nums">{listedCars}/{totalCars} listed</span>
+        <div className="flex gap-1.5">
+          <button type="button" onClick={() => setOpen(false)} disabled={busy}
+            className="text-[0.7rem] px-2 py-0.5 rounded border border-ink-300 text-ink-600 hover:bg-ink-50">Cancel</button>
+          <button type="button" onClick={save} disabled={busy || !gateOk}
+            className="text-[0.7rem] px-2 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel disabled:opacity-50">
+            {busy ? "Saving…" : "Save listed counts"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
