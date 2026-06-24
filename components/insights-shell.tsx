@@ -472,6 +472,16 @@ function ClosureStrip({ closure }: { closure: ClosureSummary }) {
         title="Batches marked live in the customer app. Subtitle: cars in those batches as a share of total PO quantity. The split shows cars listed through the standard Intake → list flow (confirmed) vs. cars listed pre-PO on Partnership's commitment (forecast-only)."
       />
       <CompactMetric
+        label="Partly listed"
+        value={closure.partlyListed}
+        accent="gold"
+        valueColor="text-gold-dark"
+        subtitle={closure.partlyListed > 0
+          ? `${closure.carsPendingListing} ${closure.carsPendingListing === 1 ? "car" : "cars"} pending listing`
+          : "—"}
+        title="Batches with some — but not all — cars live in-app (partial App Listing). Subtitle: cars still pending listing across non-cancelled batches; they must be listed, moved to another window, or cancelled before close."
+      />
+      <CompactMetric
         label="Delivered"
         value={closure.delivered}
         accent="green"

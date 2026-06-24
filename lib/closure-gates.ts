@@ -17,7 +17,7 @@
  * those are corrective actions that ops needs to be able to fire
  * regardless of state.
  */
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   batches, pos,
   actions as actionsTable,
@@ -168,6 +168,24 @@ export async function checkBatchDeliveryGate(
   if (!batch.appListedAt) {
     return { ok: false, reason: "Batch not yet app-listed." };
   }
+
+  // (4b) Partial listing — every car must be listed before a full
+  // delivery/close. The remainder must be listed, or moved to another
+  // window / cancelled (which shrinks requested down to the listed count).
+  // listed_quantity is off-schema → raw read, tolerant (skipped when the
+  // ensure-listed-quantity-column migration hasn't run).
+  try {
+    const lrows = await tx.all(sql`SELECT listed_quantity AS lq FROM batches WHERE id = ${batchId}`);
+    const listedQty = Number((lrows as { lq?: number }[])[0]?.lq ?? 0);
+    const requested = (batch as { requestedQuantity?: number }).requestedQuantity ?? 0;
+    if (listedQty < requested) {
+      const pending = requested - listedQty;
+      return {
+        ok: false,
+        reason: `${pending} car${pending === 1 ? "" : "s"} not yet listed — list them, or move/cancel the remainder, before delivering.`,
+      };
+    }
+  } catch { /* listed_quantity un-migrated — binary app_listed_at check above stands */ }
 
   // (5) VINs received.
   const vins = (batch as { vinsReceivedQuantity?: number | null }).vinsReceivedQuantity ?? 0;
