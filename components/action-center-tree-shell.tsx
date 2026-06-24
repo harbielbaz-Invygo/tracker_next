@@ -987,6 +987,27 @@ function DealerTree({
     });
   }
 
+  // Per-status PO counts for the quick-filter pills. Counted over every
+  // PO (independent of the text search) — a stable distribution overview.
+  // Mirrors matchStatus: "Completed" includes partly; "Not listed" is the
+  // listing-state axis.
+  const statusCounts = useMemo(() => {
+    const c: Record<PoStatusFilter, number> = {
+      all: 0, active: 0, not_listed: 0, completed: 0, partly: 0, cancelled: 0,
+    };
+    for (const d of tree.dealers) for (const p of d.pos) {
+      c.all++;
+      const bucket = poStatusBucket(p);
+      if (bucket === "active") c.active++;
+      else if (bucket === "cancelled") c.cancelled++;
+      else if (bucket === "partly") { c.partly++; c.completed++; }
+      else if (bucket === "completed") c.completed++;
+      const s = p.appListingSummary;
+      if (s.totalCars > 0 && s.listedCars < s.totalCars) c.not_listed++;
+    }
+    return c;
+  }, [tree]);
+
   // Filter + sort applied to the dealer/PO list. The query matches
   // against PO number, dealer name, or any batch code under the PO.
   // sortMode='overdue' surfaces the dealers/POs with the most stale
@@ -1067,25 +1088,36 @@ function DealerTree({
             {sortMode === "alpha" ? "A→Z" : "⚠ Overdue"}
           </button>
         </div>
-        {/* Status quick-filter — show/hide POs by lifecycle outcome. */}
-        <div className="flex flex-wrap items-center gap-1">
-          {PO_STATUS_FILTERS.map(({ value, label, title }) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => setStatusFilter(value)}
-              aria-pressed={statusFilter === value}
-              title={title}
-              className={cn(
-                "text-[0.65rem] px-2 py-0.5 rounded-full border whitespace-nowrap transition-colors",
-                statusFilter === value
-                  ? "border-brand text-brand-dark bg-brand-pastel/60 font-semibold"
-                  : "border-ink-300 text-ink-600 hover:bg-ink-50",
-              )}
-            >
-              {label}
-            </button>
-          ))}
+        {/* Status quick-filter — show/hide POs by lifecycle outcome.
+            Each pill carries its PO count. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {PO_STATUS_FILTERS.map(({ value, label, title }) => {
+            const active = statusFilter === value;
+            const count = statusCounts[value];
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setStatusFilter(value)}
+                aria-pressed={active}
+                title={title}
+                className={cn(
+                  "inline-flex items-center gap-1 text-[0.65rem] leading-none px-2 py-1 rounded-full border whitespace-nowrap transition-colors",
+                  active
+                    ? "border-brand text-brand-dark bg-brand-pastel/60 font-semibold"
+                    : count === 0
+                      ? "border-ink-200 text-ink-400 hover:bg-ink-50"
+                      : "border-ink-300 text-ink-600 hover:bg-ink-50",
+                )}
+              >
+                <span>{label}</span>
+                <span className={cn(
+                  "tabular-nums text-[0.6rem] rounded-full px-1 min-w-[1.1em] text-center",
+                  active ? "bg-brand/15 text-brand-dark" : "bg-ink-100 text-ink-500",
+                )}>{count}</span>
+              </button>
+            );
+          })}
         </div>
       </header>
 
