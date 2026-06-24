@@ -2274,16 +2274,17 @@ function derivePoPhases(po: PoNode, todayStr: string): PoPhase[] {
   const appListed: PoPhase = {
     key:   "app_listed",
     label: "App listed",
-    state: listing.total === 0
+    // Car-count based: full → done, partial → in progress.
+    state: listing.totalCars === 0
       ? "not_started"
-      : listing.completedAt != null
+      : listing.state === "full"
         ? "done"
-        : listing.listed > 0
+        : listing.state === "partial"
           ? "in_progress"
           : "not_started",
-    progress: listing.total === 0
+    progress: listing.totalCars === 0
       ? null
-      : { done: listing.listed, total: listing.total },
+      : { done: listing.listedCars, total: listing.totalCars },
     date:  listing.completedAt ? listing.completedAt.slice(0, 10) : null,
   };
 
@@ -2441,14 +2442,15 @@ function PoNextPointer({ po }: { po: PoNode }) {
 }
 
 function appListedSyntheticAction(po: PoNode): ScopedActionDetail | null {
-  if (po.appListingSummary.total === 0) return null;
-  const isDone = po.appListingSummary.completedAt != null;
-  const partial = po.appListingSummary.listed > 0
-                 && po.appListingSummary.listed < po.appListingSummary.total;
+  const s = po.appListingSummary;
+  if (s.total === 0) return null;
+  // Car-count driven: full → done, partial → in progress with the count.
+  const isDone = s.state === "full";
+  const partial = s.state === "partial";
   const label = isDone
     ? "App listed"
     : partial
-      ? `App listing in progress (${po.appListingSummary.listed}/${po.appListingSummary.total})`
+      ? `App listing in progress (${s.listedCars}/${s.totalCars} cars)`
       : "Waiting App listing";
   return {
     // negative id flags it as synthetic — the ActionRow's status buttons

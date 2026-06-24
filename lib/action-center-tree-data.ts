@@ -108,6 +108,25 @@ async function fetchConfirmedQtyByBatch(): Promise<Map<number, number>> {
 }
 
 /**
+ * Cars actually listed in-app per batch (`batches.listed_quantity`). Off
+ * the Drizzle schema (raw SQL, tolerant) like confirmed_quantity. Empty
+ * Map before the ensure-listed-quantity-column migration runs — callers
+ * fall back to the binary app_listed_at flag (listed → fully, else 0).
+ */
+async function fetchListedQtyByBatch(): Promise<Map<number, number>> {
+  try {
+    const rows = await db.all<{ id: number; listed_quantity: number }>(
+      sql`SELECT id, listed_quantity FROM batches`,
+    );
+    return new Map(rows.map((r) => [Number(r.id), Number(r.listed_quantity ?? 0)]));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such (column|table)/i.test(msg)) return new Map();
+    throw err;
+  }
+}
+
+/**
  * SLA clock starts, keyed by action id. `actions.sla_started_at` lives
  * off the Drizzle schema (raw-SQL pattern — declaring it would make the
  * scope-cascade's select().from(actions) 500 on un-migrated prod), so we
@@ -268,6 +287,13 @@ export interface BatchNode {
    * legacy batches that pre-date the column.
    */
   confirmedQuantity:   number;
+  /**
+   * Cars actually live in-app for this batch (0..requested). Partial
+   * listing → 0 < listedQuantity < requestedQuantity. Falls back to the
+   * binary app_listed_at flag (listed → requested, else 0) before the
+   * listed_quantity column is migrated.
+   */
+  listedQuantity:      number;
   closedAt:           string | null;
   closureReason:      "delivered" | "cancelled" | null;
   appListedAt:        string | null;
@@ -377,10 +403,18 @@ export interface PoNode {
    * batch has `appListedAt` set, pending otherwise.
    */
   appListingSummary: {
+    /** Batches fully listed (legacy batch-count rollup). */
     listed:        number;
+    /** Total batches (legacy batch-count rollup). */
     total:         number;
     /** Latest appListedAt across the PO's batches, when ALL are listed. */
     completedAt:   string | null;
+    /** Cars live in-app, summed across non-cancelled batches. */
+    listedCars:    number;
+    /** Cars expected to be listed (requested across non-cancelled batches). */
+    totalCars:     number;
+    /** Derived car-count state: none → partial → full. */
+    state:         "none" | "partial" | "full";
   };
   /**
    * True when every PO-scope action is in a settled state (done or
@@ -525,11 +559,12 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
   // in withDbRetry so a transient Turso socket drop (UND_ERR_SOCKET /
   // "fetch failed" on a reused keep-alive connection) retries on a fresh
   // socket instead of crashing the whole page render. Reads only → safe.
-  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, slaStartedByAction, slaHoursByActionType, baselinesByPo, baselinesModelByPo, justByAction] = await withDbRetry(() => Promise.all([
+  const [posRows, wavesRows, batchesRows, confirmedQtyByBatch, listedQtyByBatch, touchpointsByAction, actionRows, depRows, allTypesForDeps, dealersRows, deptCatalogRows, stakeholderRows, legsRows, revisionRows, slaStartedByAction, slaHoursByActionType, baselinesByPo, baselinesModelByPo, justByAction] = await withDbRetry(() => Promise.all([
     db.select().from(pos),
     db.select().from(waves),
     fetchBatchesTolerant(),
     fetchConfirmedQtyByBatch(),
+    fetchListedQtyByBatch(),
     fetchTouchpointsByAction(),
     db
       .select({
@@ -874,6 +909,11 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
           // through fetchConfirmedQtyByBatch above. Defaults to 0
           // when the column hasn't been migrated yet.
           confirmedQuantity:    confirmedQtyByBatch.get(b.id) ?? 0,
+          // listed_quantity is off-schema (raw SQL). Pre-migration the map
+          // is empty → fall back to the binary app_listed_at flag so an
+          // already-listed batch still reads as fully listed.
+          listedQuantity:       listedQtyByBatch.get(b.id)
+                                  ?? (b.appListedAt != null ? b.requestedQuantity : 0),
           closedAt:           b.closedAt ?? null,
           closureReason:      (b.closureReason ?? null) as BatchNode["closureReason"],
           appListedAt:        b.appListedAt ?? null,
@@ -922,6 +962,17 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
       .map((b) => b.appListedAt!)
       .sort()
       .at(-1) ?? null;
+
+    // Car-count listing rollup (partial-listing). Cancelled batches drop
+    // out of the denominator — their cars are no longer expected to list.
+    const listableBatches = allBatchesUnderPo.filter((b) => b.closureReason !== "cancelled");
+    const listedCars = listableBatches.reduce((s, b) => s + (b.listedQuantity ?? 0), 0);
+    const listableCars = listableBatches.reduce((s, b) => s + b.requestedQuantity, 0);
+    const listingState: "none" | "partial" | "full" =
+      listableCars === 0      ? "none"
+      : listedCars >= listableCars ? "full"
+      : listedCars > 0     ? "partial"
+      : "none";
 
     const poActions = actionsByKey.get(`po:${p.id}`) ?? [];
     const internalPhaseDone = poActions.length > 0
@@ -1027,6 +1078,9 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         listed:      listedBatches.length,
         total:       allBatchesUnderPo.length,
         completedAt: allListed ? latestListedAt : null,
+        listedCars,
+        totalCars:   listableCars,
+        state:       listingState,
       },
       internalPhaseDone,
       daysSinceSubmission,
@@ -1149,6 +1203,9 @@ export async function getActionCenterTree(): Promise<ActionCenterTree> {
         listed:      0,
         total:       0,
         completedAt: null,
+        listedCars:  0,
+        totalCars:   0,
+        state:       "none",
       },
       internalPhaseDone:   false,
       // Listing-speed KPI + PO reliability don't apply to Pre-PO —

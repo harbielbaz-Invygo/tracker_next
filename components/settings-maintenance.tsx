@@ -94,6 +94,13 @@ const SCHEMA_MIGRATIONS: MigrationEndpoint[] = [
     supportsGet: true,
   },
   {
+    path: "ensure-listed-quantity-column",
+    label: "Listed-quantity column (partial listing)",
+    detail:
+      "Adds batches.listed_quantity (how many of a batch's cars are live in-app) and backfills already-listed batches to fully listed. Enables partial App Listing. Additive, idempotent.",
+    supportsGet: true,
+  },
+  {
     path: "ensure-confirmed-quantity-column",
     label: "Confirmed-quantity column",
     detail: "batches.confirmed_quantity (NOT NULL, default 0).",
