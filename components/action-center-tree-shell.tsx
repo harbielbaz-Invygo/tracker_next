@@ -6772,6 +6772,74 @@ function ActionCard({
 }
 
 /**
+ * Dispose a batch's unlisted remainder (admin only) — cancel it, or move
+ * it to another delivery window. Splits the leftover off so the source can
+ * become fully listed and close. Shown per batch with a pending balance.
+ */
+function DisposeRemainderControl({ batch }: { batch: BatchNode }) {
+  const { isAdmin } = useShell();
+  const router = useRouter();
+  const pending = batch.requestedQuantity - batch.listedQuantity;
+  const [mode, setMode] = useState<null | "menu" | "move">(null);
+  const [date, setDate] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!isAdmin || pending <= 0 || batch.closureReason) return null;
+
+  async function dispose(action: "cancel" | "move") {
+    setBusy(true); setError(null);
+    try {
+      const res = await fetch("/api/batch-listing-dispose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action === "move"
+          ? { batchId: batch.id, action, quantity: pending, windowDate: date }
+          : { batchId: batch.id, action, quantity: pending }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+      setMode(null);
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="ml-3 text-[0.66rem]">
+      {mode === null && (
+        <button type="button" onClick={() => setMode("menu")} className="text-flame-dark hover:underline">
+          {pending} pending — dispose
+        </button>
+      )}
+      {mode === "menu" && (
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <span className="text-ink-500">{pending} pending:</span>
+          <button type="button" disabled={busy} onClick={() => dispose("cancel")}
+            className="px-1.5 py-0.5 rounded border border-flame text-flame-dark hover:bg-flame-pale disabled:opacity-50">✕ Cancel</button>
+          <button type="button" disabled={busy} onClick={() => setMode("move")}
+            className="px-1.5 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel disabled:opacity-50">→ Move to window</button>
+          <button type="button" disabled={busy} onClick={() => setMode(null)} className="text-ink-400">cancel</button>
+        </span>
+      )}
+      {mode === "move" && (
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <span className="text-ink-500">Move {pending} to:</span>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+            className="input text-[0.66rem] py-0.5" />
+          <button type="button" disabled={busy || !date} onClick={() => dispose("move")}
+            className="px-1.5 py-0.5 rounded border border-brand text-brand-dark hover:bg-brand-pastel disabled:opacity-50">Move</button>
+          <button type="button" disabled={busy} onClick={() => setMode("menu")} className="text-ink-400">back</button>
+        </span>
+      )}
+      {error && <span className="text-flame-dark ml-1">{error}</span>}
+    </div>
+  );
+}
+
+/**
  * Partial-listing picker — set how many of each batch's cars are live
  * in-app (0..requested), grouped by delivery window. Sits under the bulk
  * CTA on the synthetic "App listed" row. Cancelled batches are excluded.
@@ -6853,26 +6921,29 @@ function PartialListingPicker({ po }: { po: PoNode }) {
           <div key={w.id}>
             <p className="text-[0.6rem] uppercase tracking-wide text-ink-400 tabular-nums">{w.availabilityDate}</p>
             {batches.map((b) => (
-              <div key={b.id} className="flex items-center gap-2 text-[0.72rem] py-0.5">
-                <span className="flex-1 min-w-0 truncate text-midnight">
-                  <code className="font-mono text-[0.68rem]">{b.batchCode}</code>
-                  <span className="text-ink-500"> · {b.modelYear}</span>
-                </span>
-                <input
-                  type="number" min={0} max={b.requestedQuantity}
-                  value={draft[b.id] ?? 0}
-                  disabled={!gateOk || busy}
-                  onChange={(e) => setDraft((d) => ({ ...d, [b.id]: clamp(b, Number(e.target.value)) }))}
-                  className="input text-xs py-0.5 w-16 tabular-nums"
-                  aria-label={`Cars listed for ${b.batchCode}`}
-                />
-                <span className="text-ink-400 tabular-nums shrink-0">/ {b.requestedQuantity}</span>
-                <button
-                  type="button"
-                  disabled={!gateOk || busy}
-                  onClick={() => setDraft((d) => ({ ...d, [b.id]: b.requestedQuantity }))}
-                  className="text-[0.62rem] text-brand-dark hover:underline shrink-0 disabled:opacity-50"
-                >all</button>
+              <div key={b.id}>
+                <div className="flex items-center gap-2 text-[0.72rem] py-0.5">
+                  <span className="flex-1 min-w-0 truncate text-midnight">
+                    <code className="font-mono text-[0.68rem]">{b.batchCode}</code>
+                    <span className="text-ink-500"> · {b.modelYear}</span>
+                  </span>
+                  <input
+                    type="number" min={0} max={b.requestedQuantity}
+                    value={draft[b.id] ?? 0}
+                    disabled={!gateOk || busy}
+                    onChange={(e) => setDraft((d) => ({ ...d, [b.id]: clamp(b, Number(e.target.value)) }))}
+                    className="input text-xs py-0.5 w-16 tabular-nums"
+                    aria-label={`Cars listed for ${b.batchCode}`}
+                  />
+                  <span className="text-ink-400 tabular-nums shrink-0">/ {b.requestedQuantity}</span>
+                  <button
+                    type="button"
+                    disabled={!gateOk || busy}
+                    onClick={() => setDraft((d) => ({ ...d, [b.id]: b.requestedQuantity }))}
+                    className="text-[0.62rem] text-brand-dark hover:underline shrink-0 disabled:opacity-50"
+                  >all</button>
+                </div>
+                <DisposeRemainderControl batch={b} />
               </div>
             ))}
           </div>

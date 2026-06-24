@@ -97,6 +97,16 @@ export async function POST(req: NextRequest) {
   const waveByDate = new Map(waveRows.map((w) => [w.availabilityDate, w]));
 
   const allBatchRows = await db.select().from(batches).where(inArray(batches.waveId, waveIds));
+  // listed_quantity is off-schema → raw read, tolerant. Listed cars are
+  // live in-app and can't be moved out from under customers, so they count
+  // as committed alongside VINs/delivered in the shrink guards below.
+  const listedByBatch = new Map<number, number>();
+  if (allBatchRows.length > 0) {
+    try {
+      const lrows = await db.all<{ id: number; lq: number }>(sql`SELECT id, listed_quantity AS lq FROM batches WHERE id IN (${sql.join(allBatchRows.map((b) => sql`${b.id}`), sql`, `)})`);
+      for (const r of lrows) listedByBatch.set(Number(r.id), Number(r.lq ?? 0));
+    } catch { /* listed_quantity un-migrated — treat as 0 listed */ }
+  }
   // Only this model's batches, grouped by wave.
   const modelBatchesByWave = new Map<number, typeof allBatchRows>();
   for (const b of allBatchRows) {
@@ -122,7 +132,7 @@ export async function POST(req: NextRequest) {
     const w = waveByDate.get(a.windowDate);
     if (!w) continue;
     const committed = (modelBatchesByWave.get(w.id) ?? []).reduce(
-      (s, b) => s + Math.max(b.deliveredQuantity ?? 0, b.vinsReceivedQuantity ?? 0), 0);
+      (s, b) => s + Math.max(b.deliveredQuantity ?? 0, b.vinsReceivedQuantity ?? 0, listedByBatch.get(b.id) ?? 0), 0);
     if (a.quantity < committed) {
       return apiError(
         `${model} in window ${a.windowDate} already has ${committed} car(s) committed (VINs/delivered) — can't reduce below that.`,
@@ -220,7 +230,7 @@ export async function POST(req: NextRequest) {
         let need = -delta;
         for (const b of modelBatches) {
           if (need <= 0) break;
-          const committed = Math.max(b.deliveredQuantity ?? 0, b.vinsReceivedQuantity ?? 0);
+          const committed = Math.max(b.deliveredQuantity ?? 0, b.vinsReceivedQuantity ?? 0, listedByBatch.get(b.id) ?? 0);
           const room = b.requestedQuantity - committed;
           const take = Math.min(Math.max(0, room), need);
           if (take > 0) {

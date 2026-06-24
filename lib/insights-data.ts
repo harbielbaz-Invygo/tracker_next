@@ -156,6 +156,11 @@ export interface ClosureSummary {
   /** Cars on a pre_po batch with the Pre-PO App Listing action marked done. */
   carsListedForecastOnly: number;
 
+  /** Batches with some — but not all — cars listed (partial App Listing). */
+  partlyListed: number;
+  /** Cars still pending listing across non-cancelled batches. */
+  carsPendingListing: number;
+
   delivered: number;
   carsDelivered: number;
 
@@ -353,6 +358,7 @@ function emptyClosureSummary(): ClosureSummary {
     totalBatches: 0, totalQuantity: 0,
     listed: 0, carsListed: 0, carsListedConfirmed: 0, carsListedForecastOnly: 0,
     delivered: 0, carsDelivered: 0,
+    partlyListed: 0, carsPendingListing: 0,
     partlyDelivered: 0, carsPartlyDelivered: 0, carsPartlyRequested: 0,
     cancelled: 0, carsCancelled: 0,
   };
@@ -453,9 +459,24 @@ async function getClosureSummary(period: ReportPeriod): Promise<ClosureSummary> 
     .filter((r) => r.closureReason === "cancelled")
     .reduce((acc, r) => acc + (r.quantity ?? 0), 0);
 
+  // Partial App Listing: batches with 0 < listed < requested. listed_quantity
+  // is off-schema → raw read, tolerant (fall back to the binary app_listed_at
+  // flag: listed → full, else 0).
+  const listedMap = new Map<number, number>();
+  try {
+    const lrows = await db.all<{ id: number; lq: number }>(sql`SELECT id, listed_quantity AS lq FROM batches`);
+    for (const r of lrows) listedMap.set(Number(r.id), Number(r.lq ?? 0));
+  } catch { /* un-migrated — fall back to app_listed_at */ }
+  const listedOf = (r: typeof rows[number]) =>
+    listedMap.has(r.id) ? listedMap.get(r.id)! : (r.appListedAt ? (r.quantity ?? 0) : 0);
+  const liveRows = rows.filter((r) => r.closureReason !== "cancelled");
+  const partlyListed = liveRows.filter((r) => listedOf(r) > 0 && listedOf(r) < (r.quantity ?? 0)).length;
+  const carsPendingListing = liveRows.reduce((acc, r) => acc + Math.max(0, (r.quantity ?? 0) - listedOf(r)), 0);
+
   return {
     totalBatches, totalQuantity,
     listed, carsListed, carsListedConfirmed, carsListedForecastOnly,
+    partlyListed, carsPendingListing,
     delivered, carsDelivered,
     partlyDelivered, carsPartlyDelivered, carsPartlyRequested,
     cancelled, carsCancelled,
