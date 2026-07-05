@@ -30,6 +30,9 @@ import { stampSlaStartForScopes } from "@/lib/sla";
 import { snapshotPoBaseline, snapshotPoBaselineModel } from "@/lib/po-baseline";
 
 export const runtime = "nodejs";
+// A large multi-item PO can expand to 100+ delivery batches; give the
+// creation transaction headroom beyond the default function timeout.
+export const maxDuration = 60;
 
 interface CreateBody {
   po: {
@@ -629,8 +632,13 @@ export async function POST(req: NextRequest) {
     //   batch → ONE row per (batch, picked action), attached to batch
     // Delivery (always batch) is also auto-attached.
     // ──────────────────────────────────────────────────────────
+    // Accumulate every scope-aware action row and bulk-insert them at the
+    // end (see the flush below). A large multi-item PO produces hundreds
+    // of these; one round-trip per row would blow the function timeout.
+    const actionRows: (typeof actionsTable.$inferInsert)[] = [];
+
     type AttachPlan = { scope: "po" | "wave" | "batch"; scopeId: number; anchorSubmission: string; anchorPromised: string };
-    const insertAction = async (a: typeof body.actions[number], plan: AttachPlan) => {
+    const insertAction = (a: typeof body.actions[number], plan: AttachPlan) => {
       const type = typeById.get(a.actionTypeId);
       if (!type) return;
       const expected = computeExpectedDate({
@@ -641,22 +649,15 @@ export async function POST(req: NextRequest) {
         promised:   plan.anchorPromised,
       });
       const status: "waiting" | "blocked" = hasParentDep.has(a.actionTypeId) ? "blocked" : "waiting";
-      try {
-        await tx.insert(actionsTable).values({
-          scope:                 plan.scope,
-          scopeId:               plan.scopeId,
-          actionTypeId:          a.actionTypeId,
-          departmentId:          a.departmentId ?? type.defaultDepartmentId ?? undefined,
-          assignedStakeholderId: a.assignedStakeholderId ?? undefined,
-          status,
-          expectedDate:          expected ?? undefined,
-        });
-      } catch (err) {
-        // Unique constraint (scope, scope_id, action_type_id) — already
-        // attached. Safe to ignore in this idempotent context.
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
-      }
+      actionRows.push({
+        scope:                 plan.scope,
+        scopeId:               plan.scopeId,
+        actionTypeId:          a.actionTypeId,
+        departmentId:          a.departmentId ?? type.defaultDepartmentId ?? undefined,
+        assignedStakeholderId: a.assignedStakeholderId ?? undefined,
+        status,
+        expectedDate:          expected ?? undefined,
+      });
     };
 
     // PO-scope actions — one row each, regardless of how many batches.
@@ -664,7 +665,7 @@ export async function POST(req: NextRequest) {
     for (const a of body.actions) {
       const type = typeById.get(a.actionTypeId);
       if (!type || type.scope !== "po") continue;
-      await insertAction(a, {
+      insertAction(a, {
         scope: "po", scopeId: poId,
         anchorSubmission: requestedAt, anchorPromised: poAnchorPromised,
       });
@@ -692,19 +693,14 @@ export async function POST(req: NextRequest) {
           vin:        null,
           promised:   waveDate,
         });
-        try {
-          await tx.insert(actionsTable).values({
-            scope:        "wave",
-            scopeId:      waveId,
-            actionTypeId: at.id,
-            departmentId: at.defaultDepartmentId ?? undefined,
-            status:       "waiting",
-            expectedDate: expected ?? undefined,
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
-        }
+        actionRows.push({
+          scope:        "wave",
+          scopeId:      waveId,
+          actionTypeId: at.id,
+          departmentId: at.defaultDepartmentId ?? undefined,
+          status:       "waiting",
+          expectedDate: expected ?? undefined,
+        });
       }
     }
 
@@ -728,7 +724,7 @@ export async function POST(req: NextRequest) {
       for (const a of body.actions) {
         const type = typeById.get(a.actionTypeId);
         if (!type || type.scope !== "batch") continue;
-        await insertAction(a, {
+        insertAction(a, {
           scope: "batch", scopeId: b.id,
           anchorSubmission: requestedAt, anchorPromised: batchPromised,
         });
@@ -743,19 +739,14 @@ export async function POST(req: NextRequest) {
           vin:        null,
           promised:   batchPromised,
         });
-        try {
-          await tx.insert(actionsTable).values({
-            scope:        "batch",
-            scopeId:      b.id,
-            actionTypeId: d.id,
-            departmentId: d.defaultDepartmentId ?? undefined,
-            status:       "waiting",
-            expectedDate: expected ?? undefined,
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
-        }
+        actionRows.push({
+          scope:        "batch",
+          scopeId:      b.id,
+          actionTypeId: d.id,
+          departmentId: d.defaultDepartmentId ?? undefined,
+          status:       "waiting",
+          expectedDate: expected ?? undefined,
+        });
       }
 
       // Per-batch external-phase copies. Each wave-scope action_type
@@ -771,18 +762,36 @@ export async function POST(req: NextRequest) {
           vin:        null,
           promised:   batchPromised,
         });
-        try {
-          await tx.insert(actionsTable).values({
-            scope:        "batch",
-            scopeId:      b.id,
-            actionTypeId: at.id,
-            departmentId: at.defaultDepartmentId ?? undefined,
-            status:       "waiting",
-            expectedDate: expected ?? undefined,
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
+        actionRows.push({
+          scope:        "batch",
+          scopeId:      b.id,
+          actionTypeId: at.id,
+          departmentId: at.defaultDepartmentId ?? undefined,
+          status:       "waiting",
+          expectedDate: expected ?? undefined,
+        });
+      }
+    }
+
+    // ── Bulk-insert every accumulated action row ────────────────────
+    // One round-trip per ~100 rows instead of one per action (a large
+    // multi-item PO can produce 800+). On the rare UNIQUE conflict
+    // (idempotent re-attach on (scope, scope_id, action_type_id)) fall
+    // back to per-row so a single dup can't fail the whole chunk.
+    for (let i = 0; i < actionRows.length; i += 100) {
+      const chunk = actionRows.slice(i, i + 100);
+      try {
+        await tx.insert(actionsTable).values(chunk);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/UNIQUE constraint failed|already exists/i.test(msg)) throw err;
+        for (const r of chunk) {
+          try {
+            await tx.insert(actionsTable).values(r);
+          } catch (e2) {
+            const m2 = e2 instanceof Error ? e2.message : String(e2);
+            if (!/UNIQUE constraint failed|already exists/i.test(m2)) throw e2;
+          }
         }
       }
     }
