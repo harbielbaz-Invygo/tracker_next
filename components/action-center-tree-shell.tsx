@@ -16,6 +16,7 @@
  * user-facing strings say "Delivery Window".
  */
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import type {
@@ -1413,45 +1414,7 @@ function PoDrawer({
           <span className="font-medium text-midnight">🏢 {dealerName}</span>
           <span className="text-ink-300 mx-1.5">·</span>
           <span className="tabular-nums">{po.totalCars} cars</span>
-          {(() => {
-            // Per-model breakdown derived client-side from the
-            // batches under this PO. Renders inline as
-            // "🚗 Accent 50 · Elantra 30 · Sonata 30" when there are
-            // multiple distinct models, or just the model + count
-            // when the PO is single-model.
-            const byModel = new Map<string, number>();
-            for (const w of po.waves) {
-              for (const b of w.batches) {
-                if (!b.modelYear || b.modelYear === "—") continue;
-                byModel.set(
-                  b.modelYear,
-                  (byModel.get(b.modelYear) ?? 0) + b.requestedQuantity,
-                );
-              }
-            }
-            const entries = Array.from(byModel.entries())
-              .sort((a, b) => b[1] - a[1]); // largest qty first
-            if (entries.length === 0) return null;
-            // Keep the header one-glance: show the top few models inline and
-            // fold the rest into "+N more" (full breakdown in the tooltip),
-            // so a big multi-model PO doesn't wrap into a wall of text.
-            const MAX_INLINE = 3;
-            const shown = entries.slice(0, MAX_INLINE);
-            const rest = entries.length - shown.length;
-            const fullList = entries.map(([m, n]) => `${m} — ${n}`).join("\n");
-            return (
-              <>
-                <span className="text-ink-300 mx-1.5">·</span>
-                <span
-                  className="tabular-nums"
-                  title={rest > 0 ? `All ${entries.length} models:\n${fullList}` : "Per-model car counts under this PO"}
-                >
-                  🚗 {shown.map(([m, n]) => `${m} ${n}`).join(" · ")}
-                  {rest > 0 && <span className="text-ink-500 font-medium"> · +{rest} more</span>}
-                </span>
-              </>
-            );
-          })()}
+          <PoModelSummary po={po} />
           <span className="text-ink-300 mx-1.5">·</span>
           <span className="tabular-nums">{po.waves.length} delivery window{po.waves.length === 1 ? "" : "s"}</span>
           {/* The "in Nd / Nd past window" countdown moved to each delivery
@@ -2428,6 +2391,77 @@ function derivePoPhases(po: PoNode, todayStr: string): PoPhase[] {
  * Sits above the existing chip strip so ops sees the macro picture
  * before drilling into the detail.
  */
+/**
+ * Per-model car breakdown in the PO header. Shows the top 3 models by car
+ * count inline; a big multi-model PO folds the rest into a "+N more" button
+ * that opens a modal listing every model + its car count. The modal is
+ * portaled to <body> so it isn't nested inside the header's <p>.
+ */
+function PoModelSummary({ po }: { po: PoNode }) {
+  const [open, setOpen] = useState(false);
+
+  const byModel = new Map<string, number>();
+  for (const w of po.waves) {
+    for (const b of w.batches) {
+      if (!b.modelYear || b.modelYear === "—") continue;
+      byModel.set(b.modelYear, (byModel.get(b.modelYear) ?? 0) + b.requestedQuantity);
+    }
+  }
+  const entries = Array.from(byModel.entries()).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return null;
+
+  const shown = entries.slice(0, 3);
+  const rest = entries.length - shown.length;
+  const totalCars = entries.reduce((s, [, n]) => s + n, 0);
+
+  return (
+    <>
+      <span className="text-ink-300 mx-1.5">·</span>
+      <span className="tabular-nums">
+        🚗 {shown.map(([m, n]) => `${m} ${n}`).join(" · ")}
+        {rest > 0 && (
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="text-brand-dark font-medium hover:underline ml-1"
+            title={`Show all ${entries.length} models`}
+          > · +{rest} more</button>
+        )}
+      </span>
+      {open && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setOpen(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[80vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 border-b border-ink-200 flex items-center justify-between gap-3">
+              <h3 className="text-sm font-bold text-midnight">
+                {po.poNumber} — {entries.length} models · {totalCars} cars
+              </h3>
+              <button type="button" onClick={() => setOpen(false)}
+                className="text-ink-500 hover:text-midnight text-lg leading-none" aria-label="Close">✕</button>
+            </div>
+            <ul className="overflow-auto divide-y divide-ink-100">
+              {entries.map(([m, n]) => (
+                <li key={m} className="flex items-center justify-between gap-4 px-4 py-2 text-sm">
+                  <span className="text-midnight">{m}</span>
+                  <span className="tabular-nums font-medium text-ink-700 shrink-0">{n} car{n === 1 ? "" : "s"}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 function PoStoryBar({ po }: { po: PoNode }) {
   const today  = todayIso();
   const phases = derivePoPhases(po, today);
