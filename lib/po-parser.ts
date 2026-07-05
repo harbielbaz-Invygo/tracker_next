@@ -157,24 +157,24 @@ function extractDeliveryInstructions(text: string): string | null {
 }
 
 // ─── Items ───────────────────────────────────────────────
-// The item heading is "<Make> <Model …> <Year>". Most POs put pricing
-// (qty, unit price, tax %, line amount) on the line BELOW the heading,
-// but some templates put it INLINE on the same line — and pdf-parse
-// frequently strips the spaces between the right-aligned pricing
-// columns, yielding e.g. "Hyundai Sonata Smart 202630.002,956.5217...".
-// We deliberately do NOT constrain what follows the year (no `\b`, no
-// `\s*$`): year alone is a strong enough discriminator within the
-// items section, and any trailing pricing digits are peeled off later
-// by parseItemChunk's pricing regex.
-//
-// The first token must START with a letter so a year-like 4-digit number
-// in the description ("2030 Special edition") can't be confused for the
-// model. Tokens MAY contain digits after the first letter so model codes
-// like GS3 / Q5 / X3 / E300 / C-HR / GT-R parse cleanly. A later token may
-// ALSO be a standalone 1–3 digit number so split-word models like "MG 5"
-// or "BMW 320" parse — 1–3 digits can never be a 4-digit year, so the
-// year-discrimination still holds.
-const ITEM_HEAD_RE = /^([A-Z][A-Za-z0-9\-]*(?:\s+(?:[A-Za-z][A-Za-z0-9\-]*|\d{1,3})){1,4})\s+(20[2-3][0-9])/gm;
+// Item headers are detected by their model-YEAR, not by matching the whole
+// "<Make> <Model …> <Year>" line. Within the items section a 4-digit year
+// (202X) only ever appears at the end of a model heading — never in the
+// delivery text (those read "July 20th", no year) — so every such year
+// marks one item boundary. This is far more robust than a line-anchored
+// name regex, which broke on (a) headings that WRAP across two lines
+// ("Grand Renault Koleos E3" ⏎ "Techno 2WD 2026:"), and (b) model names
+// with decimal engine specs (1.3T / 1.6L / 2.0L) or many words — both of
+// which caused headers to be MISSED, so a detected item's chunk swallowed
+// the next items' delivery splits and the counts inflated wildly.
+const YEAR_RE = /20[2-3][0-9]/g;
+// A year that's part of a delivery date ("… Sep 2026") is NOT a header —
+// guard on a preceding month name so it isn't treated as an item boundary.
+const DATE_YEAR_GUARD = /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s*$/i;
+// Lines that terminate an item's model name during backward reconstruction:
+// pricing (%), delivery/colour/spec labels, comma-lists, period-ended
+// sentences (colour lines), and number-first lines (colour quantities).
+const MODEL_NAME_STOP = /%|cars?\s+in|Delivery\s*Date|Car\s*Colors?|Buy\s*Back|Contract\s*Length|Prices?\s+are|Amount|Unit\s*Price|Quantity|Discount|,|\.\s*$|^\s*\d/i;
 
 /**
  * Drop table-header garbage that some PDFs concatenate into a row, e.g.
@@ -190,10 +190,14 @@ function cleanModelName(raw: string): string {
     .filter((w) => {
       if (!w || MODEL_STOP_WORDS.test(w)) return false;
       // CamelCase concat like "ItemDescriptionQuantity" or "PriceDiscountTaxAmount"
-      // — has multiple capitals after the first character.
-      if (/^[A-Z][a-z]+[A-Z]/.test(w)) return false;
+      // — has multiple capitals after the first character. Only drop LONG
+      // globs; short camelCase model names (StarRay, CarPlay) are legit.
+      if (/^[A-Z][a-z]+[A-Z]/.test(w) && w.length > 12) return false;
       // Proper noun (Toyota, Hyundai, Accent)
       if (/^[A-Z][a-z]+$/.test(w)) return true;
+      // Short camelCase model name (StarRay, CarPlay, CityRay). Length-
+      // bounded so long table-header globs still drop via the rule above.
+      if (/^[A-Z][a-z]+(?:[A-Z][a-z]*)+$/.test(w) && w.length <= 12) return true;
       // Short all-caps brand (BMW, MG, GMC, KIA, GAC)
       if (/^[A-Z]{2,4}$/.test(w)) return true;
       // Hyphenated proper noun (e.g. "Land-Cruiser")
@@ -208,9 +212,32 @@ function cleanModelName(raw: string): string {
       // ("MG 5" → MG + 5, "BMW 320" → BMW + 320). 1–3 digits so a 4-digit
       // year can never be mistaken for a model token.
       if (/^\d{1,3}$/.test(w)) return true;
+      // Engine / drivetrain spec: 1.3T, 1.6L, 2.0L, 2.5L, 2WD, 4WD.
+      // A decimal, or digits followed by 1–3 letters (never a bare number,
+      // which the rule above already covers).
+      if (/^\d+\.\d+[A-Za-z]{0,3}$/.test(w) || /^\d+[A-Za-z]{1,3}$/.test(w)) return true;
+      // Slash spec: A/T, F/O, 2WD/AT.
+      if (/^[A-Za-z0-9]+(?:\/[A-Za-z0-9]+)+$/.test(w)) return true;
       return false;
     })
     .join(" ");
+}
+
+/**
+ * Reconstruct a model name from the text immediately before a header year,
+ * walking backwards over lines (headings can wrap across 2–3 lines) until a
+ * detail/colour/pricing line ends it. cleanModelName then strips any table
+ * garbage while keeping model codes + engine specs.
+ */
+function modelNameBefore(before: string): string {
+  const lines = before.split("\n").map((l) => l.trim()).filter(Boolean);
+  const out: string[] = [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (MODEL_NAME_STOP.test(lines[i])) break;
+    out.unshift(lines[i]);
+    if (out.length >= 3) break; // model names are short
+  }
+  return cleanModelName(out.join(" ").replace(/:/g, " ").replace(/\s+/g, " ").trim());
 }
 
 function extractItems(text: string): ParsedItem[] {
@@ -219,21 +246,33 @@ function extractItems(text: string): ParsedItem[] {
   const sectionMatch = text.match(/Item\s*Description[^\n]*\n?([\s\S]*?)(?=\nNotes:|\nSubtotal|\nDELIVERY DETAILS|$)/i);
   const section = sectionMatch ? sectionMatch[1] : text;
 
-  const headers: { idx: number; model: string; year: number }[] = [];
-  let m: RegExpExecArray | null;
-  ITEM_HEAD_RE.lastIndex = 0;
-  while ((m = ITEM_HEAD_RE.exec(section)) !== null) {
-    const cleaned = cleanModelName(m[1]);
-    if (!cleaned) continue; // header-only line, skip
-    headers.push({ idx: m.index, model: cleaned, year: parseInt(m[2], 10) });
+  // 1. Candidate header years — every 202X except delivery-date years.
+  const cand: { idx: number; end: number; year: number }[] = [];
+  let ym: RegExpExecArray | null;
+  YEAR_RE.lastIndex = 0;
+  while ((ym = YEAR_RE.exec(section)) !== null) {
+    const preceding = section.slice(Math.max(0, ym.index - 12), ym.index);
+    if (DATE_YEAR_GUARD.test(preceding)) continue; // "… Sep 2026" — a date
+    cand.push({ idx: ym.index, end: ym.index + ym[0].length, year: parseInt(ym[0], 10) });
+  }
+
+  // 2. Reconstruct each header's model name; drop candidates with none
+  //    (a stray year in notes/warranty text with no model before it).
+  const headers: { idx: number; end: number; year: number; model: string }[] = [];
+  for (let i = 0; i < cand.length; i++) {
+    const before = section.slice(i === 0 ? 0 : cand[i - 1].end, cand[i].idx);
+    const model = modelNameBefore(before);
+    if (model) headers.push({ ...cand[i], model });
   }
   if (headers.length === 0) return [];
 
+  // 3. Each item's details/splits = the text from its year to the next
+  //    header's year (the trailing next-model-name words carry no splits,
+  //    so scoping is preserved).
   const items: ParsedItem[] = [];
   for (let i = 0; i < headers.length; i++) {
-    const start = headers[i].idx;
-    const end = i + 1 < headers.length ? headers[i + 1].idx : section.length;
-    const chunk = section.slice(start, end);
+    const detailEnd = i + 1 < headers.length ? headers[i + 1].idx : section.length;
+    const chunk = section.slice(headers[i].end, detailEnd);
     items.push(parseItemChunk(chunk, headers[i].model, headers[i].year));
   }
   return items;
