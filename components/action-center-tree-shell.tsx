@@ -1432,11 +1432,22 @@ function PoDrawer({
             const entries = Array.from(byModel.entries())
               .sort((a, b) => b[1] - a[1]); // largest qty first
             if (entries.length === 0) return null;
+            // Keep the header one-glance: show the top few models inline and
+            // fold the rest into "+N more" (full breakdown in the tooltip),
+            // so a big multi-model PO doesn't wrap into a wall of text.
+            const MAX_INLINE = 3;
+            const shown = entries.slice(0, MAX_INLINE);
+            const rest = entries.length - shown.length;
+            const fullList = entries.map(([m, n]) => `${m} — ${n}`).join("\n");
             return (
               <>
                 <span className="text-ink-300 mx-1.5">·</span>
-                <span className="tabular-nums" title="Per-model car counts under this PO">
-                  🚗 {entries.map(([m, n]) => `${m} ${n}`).join(" · ")}
+                <span
+                  className="tabular-nums"
+                  title={rest > 0 ? `All ${entries.length} models:\n${fullList}` : "Per-model car counts under this PO"}
+                >
+                  🚗 {shown.map(([m, n]) => `${m} ${n}`).join(" · ")}
+                  {rest > 0 && <span className="text-ink-500 font-medium"> · +{rest} more</span>}
                 </span>
               </>
             );
