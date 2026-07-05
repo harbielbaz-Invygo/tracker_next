@@ -126,16 +126,18 @@ export async function POST(req: NextRequest) {
     }))
     .filter((r) => r.quantity > 0);
 
-  // Committed guard — this model in a window can't drop below its
-  // VIN/delivered cars.
+  // Delivered guard — a window can't drop below its DELIVERED cars: those
+  // are done and can't move. VIN'd / listed cars MAY be moved (a delivery
+  // window can change after VINs are assigned); the cars that move out
+  // reset their VIN / listing status in the destination window.
   for (const a of alloc) {
     const w = waveByDate.get(a.windowDate);
     if (!w) continue;
-    const committed = (modelBatchesByWave.get(w.id) ?? []).reduce(
-      (s, b) => s + Math.max(b.deliveredQuantity ?? 0, b.vinsReceivedQuantity ?? 0, listedByBatch.get(b.id) ?? 0), 0);
-    if (a.quantity < committed) {
+    const delivered = (modelBatchesByWave.get(w.id) ?? []).reduce(
+      (s, b) => s + (b.deliveredQuantity ?? 0), 0);
+    if (a.quantity < delivered) {
       return apiError(
-        `${model} in window ${a.windowDate} already has ${committed} car(s) committed (VINs/delivered) — can't reduce below that.`,
+        `${model} in window ${a.windowDate} already has ${delivered} delivered car(s) — can't reduce below that.`,
         409,
       );
     }
@@ -182,9 +184,10 @@ export async function POST(req: NextRequest) {
       let wave = waveByDate.get(a.windowDate);
 
       // 0 = empty this model from the window — delete its batches (+ their
-      // batch-scope actions). The committed guard already ensured nothing
-      // is committed here, so no VINs/delivered are lost. The window itself
-      // is pruned below if no model has cars left in it.
+      // batch-scope actions). The delivered guard ensured no DELIVERED cars
+      // are here; any VIN'd / listed cars reset (they move to another
+      // window). The window itself is pruned below if no model has cars
+      // left in it.
       if (a.quantity === 0) {
         if (!wave) continue;
         const mb = modelBatchesByWave.get(wave.id) ?? [];
@@ -226,17 +229,26 @@ export async function POST(req: NextRequest) {
           await cloneBatchInto(wave.id, a.quantity);
         }
       } else {
-        // Shrink: reduce largest-first, never below each batch's committed.
+        // Shrink: reduce largest-first, never below each batch's DELIVERED
+        // count. When a batch drops below its VINs / listed cars, cap those
+        // to the new size — the cars that moved out reset their VIN /
+        // listing in the destination window (vins/listed ≤ requested).
         let need = -delta;
         for (const b of modelBatches) {
           if (need <= 0) break;
-          const committed = Math.max(b.deliveredQuantity ?? 0, b.vinsReceivedQuantity ?? 0, listedByBatch.get(b.id) ?? 0);
-          const room = b.requestedQuantity - committed;
+          const floor = b.deliveredQuantity ?? 0;
+          const room = b.requestedQuantity - floor;
           const take = Math.min(Math.max(0, room), need);
           if (take > 0) {
-            await tx.update(batches)
-              .set({ requestedQuantity: b.requestedQuantity - take, updatedAt: nowIso })
-              .where(eq(batches.id, b.id));
+            const newReq = b.requestedQuantity - take;
+            const upd: { requestedQuantity: number; updatedAt: string; vinsReceivedQuantity?: number } =
+              { requestedQuantity: newReq, updatedAt: nowIso };
+            if ((b.vinsReceivedQuantity ?? 0) > newReq) upd.vinsReceivedQuantity = newReq;
+            await tx.update(batches).set(upd).where(eq(batches.id, b.id));
+            // listed_quantity is off-schema → cap via raw SQL, tolerant.
+            if ((listedByBatch.get(b.id) ?? 0) > newReq) {
+              try { await tx.run(sql`UPDATE batches SET listed_quantity = ${newReq} WHERE id = ${b.id}`); } catch { /* un-migrated */ }
+            }
             need -= take;
           }
         }
