@@ -28,6 +28,10 @@ import { requireAuth } from "@/lib/api-auth";
 import { computeExpectedDate } from "@/lib/expected-date";
 import { stampSlaStartForScopes } from "@/lib/sla";
 import { snapshotPoBaseline, snapshotPoBaselineModel } from "@/lib/po-baseline";
+import {
+  resolveRequestedAt, computeFeasibility, buildParentDepSet, groupItemsIntoBatches,
+  type IntakeBatchGroup,
+} from "@/lib/intake-planning";
 
 export const runtime = "nodejs";
 // A large multi-item PO can expand to 100+ delivery batches; give the
@@ -216,17 +220,12 @@ export async function POST(req: NextRequest) {
   // even after the picked parent was marked done — the cascade had
   // no row to read for the absent parent.)
   const pickedActionIds = body.actions.map((a) => a.actionTypeId);
-  const pickedSet = new Set(pickedActionIds);
   const depsRows = pickedActionIds.length
     ? await db.select().from(actionDependencies)
         .where(inArray(actionDependencies.actionTypeId, pickedActionIds))
     : [];
-  const hasParentDep = new Set<number>(); // actionTypeId → has any parent dep on THIS batch
-  for (const d of depsRows) {
-    if (pickedSet.has(d.dependsOnActionTypeId)) {
-      hasParentDep.add(d.actionTypeId);
-    }
-  }
+  // actionTypeId → has a parent dep whose parent is ALSO picked at intake.
+  const hasParentDep = buildParentDepSet(pickedActionIds, depsRows);
 
   // Fetch full action_type metadata so we can both validate and use the
   // offset/anchor when computing each batch_action's expected date.
@@ -308,19 +307,7 @@ export async function POST(req: NextRequest) {
   // not in the future. Everything downstream that anchors on
   // "submission" (action expectedDate offsets, the Plan-vs-Reality
   // timeline) reads this single variable.
-  const requestedAt = (() => {
-    const raw = body.submittedAt?.trim() || "";
-    if (!raw) return today;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-      // Bad format — silently fall through to today rather than 500.
-      return today;
-    }
-    if (raw > today) {
-      // Future-dated submission makes no sense.
-      return today;
-    }
-    return raw;
-  })();
+  const requestedAt = resolveRequestedAt(body.submittedAt, today);
 
   // ── Feasibility flag — Ops behind dealer promise? ──────────────
   // The form locks PO Availability (the dealer date) and auto-floors
@@ -328,9 +315,7 @@ export async function POST(req: NextRequest) {
   // submit time is: did Ops's commitment land later than the dealer's
   // promised date? If so, mark the batch at_risk so dashboards flag it.
   // No hard server block — the form has already mediated the floor.
-  const feasibilityStatus: "feasible" | "at_risk" = body.items.some((it) =>
-    it.splits.some((s) => (s.opsExpectedDate || s.date) > s.date),
-  ) ? "at_risk" : "feasible";
+  const feasibilityStatus = computeFeasibility(body.items);
 
   // ── Group items × splits into batches by the agreed key ──────────
   // Decided in design chat (Q1-Q8): one batch per
@@ -341,49 +326,7 @@ export async function POST(req: NextRequest) {
   //
   // Commercial-term mismatches block the merge — same model + date but
   // different unit price = two separate batches.
-  type Group = {
-    /** Stable representative for batch-level fields. */
-    item: typeof body.items[number];
-    /** Availability date for this group (shared across all legs). */
-    availabilityDate: string;
-    /** Legs: per-city qty. May contain ONE city (no merge happened). */
-    legs: { city: string; quantity: number; opsExpectedDate: string }[];
-  };
-  const groupsByKey = new Map<string, Group>();
-  for (const item of body.items) {
-    for (const split of item.splits) {
-      // Key fields per design Q3: model + year + date + all commercial terms.
-      // po_number is already implicit (one PO per submit).
-      const key = JSON.stringify({
-        m:  item.model,
-        y:  item.year,
-        d:  split.date,
-        up: item.unitPriceSar ?? null,
-        tx: item.taxPct ?? null,
-        bb: item.buyBackRate ?? null,
-        cl: item.contractLengthMonths ?? null,
-      });
-      const existing = groupsByKey.get(key);
-      if (existing) {
-        existing.legs.push({
-          city: split.city,
-          quantity: split.quantity,
-          opsExpectedDate: split.opsExpectedDate,
-        });
-      } else {
-        groupsByKey.set(key, {
-          item,
-          availabilityDate: split.date,
-          legs: [{
-            city: split.city,
-            quantity: split.quantity,
-            opsExpectedDate: split.opsExpectedDate,
-          }],
-        });
-      }
-    }
-  }
-  const groups = Array.from(groupsByKey.values());
+  const groups: IntakeBatchGroup[] = groupItemsIntoBatches(body.items);
   const groupTotal = groups.length;
 
   type CreatedBatch = {
