@@ -176,8 +176,14 @@ export async function checkBatchDeliveryGate(
   // ensure-listed-quantity-column migration hasn't run).
   try {
     const lrows = await tx.all(sql`SELECT listed_quantity AS lq FROM batches WHERE id = ${batchId}`);
-    const listedQty = Number((lrows as { lq?: number }[])[0]?.lq ?? 0);
+    const rawLq = (lrows as { lq?: number | null }[])[0]?.lq;
     const requested = (batch as { requestedQuantity?: number }).requestedQuantity ?? 0;
+    // app_listed_at is verified set above (4). The partial counter is only
+    // authoritative when it was explicitly recorded (> 0): a whole-batch
+    // (binary) listing — or a listing inherited by a redistributed clone —
+    // leaves listed_quantity at 0/null while the batch IS wholly listed.
+    // Treat that as fully listed; only a positive partial count can block.
+    const listedQty = rawLq != null && Number(rawLq) > 0 ? Number(rawLq) : requested;
     if (listedQty < requested) {
       const pending = requested - listedQty;
       return {

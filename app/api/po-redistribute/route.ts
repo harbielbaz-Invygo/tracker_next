@@ -187,8 +187,17 @@ export async function POST(req: NextRequest) {
         currentProjectedDeliveryDate: date,
         closedAt:                     null,
         closureReason:                null,
+        // Cars moved to a new window start UN-listed — don't let the
+        // spread inherit the template's app_listed_at (a listed batch is
+        // listed for ITS window, not the destination). listed_quantity is
+        // off-schema so it already defaults to 0; reset the binary flag to
+        // match, then the destination window is re-listed on its own.
+        appListedAt:                  null,
         notes:                        `Redistributed (${model} ${year}) — ${reason}`,
       }).returning({ id: batches.id });
+      // Belt-and-braces: force listed_quantity to 0 on the clone (off-schema
+      // → raw, tolerant) so a fresh window never appears partially listed.
+      try { await tx.run(sql`UPDATE batches SET listed_quantity = 0 WHERE id = ${nb.id}`); } catch { /* un-migrated */ }
       for (const at of waveActionTypes) await insertAction("batch", nb.id, at.id, at.defaultDepartmentId ?? null);
       if (deliveryType) await insertAction("batch", nb.id, deliveryType.id, deliveryType.defaultDepartmentId ?? null);
     };
