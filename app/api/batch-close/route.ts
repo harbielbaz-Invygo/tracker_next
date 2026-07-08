@@ -102,20 +102,14 @@ export async function POST(req: NextRequest) {
     if (!gate.ok) {
       return apiError(`Cannot mark as delivered: ${gate.reason}`, 409);
     }
-    // Window cap: a recorded delivery can't post-date the agreed window
-    // (ops-projected date, falling back to the dealer-promised date).
-    const [win] = await db
-      .select({
-        projected: batches.currentProjectedDeliveryDate,
-        promised:  batches.dealerPromisedDeliveryDate,
-      })
-      .from(batches)
-      .where(eq(batches.id, body.batchId))
-      .limit(1);
-    const windowDate = (win?.projected ?? win?.promised ?? "").slice(0, 10);
-    if (windowDate && closedAt > windowDate) {
+    // Date cap: a recorded delivery can't be in the future. It MAY
+    // post-date the delivery window — a late (overdue) delivery
+    // legitimately lands after the promised window; the lateness is
+    // measured downstream (closedAt vs promised date), not blocked here.
+    const todayIso = new Date().toISOString().slice(0, 10);
+    if (closedAt > todayIso) {
       return apiError(
-        `Delivery date ${closedAt} can't be after the delivery window (${windowDate}).`,
+        `Delivery date ${closedAt} can't be in the future.`,
         400,
       );
     }
