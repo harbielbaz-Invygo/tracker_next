@@ -118,6 +118,21 @@ export async function POST(req: NextRequest) {
   const template = allBatchRows.find((b) => b.model === model && b.year === year) ?? allBatchRows[0];
   if (!template) return apiError("PO has no batches to redistribute.", 409);
 
+  // batch_code is UNIQUE. A cloned batch derives its code from the
+  // template + window date, but that derivation is NOT collision-proof:
+  // an earlier redistribution to the same window/model can already hold
+  // that exact code, and re-running would violate the constraint (500).
+  // Track every code in play (existing PO batches + ones we mint this
+  // transaction) and disambiguate with a numeric suffix when needed.
+  const usedBatchCodes = new Set<string>(allBatchRows.map((b) => b.batchCode));
+  const uniqueBatchCode = (base: string): string => {
+    if (!usedBatchCodes.has(base)) { usedBatchCodes.add(base); return base; }
+    for (let n = 2; ; n++) {
+      const candidate = `${base}-${n}`;
+      if (!usedBatchCodes.has(candidate)) { usedBatchCodes.add(candidate); return candidate; }
+    }
+  };
+
   // "before" snapshot (this model only) for the audit log.
   const before = waveRows
     .map((w) => ({
@@ -162,7 +177,7 @@ export async function POST(req: NextRequest) {
       const date = waveRows.find((w) => w.id === waveId)?.availabilityDate ?? nowIso.slice(0, 10);
       const [nb] = await tx.insert(batches).values({
         ...clone,
-        batchCode:                    `${template.batchCode}-RW${date.replace(/-/g, "")}`,
+        batchCode:                    uniqueBatchCode(`${template.batchCode}-RW${date.replace(/-/g, "")}`),
         waveId,
         requestedQuantity:            qty,
         allocatedQuantity:            0,

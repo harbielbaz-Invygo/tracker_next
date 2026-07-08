@@ -6334,19 +6334,17 @@ function DeliverForm({
   const multiLeg = b.legs.length >= 2;
   const batchCap = b.vinsReceivedQuantity ?? 0;
 
-  // Delivery window cap — the chosen delivery date/time can't be later
-  // than this window's date (ops-projected date, falling back to the
-  // dealer-promised date). A late delivery shifts the window first, so
-  // the window always reflects the agreed landing date.
+  // Delivery date cap — a recorded delivery can be any real past date up
+  // to today; it just can't be in the future. It MAY post-date the
+  // delivery window: a late (overdue) delivery legitimately lands after
+  // the promised window, and that lateness is measured downstream
+  // (closedAt vs promised date), never suppressed at data entry.
   const windowDate = (b.currentProjectedDeliveryDate ?? b.promisedDate)?.slice(0, 10) || todayIso();
-  // datetime-local seed: now, clamped so it never opens past the window.
-  const seedDeliveredAt = (() => {
-    const now = new Date();
-    const local = toLocalDatetimeValue(now);
-    const windowEnd = `${windowDate}T23:59`;
-    return local > windowEnd ? `${windowDate}T12:00` : local;
-  })();
+  const maxDeliveredAt = `${todayIso()}T23:59`;
+  // datetime-local seed: now (always ≤ today).
+  const seedDeliveredAt = toLocalDatetimeValue(new Date());
   const [deliveredAt, setDeliveredAt] = useState<string>(seedDeliveredAt);
+  const isLate = deliveredAt.slice(0, 10) > windowDate;
 
   // Per-leg state: default each city to its own VINs received (the
   // "deliver everything we have VINs for" case).
@@ -6381,8 +6379,8 @@ function DeliverForm({
       setError("Choose a delivery date & time.");
       return;
     }
-    if (deliveredAt.slice(0, 10) > windowDate) {
-      setError(`Delivery date can't be after the delivery window (${windowDate}).`);
+    if (deliveredAt.slice(0, 10) > todayIso()) {
+      setError("Delivery date can't be in the future.");
       return;
     }
     const parsedDeliveredAt = new Date(deliveredAt);
@@ -6494,19 +6492,21 @@ function DeliverForm({
         </div>
       )}
       {/* Delivery date & time — when the cars actually landed. Capped at
-          the delivery window date so a recorded delivery can't post-date
-          the agreed window. */}
+          today (no future deliveries); may post-date the window, which
+          simply marks the delivery late. */}
       <label className="flex flex-wrap items-baseline gap-1.5 text-[0.65rem] text-ink-600 pt-1 border-t border-ink-200">
         Delivered at
         <input
           type="datetime-local"
           value={deliveredAt}
-          max={`${windowDate}T23:59`}
+          max={maxDeliveredAt}
           onChange={(e) => { setDeliveredAt(e.target.value); setError(null); }}
           className="text-xs px-2 py-1 border border-ink-300 rounded tabular-nums"
         />
-        <span className="text-[0.6rem] text-ink-400">
-          no later than the window ({windowDate})
+        <span className={`text-[0.6rem] ${isLate ? "text-flame-dark" : "text-ink-400"}`}>
+          {isLate
+            ? `⚠ after the window (${windowDate}) — recorded as a late delivery`
+            : `on or before today · window was ${windowDate}`}
         </span>
       </label>
       {/* Remainder toggle — only relevant when the input is partial.
